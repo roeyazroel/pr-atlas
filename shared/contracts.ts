@@ -150,6 +150,16 @@ export interface AgentAnalysisResult {
   logs: string[];
   model?: string;
   errors?: string[];
+  /** Validated, provider-neutral intermediate result for a batched map task. */
+  mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
+}
+
+export interface ProviderAnalysisTask {
+  kind: "map" | "reduce";
+  id: string;
+  total: number;
+  assignedPaths?: string[];
+  assignedUnits?: Array<{ path: string; segment: number }>;
 }
 
 /** Provider-neutral process boundary used by the main-process orchestration. */
@@ -165,6 +175,8 @@ export interface AgentAdapter {
     inputDirectory: string,
     signal: AbortSignal | undefined,
     progress: (stage: AnalysisStage, message: string) => void,
+    model?: string,
+    task?: ProviderAnalysisTask,
   ): Promise<AgentAnalysisResult>;
 }
 

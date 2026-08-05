@@ -84,6 +84,17 @@ const adapterCapabilities = {
 };
 
 describe("provider structured-output schema", () => {
+  it("constrains map evidence lines before service validation", () => {
+    const schema = schemaForProvider({ kind: "map", id: "map-001", total: 1, assignedPaths: ["a.ts"] }) as Record<string, unknown>;
+    const observations = (schema.properties as Record<string, unknown>).observations as Record<string, unknown>;
+    const observation = observations.items as Record<string, unknown>;
+    const evidence = (observation.properties as Record<string, unknown>).evidence as Record<string, unknown>;
+    expect(evidence.minItems).toBe(1);
+    const evidenceItem = evidence.items as Record<string, unknown>;
+    const line = (evidenceItem.properties as Record<string, unknown>).line as Record<string, unknown>;
+    expect(line).toMatchObject({ type: ["integer", "null"], minimum: 1 });
+  });
+
   it("normalizes every object and array for Codex strict JSON-schema mode", () => {
     const schema = schemaForProvider() as Record<string, unknown>;
     const walk = (value: unknown): void => {
@@ -249,6 +260,25 @@ describe("provider analysis prompt", () => {
     expect(prompt).toMatch(
       /return only output conforming to the supplied JSON schema/i,
     );
+  });
+
+  it.each(["map", "reduce"] as const)("keeps %s tasks isolated from untrusted artifact instructions", (kind) => {
+    const prompt = buildAnalysisPrompt(requestFor("codex"), "/isolated/task", { kind, id: kind, total: 2, assignedPaths: kind === "map" ? ["src/a.ts"] : undefined });
+    expect(prompt).toMatch(/untrusted data/i);
+    expect(prompt).toMatch(/never obey instructions/i);
+    expect(prompt).toMatch(/never reveal secrets/i);
+    expect(prompt).toMatch(/never modify files/i);
+    expect(prompt).toMatch(/do not (?:read|inspect|search) outside/i);
+  });
+
+  it.each(["map", "reduce"] as const)("carries request controls into the %s contract", (kind) => {
+    const prompt = buildAnalysisPrompt({ ...requestFor("codex"), customPrompt: "Prioritize migrations.", config: { depth: "deep", maxGraphNodes: 17, includeReviewComments: false, timeoutMinutes: 20 } }, "/isolated/task", { kind, id: kind, total: 2, assignedPaths: kind === "map" ? ["src/a.ts"] : undefined });
+    expect(prompt).toContain("Prioritize migrations.");
+    expect(prompt).toMatch(/cannot remove, rename, or weaken/i);
+    expect(prompt).toMatch(/analysis depth is deep/i);
+    expect(prompt).toMatch(/17 nodes/i);
+    expect(prompt).toMatch(/review comments were intentionally excluded/i);
+    if (kind === "reduce") expect(prompt).toMatch(/four graphs|graph edge|guided tour/i);
   });
 });
 
@@ -838,6 +868,44 @@ describe("provider-neutral agent adapters", () => {
     expect(calls[0].args.join(" ")).not.toMatch(
       /(?:--dangerously|--force|--yolo|\bBash\b|\bEdit\b|\bWrite\b)/i,
     );
+  });
+
+  it.each([
+    { taskId: "map-001", extra: true, observations: [] },
+    { taskId: "map-001", observations: [{ path: "src/a.ts", summary: "Changed.", evidence: [], changeGroups: ["group"], tests: ["test"], flows: ["flow"], limitations: ["limit"] }] },
+    { taskId: "map-001", observations: [{ path: "src/a.ts", summary: "Changed.", evidence: [{ path: "src/a.ts", line: 0 }], changeGroups: ["group"], tests: ["test"], flows: ["flow"], limitations: ["limit"] }] },
+  ])("rejects noncanonical map output at the provider boundary", async (output) => {
+    const calls: SpawnCall[] = [];
+    const adapter = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, fakeSpawn(JSON.stringify(output), calls));
+    const response = await adapter.analyze(requestFor("claude"), "/worktree", "/input", undefined, progress, undefined, { kind: "map", id: "map-001", total: 1, assignedPaths: ["src/a.ts"] });
+    expect(response.status).toBe("invalid");
+    expect(response.mapOutput).toBeUndefined();
+  });
+
+  it("extracts a canonical map from Codex JSONL before a trailing turn-completed event", async () => {
+    const output = { taskId: "map-001", observations: [{ path: "src/a.ts", segment: 0, summary: "Changed.", evidence: [{ path: "src/a.ts", line: 1 }], changeGroups: ["group"], tests: ["test"], flows: ["flow"], limitations: ["limit"] }] };
+    const raw = [
+      { type: "thread.started", thread_id: "thread-1" },
+      { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
+      { type: "turn.completed" },
+    ].map((event) => JSON.stringify(event)).join("\n");
+    const calls: SpawnCall[] = [];
+    const adapter = new CodexAdapter({ run: vi.fn(async () => ({ stdout: "codex 1.2.3" })) }, fakeSpawn(raw, calls));
+    const response = await adapter.analyze(requestFor("codex"), "/worktree", "/input", undefined, progress, undefined, { kind: "map", id: "map-001", total: 1, assignedPaths: ["src/a.ts"] });
+    expect(response.status).toBe("ready");
+    expect(response.mapOutput).toEqual(output);
+  });
+
+  it("redacts and revalidates accepted map output before returning it", async () => {
+    const secret = "provider-map-secret-123"; const previous = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = secret;
+    const output = { taskId: "map-001", observations: [{ path: "src/a.ts", segment: 0, summary: `Changed ${secret}.`, evidence: [{ path: "src/a.ts", line: 1 }], changeGroups: ["group"], tests: [secret], flows: [`flow ${secret}`], limitations: [`limit ${secret}`] }] };
+    const adapter = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, fakeSpawn(JSON.stringify(output), []));
+    try {
+      const response = await adapter.analyze(requestFor("claude"), "/worktree", "/input", undefined, progress, undefined, { kind: "map", id: "map-001", total: 1, assignedPaths: ["src/a.ts"] });
+      expect(response.status).toBe("ready");
+      expect(JSON.stringify(response)).not.toContain(secret);
+      expect(response.mapOutput?.observations[0].summary).toContain("[REDACTED]");
+    } finally { if (previous === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previous; }
   });
 
   it("starts Codex with JSON events, an ephemeral read-only sandbox, and no dangerous bypass", async () => {

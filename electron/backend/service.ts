@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -16,6 +16,7 @@ import {
   type PullRequestDTO,
   type ReviewProgress,
   type RunRetentionSettings,
+  type AgentAnalysisResult,
 } from "../../shared/contracts.js";
 import { GithubClient, commandRunner, type CommandRunner } from "./github.js";
 import { AnalysisStore } from "./store.js";
@@ -24,6 +25,7 @@ import { CodexAdapter } from "./codex.js";
 import { CursorAdapter } from "./cursor.js";
 import {
   redactProviderOutput,
+  redactProviderValue,
   SKILL_CONTRACT_VERSION,
   SKILL_REFERENCE_URL,
 } from "./agent.js";
@@ -35,6 +37,7 @@ import {
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
+import { buildBatchPlan, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -46,6 +49,30 @@ function repoPath(root: string, repository: string): string {
   if (!inside(root, result))
     throw new Error("Repository path escaped storage.");
   return result;
+}
+function flattenFilePages(value: unknown): Array<{ filename: string; patch?: string; additions?: number; deletions?: number }> {
+  if (Array.isArray(value)) return value.flatMap(flattenFilePages);
+  return value && typeof value === "object" && typeof (value as { filename?: unknown }).filename === "string"
+    ? [value as { filename: string; patch?: string; additions?: number; deletions?: number }]
+    : [];
+}
+async function readChangedDiffs(inputDirectory: string): Promise<ChangedDiff[]> {
+  const [raw, diff] = await Promise.all([readFile(resolve(inputDirectory, "files.json"), "utf8"), readFile(resolve(inputDirectory, "diff.patch"), "utf8")]);
+  const sections = parseGitDiffSections(diff);
+  const unique = new Map<string, ChangedDiff>();
+  for (const file of flattenFilePages(JSON.parse(raw))) if (!unique.has(file.filename)) {
+    const evidence = sections.get(file.filename);
+    if (typeof evidence !== "string" || !evidence.trim()) throw new Error(`Missing complete diff evidence for ${file.filename}.`);
+    unique.set(file.filename, { path: file.filename, diff: evidence, additions: typeof file.additions === "number" ? file.additions : 0, deletions: typeof file.deletions === "number" ? file.deletions : 0 });
+  }
+  return [...unique.values()];
+}
+async function writeBatchJson(directory: string, name: string, value: unknown): Promise<void> {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unsafe batch artifact name.");
+  const target = resolve(directory, "batches", name);
+  if (!inside(directory, target)) throw new Error("Unsafe batch artifact path.");
+  await mkdir(resolve(target, ".."), { recursive: true });
+  await writeFile(target, JSON.stringify(value, null, 2), "utf8");
 }
 export class AnalysisService {
   private readonly github: GithubClient;
@@ -189,13 +216,7 @@ export class AnalysisService {
         "inspecting",
         "Inspecting collected source context and deterministic evidence.",
       );
-      const response = await adapter.analyze(
-        request,
-        worktree,
-        inputDirectory,
-        controller.signal,
-        progress,
-      );
+      const response = await this.runProviderAnalysis(adapter, request, worktree, inputDirectory, directory, controller.signal, progress);
       if (response.document) {
         try {
           response.document = await normalizeDocumentEvidencePaths(
@@ -470,6 +491,79 @@ export class AnalysisService {
   }
   private activeWorktreePaths(): ReadonlySet<string> {
     return new Set(this.activeWorktrees.keys());
+  }
+  private async runProviderAnalysis(
+    adapter: AgentAdapter,
+    request: AnalysisRequest,
+    worktree: string,
+    inputDirectory: string,
+    directory: string,
+    signal: AbortSignal,
+    progress: (stage: AnalysisProgressEvent["stage"], message: string) => void,
+  ): Promise<AgentAnalysisResult> {
+    const files = await readChangedDiffs(inputDirectory);
+    const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
+    if (!shouldBatchAnalysis({ files: files.length, changes }))
+      return adapter.analyze(request, worktree, inputDirectory, signal, progress);
+    const plan = buildBatchPlan(files);
+    if (!plan.coverage.complete)
+      return { status: "invalid", rawOutput: "", logs: [], errors: ["Batch planner did not cover every changed file."] };
+    const planManifest = {
+      coverage: plan.coverage,
+      sourceFiles: plan.sourceFiles,
+      chunks: plan.chunks.map((task) => ({ id: task.id, bytes: task.bytes, subsystems: task.subsystems, units: task.files.map(({ path, segment, bytes }) => ({ path, segment, bytes })) })),
+    };
+    await writeBatchJson(directory, "plan.json", planManifest);
+    const execution = new AbortController(); let timedOut = false;
+    const abort = () => execution.abort(); signal.addEventListener("abort", abort, { once: true });
+    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
+    try {
+    progress("generating", `Generating ${plan.chunks.length} map batches (maximum ${MAX_BATCH_CONCURRENCY} concurrent).`);
+    const outputs: NonNullable<AgentAnalysisResult["mapOutput"]>[] = [];
+    const responses: AgentAnalysisResult[] = [];
+    let cursor = 0; let stop = false;
+    const worker = async () => {
+      while (!execution.signal.aborted && !stop) {
+        const task = plan.chunks[cursor++];
+        if (!task) return;
+        const scope = resolve(directory, "batches", task.id);
+        await mkdir(scope, { recursive: true });
+        await writeFile(resolve(scope, "files.json"), JSON.stringify(task.files), "utf8");
+        await writeFile(resolve(scope, "diff.patch"), task.files.map((file) => file.diff).join("\n"), "utf8");
+        const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
+        const validated = response.status === "ready" && response.mapOutput
+          ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)
+          : undefined;
+        const accepted = validated?.valid ? validated.output : undefined;
+        responses.push(accepted ? response : response.status === "ready" ? { ...response, status: "invalid", errors: validated?.errors ?? ["Map output was missing."] } : response);
+        if (!accepted) { stop = true; execution.abort(); return; }
+        outputs.push(accepted);
+        await writeBatchJson(directory, `${task.id}.output.json`, accepted);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MAX_BATCH_CONCURRENCY, plan.chunks.length) }, worker));
+    const failed = responses.find((response) => response.status !== "ready" || !response.mapOutput);
+    if (signal.aborted || failed || outputs.length !== plan.chunks.length)
+      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
+    const ordered = plan.chunks.map((task) => outputs.find((output) => output.taskId === task.id)!);
+    const expectedUnits = plan.chunks.flatMap((task) => task.files.map((file) => `${file.path}:${file.segment}`)).sort();
+    const actualUnits = ordered.flatMap((output) => output.observations.map((item) => `${item.path}:${item.segment}`)).sort();
+    if (expectedUnits.length !== actualUnits.length || expectedUnits.some((unit, index) => unit !== actualUnits[index]))
+      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: ["Validated maps did not cover planned evidence units exactly once."] };
+    await writeBatchJson(directory, "map-results.json", ordered);
+    const reduceScope = resolve(directory, "batches", "reduce");
+    await mkdir(reduceScope, { recursive: true });
+    await writeFile(resolve(reduceScope, "map-results.json"), JSON.stringify(ordered), "utf8");
+    await writeFile(resolve(reduceScope, "plan.json"), JSON.stringify(planManifest), "utf8");
+    await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
+    await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
+    progress("validating", `Validating ${ordered.length}/${plan.chunks.length} map batches and generating the reducer.`);
+    const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length });
+    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };
+    return timedOut
+      ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }
+      : combined;
+    } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); }
   }
   private async collectInputs(
     request: AnalysisRequest,
