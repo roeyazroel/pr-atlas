@@ -1339,7 +1339,7 @@ The top-level walkthrough document should resemble:
 
 ```json
 {
-  "schemaVersion": "1.0.0",
+  "schemaVersion": "1.1.0",
   "run": {
     "id": "run_123",
     "createdAt": "2026-08-04T19:00:00Z",
@@ -1401,6 +1401,20 @@ The top-level walkthrough document should resemble:
 - Missing required sections rejected.
 - Invalid evidence references surfaced clearly.
 - Original raw agent output preserved for diagnostics.
+
+## 26.2 Walkthrough-step requirements
+
+The current schema must make review order executable rather than using the
+walkthrough only to sort change groups. Each step includes:
+
+- A reason for its position in the review order.
+- A step-specific narrative summary.
+- Dependencies on earlier steps.
+- Evidence, flow-node, test, and review-insight references.
+- Explicit limitations or uncertainty, including an empty list when none is known.
+
+All walkthrough documents must use schema 1.1.0. Older schema versions are
+rejected for both new analysis and persisted-run loading.
 
 ---
 
@@ -1806,6 +1820,12 @@ A benchmark set of representative pull requests should be manually evaluated for
 - Outdated-comment handling.
 - Hallucination rate.
 
+The repository must keep a deterministic semantic evaluation corpus with
+machine-readable expectations for these dimensions. The corpus runs without
+provider credentials in pull-request CI and fails when a case or aggregate
+quality score falls below its declared gate. Live provider comparisons may be
+run separately, but must use the same rubric and case identifiers.
+
 ---
 
 # 35. MVP Acceptance Criteria
@@ -1848,6 +1868,14 @@ A benchmark set of representative pull requests should be manually evaluated for
 - The application displays system, data-flow, code-dependency, and user-action views.
 - The application maps tests to behaviors or change groups.
 - Every important generated section includes evidence links where available.
+- The Overview displays behavioral changes, architectural impact, limitations,
+  review activity, test coverage, and the actual recommended review order.
+- Walkthrough steps display their ordering reason, dependencies, linked flows,
+  tests, insights, evidence, and limitations.
+- Review progress, follow-up state, skipped state, and notes persist per analysis
+  run and remain isolated between historical runs.
+- Evidence opens in a read-only in-application source and diff view before the
+  optional editor or GitHub handoff.
 
 ## Review comments and insights
 
@@ -1866,6 +1894,11 @@ A benchmark set of representative pull requests should be manually evaluated for
 - A head-SHA change marks prior analysis as outdated.
 - The user can update the walkthrough for the new head SHA.
 - The application never silently labels stale analysis as current.
+- Failed, invalid, and cancelled runs expose sanitized diagnostics, last
+  progress, logs, and same-provider or alternate-provider retry actions.
+- The user can prefer, regenerate from, and safely delete historical runs.
+- Analysis scope, review-comment inclusion, graph budget, timeout, analysis
+  retention, and worktree retention are configurable and persisted locally.
 
 ---
 

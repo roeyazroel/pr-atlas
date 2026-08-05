@@ -145,4 +145,6 @@ vite.config.ts.timestamp-*
 
 # Electron output
 dist-electron/
+/output/playwright/
+/.playwright-cli/
 .DS_Store

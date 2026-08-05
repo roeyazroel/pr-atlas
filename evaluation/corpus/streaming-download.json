@@ -1,0 +1,44 @@
+{
+  "id": "streaming-download",
+  "title": "Streaming download with cancellation",
+  "threshold": 0.9,
+  "corpusThreshold": 0.9,
+  "expected": {
+    "intentKeywords": ["stream", "download", "memory"],
+    "changeGroups": [
+      { "id": "stream-response", "titleKeywords": ["stream", "response"], "contentKeywords": ["backpressure", "buffer"] },
+      { "id": "cancel-cleanup", "titleKeywords": ["cancel", "cleanup"], "contentKeywords": ["abort", "handle"] }
+    ],
+    "reviewOrder": ["stream-response", "cancel-cleanup"],
+    "evidencePaths": ["server/archive/stream.ts", "server/archive/stream.test.ts"],
+    "limitationKeywords": ["large", "fixture"],
+    "flowEdges": [{ "graph": "data-flow", "source": "archive", "target": "response", "labelKeywords": ["pipes"] }],
+    "tests": [{ "id": "test-cancel", "changeGroupId": "cancel-cleanup", "status": "covered", "behaviorKeywords": ["abort", "handle"] }],
+    "reviewClusters": [{ "threadIds": ["thread-memory"], "status": "resolved" }],
+    "threadStates": { "thread-memory": "resolved" }
+  },
+  "actual": {
+    "summary": {
+      "intent": "Stream archive downloads without retaining the complete payload in memory.",
+      "behavioralChanges": ["Responses now respect downstream backpressure."],
+      "architecturalImpact": ["The archive service exposes a stream instead of a buffer."],
+      "limitations": ["The large-file fixture is synthetic rather than production traffic."]
+    },
+    "changeGroups": [
+      { "id": "stream-response", "title": "Stream response", "summary": "Replaces the eager buffer with a backpressure-aware stream.", "evidenceIds": ["ev-stream"] },
+      { "id": "cancel-cleanup", "title": "Cancel cleanup", "summary": "Abort closes the file handle and response stream.", "evidenceIds": ["ev-test"] }
+    ],
+    "walkthrough": [
+      { "id": "step-1", "changeGroupId": "stream-response", "evidenceIds": ["ev-stream"] },
+      { "id": "step-2", "changeGroupId": "cancel-cleanup", "evidenceIds": ["ev-test"] }
+    ],
+    "graphs": { "dataFlow": { "id": "data-flow", "edges": [{ "source": "archive", "target": "response", "label": "pipes chunks" }] } },
+    "tests": [{ "id": "test-cancel", "title": "Cancel download", "behavior": "Abort closes the file handle.", "status": "covered", "changeGroupIds": ["cancel-cleanup"], "evidenceIds": ["ev-test"] }],
+    "reviewThreads": [{ "id": "thread-memory", "status": "resolved", "evidenceIds": ["ev-stream"] }],
+    "reviewInsights": [{ "id": "insight-memory", "status": "resolved", "reviewThreadIds": ["thread-memory"], "evidenceIds": ["ev-stream"] }],
+    "evidence": [
+      { "id": "ev-stream", "path": "server/archive/stream.ts" },
+      { "id": "ev-test", "path": "server/archive/stream.test.ts" }
+    ]
+  }
+}

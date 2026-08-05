@@ -86,7 +86,7 @@ function graph(id: Graph['id'], title: string, nodeId: string): Graph {
 }
 
 const document: WalkthroughDocument = {
-  schemaVersion: '1.0.0',
+  schemaVersion: '1.1.0',
   run: {
     id: 'run-42',
     createdAt: '2026-08-04T08:35:00.000Z',
@@ -108,7 +108,7 @@ const document: WalkthroughDocument = {
     limitations: [],
   },
   changeGroups: [{ id: 'group-history', title: 'History persistence', summary: 'Persist local walkthrough history.', motivation: 'Keep prior runs available.', previousBehavior: 'History was discarded.', newBehavior: 'History is stored locally.', attention: 'high', evidenceIds: ['evidence-store'] }],
-  walkthrough: [{ id: 'walkthrough-history', title: 'Persist history', changeGroupId: 'group-history', evidenceIds: ['evidence-store'] }],
+  walkthrough: [{ id: 'walkthrough-history', title: 'Persist history', reason: 'Persistent runs must remain reviewable.', summary: 'Inspect the stored run and its evidence.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-history', flowNodeIds: ['data-node'], evidenceIds: ['evidence-store'], testIds: ['test-history'], reviewInsightIds: [] }],
   graphs: {
     systemOverview: graph('system-overview', 'System overview node', 'system-node'),
     dataFlow: graph('data-flow', 'Data flow node', 'data-node'),
@@ -135,7 +135,7 @@ const runSummary: AnalysisRunSummary = {
   status: 'ready',
   createdAt: '2026-08-04T08:35:00.000Z',
   completedAt: '2026-08-04T08:37:00.000Z',
-  schemaVersion: '1.0.0',
+  schemaVersion: '1.1.0',
   model: 'claude-test',
   artifactDirectory: '/tmp/pr-atlas/run-42',
 }
