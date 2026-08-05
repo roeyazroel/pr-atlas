@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/roeyazroel/pr-atlas/compare/v0.2.1...v0.2.2) (2026-08-05)
+
+
+### Bug Fixes
+
+* verify downloaded release artifacts ([8bddf38](https://github.com/roeyazroel/pr-atlas/commit/8bddf389b7cb759da174a09f71bf83075f8bfa4a))
+
 ## [0.2.1](https://github.com/roeyazroel/pr-atlas/compare/v0.2.0...v0.2.1) (2026-08-05)
 
 
