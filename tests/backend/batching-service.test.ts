@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -25,6 +26,17 @@ async function setup(files: number, bytes: number, analyze: AgentAdapter["analyz
   return { root, service: new AnalysisService(root, runner(files, bytes), emit as never, undefined, [adapter]) };
 }
 async function mkdirTemp() { const root = join(tmpdir(), `pr-atlas-batch-${crypto.randomUUID()}`); await mkdir(root, { recursive: true }); return root; }
+async function runJsonValidator(script: string, candidate: unknown): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = ""; let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.stdin.end(JSON.stringify(candidate));
+  });
+}
 function completeMap(task: ProviderAnalysisTask): NonNullable<AgentAnalysisResult["mapOutput"]> { return { taskId: task.id, observations: (task.assignedUnits ?? task.assignedPaths?.map((path) => ({ path, segment: 0 })) ?? []).map(({ path, segment }) => ({ path, segment, summary: `Summarizes ${path}.`, evidence: [{ path, line: 1 }], changeGroups: ["batched-change"], tests: [], flows: ["changed input to behavior"], limitations: [] })) }; }
 function reducerDocument() {
   const graph = (id: string) => ({ id, description: `Review ${id}.`, nodes: [{ id: `${id}-node`, label: "Relevant node", explanation: "A relevant node.", changed: id !== "system-overview", changeGroupIds: id === "system-overview" ? [] : ["group-1"], testIds: [], reviewThreadIds: [], reviewInsightIds: [], evidenceIds: id === "system-overview" ? [] : ["evidence-1"] }], edges: id === "system-overview" ? [] : [{ id: `${id}-edge`, source: `${id}-node`, target: `${id}-node`, label: "continues", evidenceIds: ["evidence-1"], changeGroupIds: ["group-1"], reviewThreadIds: [] }], guidedTours: [{ id: `${id}-tour`, title: "Review this graph", steps: [{ nodeId: `${id}-node`, title: "Inspect node", explanation: "Verify exact evidence." }] }] });
@@ -83,6 +95,21 @@ describe("batched service orchestration", () => {
     let reduceScope = ""; const mapScopes: string[] = []; const isolated: boolean[] = []; const env = await setup(20, 50_000, async (_r, providerRoot, input, _s, _p, _m, task) => { isolated.push(providerRoot === input); if (task?.kind === "map") { mapScopes.push(input); return { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) }; } reduceScope = input; return { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
     try { await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true }); await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n"); expect((await env.service.startAnalysis(request)).status).toBe("ready"); expect(isolated.every(Boolean)).toBe(true); expect(mapScopes.length).toBeGreaterThan(0); for (const scope of mapScopes) expect(await readFile(resolve(scope, "validate-map-output.mjs"), "utf8")).toContain("Map output validation"); expect(JSON.parse(await readFile(resolve(reduceScope, "request.json"), "utf8"))).toMatchObject({ repository: request.repository, baseSha: request.baseSha, headSha: request.headSha }); const reducerPlanText = await readFile(resolve(reduceScope, "plan.json"), "utf8"); const reducerPlan = JSON.parse(reducerPlanText); expect(reducerPlan.coverage.complete).toBe(true); expect(reducerPlan.chunks[0].units[0]).toMatchObject({ path: expect.any(String), segment: 0 }); expect(reducerPlanText).not.toContain('"diff"'); expect(await readFile(resolve(reduceScope, "review-threads.json"), "utf8")).toBeTruthy(); }
     finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
+  it("installs a standalone reducer validator that catches semantic and relational failures", async () => {
+    let reduceScope = ""; const env = await setup(20, 50_000, async (_r, _w, input, _s, _p, _m, task) => { if (task?.kind === "map") return { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) }; reduceScope = input; return { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
+    try {
+      await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true }); await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n");
+      expect((await env.service.startAnalysis(request)).status).toBe("ready");
+      const script = resolve(reduceScope, "validate-reduce-output.mjs");
+      await expect(runJsonValidator(script, reducerDocument())).resolves.toMatchObject({ code: 0, stdout: expect.stringMatching(/passed/i) });
+      const liveFailure = reducerDocument();
+      for (const node of liveFailure.graphs.systemOverview.nodes) { const value = node as unknown as Record<string, unknown>; value.changed = true; value.changeGroupIds = ["group-1"]; value.testIds = ["test-1"]; value.reviewInsightIds = ["insight-1"]; value.evidenceIds = ["evidence-1"]; }
+      await expect(runJsonValidator(script, liveFailure)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/must be contextual and unchanged.*changeGroupIds must be empty.*testIds must be empty.*reviewInsightIds must be empty.*evidenceIds must be empty/is) });
+      const brokenRelation = reducerDocument(); brokenRelation.graphs.dataFlow.edges[0].source = "unknown-node";
+      await expect(runJsonValidator(script, brokenRelation)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/edge.*unknown node.*unknown-node/i) });
+    } finally { await rm(env.root, { recursive: true, force: true }); }
   });
 
   it("persists and reduces only redacted canonical map outputs", async () => {

@@ -69,6 +69,132 @@ export function buildBatchMapValidatorScript(task: Pick<BatchTask, "id" | "files
   ].join("\n");
 }
 
+/** A dependency-free semantic preflight for the reducer's schema-constrained JSON. */
+export function buildBatchReducerValidatorScript(): string {
+  return String.raw`#!/usr/bin/env node
+"use strict";
+const errors = [];
+let evidenceRefs = [];
+const fail = (message) => errors.push(message);
+const array = (value) => Array.isArray(value) ? value : [];
+const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+const ids = (values) => new Set(array(values).flatMap((value) => typeof object(value).id === "string" ? [object(value).id] : []));
+const duplicateIds = (collections) => {
+  const seen = new Map();
+  for (const [name, values] of collections) array(values).forEach((value, index) => {
+    const id = object(value).id;
+    if (typeof id !== "string") return;
+    const previous = seen.get(id);
+    if (previous) fail("duplicate semantic id '" + id + "' in " + name + "[" + index + "] and " + previous + ".");
+    else seen.set(id, name + "[" + index + "]");
+  });
+};
+const unresolved = (value, path, singular, plural, known) => {
+  const item = object(value);
+  if (typeof item[singular] === "string" && !known.has(item[singular])) fail(path + "." + singular + " references unknown '" + item[singular] + "'.");
+  array(item[plural]).forEach((id, index) => { if (typeof id === "string" && !known.has(id)) fail(path + "." + plural + "[" + index + "] references unknown '" + id + "'."); });
+};
+const evidenceReferences = (value, path = "$") => {
+  if (Array.isArray(value)) return value.forEach((item, index) => evidenceReferences(item, path + "[" + index + "]"));
+  if (!value || typeof value !== "object") return;
+  Object.entries(value).forEach(([key, item]) => {
+    const next = path + "." + key;
+    if ((key === "evidenceId" || key === "evidenceRef") && typeof item === "string") evidenceRefs.push([next, item]);
+    else if ((key === "evidenceIds" || key === "evidenceRefs") && Array.isArray(item)) item.forEach((id, index) => { if (typeof id === "string") evidenceRefs.push([next + "[" + index + "]", id]); });
+    else evidenceReferences(item, next);
+  });
+};
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("error", (error) => { fail("could not read JSON from stdin: " + error.message); });
+process.stdin.on("end", () => {
+  let document;
+  try { document = JSON.parse(raw); } catch (error) { fail("stdin must contain one JSON object: " + error.message); }
+  if (errors.length === 0) validate(object(document));
+  if (errors.length) { console.error("Reducer output validation failed:"); errors.forEach((error) => console.error("- " + error)); process.exitCode = 1; return; }
+  console.log("Reducer output validation passed.");
+});
+function validate(document) {
+  evidenceRefs = [];
+  evidenceReferences(document);
+  const evidence = ids(document.evidence);
+  evidenceRefs.forEach(([path, id]) => { if (!evidence.has(id)) fail(path + " references unknown evidence '" + id + "'."); });
+  const changeGroups = ids(document.changeGroups);
+  const tests = ids(document.tests);
+  const reviewThreads = ids(document.reviewThreads);
+  const reviewInsights = ids(document.reviewInsights);
+  duplicateIds([["changeGroups", document.changeGroups], ["walkthrough", document.walkthrough], ["tests", document.tests], ["reviewThreads", document.reviewThreads], ["reviewInsights", document.reviewInsights], ["evidence", document.evidence]]);
+  const graphs = object(document.graphs);
+  const graphDefinitions = [["systemOverview", "system-overview"], ["dataFlow", "data-flow"], ["codeDependency", "code-dependency"], ["userAction", "user-action"]];
+  const graphNodes = [];
+  graphDefinitions.forEach(([key, id]) => graphNodes.push(...array(object(graphs[key]).nodes)));
+  const allNodes = ids(graphNodes);
+  graphDefinitions.forEach(([key, id]) => validateGraph(object(graphs[key]), "graphs." + key, id, changeGroups, tests, reviewThreads, reviewInsights));
+  const steps = array(document.walkthrough);
+  const stepIds = ids(steps);
+  steps.forEach((step, index) => {
+    const value = object(step); const path = "walkthrough[" + index + "]";
+    array(value.dependsOnStepIds).forEach((dependency) => {
+      if (!stepIds.has(dependency)) fail("walkthrough '" + value.id + "' depends on unknown step '" + dependency + "'.");
+      else if (dependency === value.id) fail("walkthrough '" + value.id + "' cannot depend on itself.");
+      else if (steps.findIndex((candidate) => object(candidate).id === dependency) >= index) fail("walkthrough '" + value.id + "' must depend only on an earlier step.");
+    });
+    if (!changeGroups.has(value.changeGroupId)) fail("walkthrough '" + value.id + "' references unknown change group '" + value.changeGroupId + "'.");
+    unresolved(value, path, "flowNodeId", "flowNodeIds", allNodes);
+    unresolved(value, path, "testId", "testIds", tests);
+    unresolved(value, path, "reviewInsightId", "reviewInsightIds", reviewInsights);
+  });
+  array(document.tests).forEach((test, index) => unresolved(object(test), "tests[" + index + "]", "changeGroupId", "changeGroupIds", changeGroups));
+  array(document.reviewThreads).forEach((thread, index) => {
+    const value = object(thread); const path = "reviewThreads[" + index + "]";
+    unresolved(value, path, "changeGroupId", "changeGroupIds", changeGroups);
+    unresolved(value, path, "graphNodeId", "graphNodeIds", allNodes);
+    unresolved(value, path, "reviewInsightId", "reviewInsightIds", reviewInsights);
+    duplicateIds([[path + ".replies", value.replies]]);
+  });
+  array(document.reviewInsights).forEach((insight, index) => {
+    const value = object(insight); const path = "reviewInsights[" + index + "]";
+    unresolved(value, path, "reviewThreadId", "reviewThreadIds", reviewThreads);
+    unresolved(value, path, "changeGroupId", "changeGroupIds", changeGroups);
+    unresolved(value, path, "graphNodeId", "graphNodeIds", allNodes);
+  });
+}
+function validateGraph(graph, path, expectedId, changeGroups, tests, reviewThreads, reviewInsights) {
+  if (graph.id !== expectedId) fail(path + ".id must be '" + expectedId + "'.");
+  const nodes = array(graph.nodes); const edges = array(graph.edges); const tours = array(graph.guidedTours);
+  const nodeIds = ids(nodes); const edgeIds = ids(edges); const tourIds = ids(tours);
+  const graphIds = new Map();
+  [["nodes", nodes], ["edges", edges], ["guidedTours", tours]].forEach(([kind, values]) => array(values).forEach((item, index) => {
+    const id = object(item).id; if (typeof id !== "string") return;
+    const previous = graphIds.get(id); if (previous) fail("duplicate graph id '" + id + "' in " + path + "." + kind + "[" + index + "] and " + previous + "."); else graphIds.set(id, path + "." + kind + "[" + index + "]");
+  }));
+  edges.forEach((edge, index) => { const value = object(edge); if (!nodeIds.has(value.source) || !nodeIds.has(value.target)) fail(path + ".edges[" + index + "] has an edge with an unknown node: source='" + value.source + "', target='" + value.target + "'."); });
+  tours.forEach((tour, tourIndex) => array(object(tour).steps).forEach((step, stepIndex) => { if (!nodeIds.has(object(step).nodeId)) fail(path + ".guidedTours[" + tourIndex + "].steps[" + stepIndex + "] references unknown node '" + object(step).nodeId + "'."); }));
+  [["nodes", nodes], ["edges", edges], ["guidedTours", tours]].forEach(([kind, values]) => array(values).forEach((item, index) => {
+    const value = object(item); const itemPath = path + "." + kind + "[" + index + "]";
+    unresolved(value, itemPath, "changeGroupId", "changeGroupIds", changeGroups);
+    unresolved(value, itemPath, "testId", "testIds", tests);
+    unresolved(value, itemPath, "reviewThreadId", "reviewThreadIds", reviewThreads);
+    unresolved(value, itemPath, "reviewInsightId", "reviewInsightIds", reviewInsights);
+    unresolved(value, itemPath, "nodeId", "nodeIds", nodeIds);
+    unresolved(value, itemPath, "edgeId", "edgeIds", edgeIds);
+    unresolved(value, itemPath, "tourId", "tourIds", tourIds);
+  }));
+  nodes.forEach((node, index) => {
+    const value = object(node); const nodePath = path + ".nodes[" + index + "]";
+    if (expectedId === "system-overview") {
+      if (value.changed === true) fail(nodePath + " must be contextual and unchanged.");
+      ["changeGroupIds", "testIds", "reviewThreadIds", "reviewInsightIds", "evidenceIds"].forEach((field) => { if (array(value[field]).length) fail(nodePath + "." + field + " must be empty for the PR-agnostic system graph."); });
+    }
+    if (value.changed === true && array(value.changeGroupIds).length === 0) fail(nodePath + ".changeGroupIds must identify the changed node's groups.");
+    if (typeof value.state === "string" && (value.state === "changed") !== (value.changed === true)) fail(nodePath + ".state disagrees with changed.");
+  });
+  if (expectedId === "system-overview" && edges.length) fail(path + " must be PR-agnostic and contain zero edges.");
+}
+`;
+}
+
 /** Complete unified-diff sections keyed by their current (or deleted) repo path. */
 export function parseGitDiffSections(diff: string): Map<string, string> {
   const starts = [...diff.matchAll(/^diff --git (.+)$/gm)].map((match) => match.index ?? 0);

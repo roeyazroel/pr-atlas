@@ -274,6 +274,11 @@ describe("provider analysis prompt", () => {
       expect(prompt).toMatch(/before returning.*JSON/i);
       expect(prompt).toMatch(/stdin/i);
     }
+    if (kind === "reduce") {
+      expect(prompt).toContain("node validate-reduce-output.mjs");
+      expect(prompt).toMatch(/before returning.*JSON/i);
+      expect(prompt).toMatch(/stdin/i);
+    }
   });
 
   it.each(["map", "reduce"] as const)("carries request controls into the %s contract", (kind) => {
@@ -873,6 +878,21 @@ describe("provider-neutral agent adapters", () => {
     expect(calls[0].args.join(" ")).not.toMatch(
       /(?:--dangerously|--force|--yolo|\bBash\b|\bEdit\b|\bWrite\b)/i,
     );
+  });
+
+  it.each([
+    ["map", { kind: "map" as const, id: "map-001", total: 1, assignedPaths: ["src/a.ts"] }, "Bash(node validate-map-output.mjs *)"],
+    ["reduce", { kind: "reduce" as const, id: "reduce", total: 1 }, "Bash(node validate-reduce-output.mjs *)"],
+  ])("allows Claude %s tasks to run only their stdin validator", async (_kind, task, validatorTool) => {
+    const calls: SpawnCall[] = [];
+    const adapter = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, fakeSpawn("{}", calls));
+    await adapter.analyze(requestFor("claude"), "/isolated/task", "/isolated/task", undefined, progress, undefined, task);
+    const allowedIndex = calls[0].args.indexOf("--allowed-tools");
+    const addDirectoryIndex = calls[0].args.indexOf("--add-dir");
+    const allowed = calls[0].args.slice(allowedIndex + 1, addDirectoryIndex);
+    expect(allowed).toEqual(["Read", "Grep", "Glob", validatorTool]);
+    expect(allowed).not.toContain("Bash");
+    expect(allowed.join(" ")).not.toMatch(/\b(?:Edit|Write)\b/);
   });
 
   it.each([

@@ -37,7 +37,7 @@ import {
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
-import { buildBatchPlan, buildBatchMapValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
+import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -556,6 +556,7 @@ export class AnalysisService {
     await mkdir(reduceScope, { recursive: true });
     await writeFile(resolve(reduceScope, "map-results.json"), JSON.stringify(ordered), "utf8");
     await writeFile(resolve(reduceScope, "plan.json"), JSON.stringify(planManifest), "utf8");
+    await writeFile(resolve(reduceScope, "validate-reduce-output.mjs"), buildBatchReducerValidatorScript(), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
     progress("validating", `Validating ${ordered.length}/${plan.chunks.length} map batches and generating the reducer.`);

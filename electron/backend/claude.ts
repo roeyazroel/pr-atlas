@@ -24,10 +24,15 @@ export class ClaudeAdapter implements AgentAdapter {
     const args = ['-p', buildAnalysisPrompt(request, inputDirectory, task)];
     const selectedModel = model?.trim() || request.model?.trim();
     if (selectedModel) args.push('--model', selectedModel);
+    const validatorTool = task?.kind === 'map'
+      ? 'Bash(node validate-map-output.mjs *)'
+      : task?.kind === 'reduce'
+        ? 'Bash(node validate-reduce-output.mjs *)'
+        : undefined;
     args.push(
       '--safe-mode',
       '--permission-mode', 'plan',
-      '--allowed-tools', 'Read', 'Grep', 'Glob',
+      '--allowed-tools', 'Read', 'Grep', 'Glob', ...(validatorTool ? [validatorTool] : []),
       '--add-dir', inputDirectory,
       '--no-session-persistence',
       '--output-format', 'json',
