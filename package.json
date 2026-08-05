@@ -1,7 +1,7 @@
 {
   "name": "pr-atlas",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "A local-first desktop workspace for understanding pull requests.",
   "type": "module",
   "main": "dist-electron/main.cjs",

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/roeyazroel/pr-atlas/compare/v0.2.2...v0.3.0) (2026-08-05)
+
+
+### Features
+
+* improve empty state and branding ([6f8f49f](https://github.com/roeyazroel/pr-atlas/commit/6f8f49fab14df2269ae917c33a3071da73f79375))
+
 ## [0.2.2](https://github.com/roeyazroel/pr-atlas/compare/v0.2.1...v0.2.2) (2026-08-05)
 
 
