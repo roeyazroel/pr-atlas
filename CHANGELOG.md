@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/roeyazroel/pr-atlas/compare/v0.3.1...v0.4.0) (2026-08-05)
+
+
+### Features
+
+* refine desktop repository and analysis UX ([9c65803](https://github.com/roeyazroel/pr-atlas/commit/9c65803d9223fe289d52b1ef4089e33f16fc43f9))
+
 ## [0.3.1](https://github.com/roeyazroel/pr-atlas/compare/v0.3.0...v0.3.1) (2026-08-05)
 
 
