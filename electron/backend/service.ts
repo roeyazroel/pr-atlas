@@ -37,7 +37,7 @@ import {
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
-import { buildBatchPlan, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
+import { buildBatchPlan, buildBatchMapValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -530,6 +530,7 @@ export class AnalysisService {
         await mkdir(scope, { recursive: true });
         await writeFile(resolve(scope, "files.json"), JSON.stringify(task.files), "utf8");
         await writeFile(resolve(scope, "diff.patch"), task.files.map((file) => file.diff).join("\n"), "utf8");
+        await writeFile(resolve(scope, "validate-map-output.mjs"), buildBatchMapValidatorScript(task), "utf8");
         const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
         const validated = response.status === "ready" && response.mapOutput
           ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)

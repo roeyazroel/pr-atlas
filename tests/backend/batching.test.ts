@@ -1,11 +1,35 @@
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BATCHING_THRESHOLDS,
   buildBatchPlan,
+  buildBatchMapValidatorScript,
   shouldBatchAnalysis,
   validateBatchMapOutput,
   parseGitDiffSections,
 } from "../../electron/backend/batching";
+
+async function runMapValidator(script: string, candidate: unknown): Promise<{ code: number; stdout: string; stderr: string }> {
+  const directory = await mkdtemp(join(tmpdir(), "pr-atlas-map-validator-"));
+  const path = join(directory, "validate-map-output.mjs");
+  await writeFile(path, script, "utf8");
+  try {
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [path], { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = ""; let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      child.stdin.end(JSON.stringify(candidate));
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 describe("large PR batching", () => {
   it("uses the deterministic file-or-change threshold", () => {
@@ -56,7 +80,26 @@ describe("large PR batching", () => {
     expect(canonical?.observations[0]).not.toBe(observation);
     expect(validateBatchMapOutput({ taskId: "map-001", observations: [{ ...observation, segment: 1 }] }, task).valid).toBe(false);
     const segmented = { id: "map-002", files: [{ path: "a.ts", diff: "x", bytes: 1, segment: 0 }, { path: "a.ts", diff: "y", bytes: 1, segment: 1 }] };
-    expect(validateBatchMapOutput({ taskId: "map-002", observations: [{ ...observation }, { ...observation }] }, segmented).valid).toBe(false);
+    const merged = validateBatchMapOutput({ taskId: "map-002", observations: [{ ...observation, summary: "First." }, { ...observation, summary: "Second.", tests: ["test"], flows: ["flow"], limitations: ["limit"] }, { ...observation, segment: 1 }] }, segmented);
+    expect(merged.valid).toBe(true);
+    expect(merged.output?.observations).toHaveLength(2);
+    expect(merged.output?.observations[0].summary).toContain("First.");
+    expect(merged.output?.observations[0].summary).toContain("Second.");
+    const bounded = validateBatchMapOutput({ taskId: "map-001", observations: [{ ...observation, summary: "a".repeat(8_000) }, { ...observation, summary: "b".repeat(8_000) }] }, task);
+    expect(bounded.output?.observations[0].summary).toHaveLength(8_000);
+  });
+
+  it("generates a standalone map validator with exact, actionable coverage diagnostics", async () => {
+    const task = { id: "map-002", files: [{ path: "src/data/demo.ts", diff: "x", bytes: 1, segment: 0 }, { path: "src/styles.css", diff: "y", bytes: 1, segment: 1 }] };
+    const observation = (path: string, segment: number) => ({ path, segment, summary: `Changed ${path}.`, evidence: [{ path, line: 1 }], changeGroups: ["change"], tests: [], flows: [], limitations: [] });
+    const script = buildBatchMapValidatorScript(task);
+    expect(script).not.toMatch(/require\(|from\s+['"][^'"./]/);
+
+    await expect(runMapValidator(script, { taskId: task.id, observations: [observation("src/data/demo.ts", 0), observation("src/styles.css", 1)] })).resolves.toMatchObject({ code: 0, stdout: expect.stringMatching(/passed/i) });
+    await expect(runMapValidator(script, { taskId: task.id, observations: [] })).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/missing assigned unit: src\/data\/demo\.ts#0/i) });
+    await expect(runMapValidator(script, { taskId: task.id, observations: [observation("src/data/demo.ts", 0), observation("src/data/demo.ts", 0), observation("src/styles.css", 1)] })).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/duplicate assigned unit: src\/data\/demo\.ts#0/i) });
+    await expect(runMapValidator(script, { taskId: task.id, observations: [observation("src/data/demo.ts", 0), observation("elsewhere.ts", 0), observation("src/styles.css", 1)] })).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/out-of-scope assigned unit: elsewhere\.ts#0/i) });
+    await expect(runMapValidator(script, { taskId: task.id, observations: [observation("src/data/demo.ts", 0), { ...observation("src/styles.css", 1), evidence: [{ path: "src/styles.css", line: 0 }] }] })).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/line must be null or an integer at least 1/i) });
   });
 
   it("parses quoted Unicode, rename, deletion, and oversized diff sections without losing evidence", () => {

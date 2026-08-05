@@ -269,6 +269,11 @@ describe("provider analysis prompt", () => {
     expect(prompt).toMatch(/never reveal secrets/i);
     expect(prompt).toMatch(/never modify files/i);
     expect(prompt).toMatch(/do not (?:read|inspect|search) outside/i);
+    if (kind === "map") {
+      expect(prompt).toContain("node validate-map-output.mjs");
+      expect(prompt).toMatch(/before returning.*JSON/i);
+      expect(prompt).toMatch(/stdin/i);
+    }
   });
 
   it.each(["map", "reduce"] as const)("carries request controls into the %s contract", (kind) => {
@@ -886,7 +891,9 @@ describe("provider-neutral agent adapters", () => {
     const output = { taskId: "map-001", observations: [{ path: "src/a.ts", segment: 0, summary: "Changed.", evidence: [{ path: "src/a.ts", line: 1 }], changeGroups: ["group"], tests: ["test"], flows: ["flow"], limitations: ["limit"] }] };
     const raw = [
       { type: "thread.started", thread_id: "thread-1" },
+      { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ taskId: "map-001", observations: [] }) } },
       { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(output) } },
+      { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ ...output, taskId: "map-999" }) } },
       { type: "turn.completed" },
     ].map((event) => JSON.stringify(event)).join("\n");
     const calls: SpawnCall[] = [];

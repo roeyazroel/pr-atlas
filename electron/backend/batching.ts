@@ -13,6 +13,62 @@ export type BatchPlan = {
 };
 export type BatchMapOutput = { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
 
+/** A dependency-free validator written into each read-only map-task scope. */
+export function buildBatchMapValidatorScript(task: Pick<BatchTask, "id" | "files">): string {
+  const assignment = JSON.stringify({ taskId: task.id, units: task.files.map(({ path, segment }) => ({ path, segment })) });
+  return [
+    "#!/usr/bin/env node",
+    '"use strict";',
+    `const expected = ${assignment};`,
+    "const closed = (value, keys) => !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));",
+    "const key = (path, segment) => JSON.stringify([path, segment]);",
+    "const display = (path, segment) => String(path) + '#' + String(segment);",
+    "const nonEmptyStrings = (value) => Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim().length > 0);",
+    "const errors = [];",
+    "const fail = (message) => errors.push(message);",
+    "let raw = '';",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', (chunk) => { raw += chunk; });",
+    "process.stdin.on('error', (error) => { fail('could not read JSON from stdin: ' + error.message); });",
+    "process.stdin.on('end', () => {",
+    "  let value;",
+    "  try { value = JSON.parse(raw); } catch (error) { fail('stdin must contain one JSON object: ' + error.message); }",
+    "  if (errors.length === 0) validate(value);",
+    "  if (errors.length > 0) { console.error('Map output validation failed:'); for (const error of errors) console.error('- ' + error); process.exitCode = 1; return; }",
+    "  console.log('Map output validation passed.');",
+    "});",
+    "function validate(value) {",
+    "  if (!closed(value, ['taskId', 'observations'])) { fail('output must be a closed object with only taskId and observations.'); return; }",
+    "  if (value.taskId !== expected.taskId) fail('taskId must be ' + JSON.stringify(expected.taskId) + '.');",
+    "  if (!Array.isArray(value.observations)) { fail('observations must be an array.'); return; }",
+    "  const allowed = new Map(expected.units.map((unit) => [key(unit.path, unit.segment), unit]));",
+    "  const counts = new Map();",
+    "  value.observations.forEach((observation, index) => {",
+    "    const location = 'observations[' + index + ']';",
+    "    if (!closed(observation, ['path', 'segment', 'summary', 'evidence', 'changeGroups', 'tests', 'flows', 'limitations'])) { fail(location + ' must be a closed canonical observation object.'); return; }",
+    "    if (typeof observation.path !== 'string' || !Number.isInteger(observation.segment)) { fail(location + ' path must be a string and segment must be an integer.'); return; }",
+    "    const unit = key(observation.path, observation.segment);",
+    "    if (!allowed.has(unit)) fail('out-of-scope assigned unit: ' + display(observation.path, observation.segment) + '.'); else counts.set(unit, (counts.get(unit) || 0) + 1);",
+    "    if (typeof observation.summary !== 'string' || !observation.summary.trim() || observation.summary.length > 8000) fail(location + ' summary must be non-empty and at most 8000 characters.');",
+    "    for (const field of ['changeGroups', 'tests', 'flows', 'limitations']) if (!nonEmptyStrings(observation[field])) fail(location + '.' + field + ' must be an array of non-empty strings.');",
+    "    if (!Array.isArray(observation.evidence) || observation.evidence.length === 0) { fail(location + '.evidence must be a non-empty array.'); return; }",
+    "    observation.evidence.forEach((evidence, evidenceIndex) => {",
+    "      const evidenceLocation = location + '.evidence[' + evidenceIndex + ']';",
+    "      if (!closed(evidence, ['path', 'line'])) { fail(evidenceLocation + ' must be a closed evidence object.'); return; }",
+    "      if (evidence.path !== observation.path) fail(evidenceLocation + ' path must exactly match its observation path.');",
+    "      if (!(evidence.line === null || (Number.isInteger(evidence.line) && evidence.line >= 1))) fail(evidenceLocation + ' line must be null or an integer at least 1.');",
+    "    });",
+    "  });",
+    "  for (const unit of expected.units) {",
+    "    const count = counts.get(key(unit.path, unit.segment)) || 0;",
+    "    if (count === 0) fail('missing assigned unit: ' + display(unit.path, unit.segment) + '.');",
+    "    else if (count > 1) fail('duplicate assigned unit: ' + display(unit.path, unit.segment) + '.');",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
 /** Complete unified-diff sections keyed by their current (or deleted) repo path. */
 export function parseGitDiffSections(diff: string): Map<string, string> {
   const starts = [...diff.matchAll(/^diff --git (.+)$/gm)].map((match) => match.index ?? 0);
@@ -72,8 +128,7 @@ export function validateBatchMapOutput(value: unknown, task: Pick<BatchTask, "id
   if (output.taskId !== task.id) return { valid: false, errors: ["Map output taskId does not match its task."] };
   if (!Array.isArray(output.observations)) return { valid: false, errors: ["Map output observations must be an array."] };
   const allowed = new Set(task.files.map(unitKey));
-  const observed = new Set<string>();
-  const observations: BatchMapOutput["observations"] = [];
+  const observations = new Map<string, BatchMapOutput["observations"][number]>();
   for (const observation of output.observations) {
     if (!recordWithKeys(observation, ["path", "segment", "summary", "evidence", "changeGroups", "tests", "flows", "limitations"]))
       return { valid: false, errors: ["Map output contains invalid or out-of-scope evidence."] };
@@ -81,16 +136,23 @@ export function validateBatchMapOutput(value: unknown, task: Pick<BatchTask, "id
     if (typeof item.path !== "string" || !Number.isInteger(item.segment) || !allowed.has(`${item.path}:${item.segment}`) || typeof item.summary !== "string" || !item.summary.trim() || item.summary.length > 8_000 || !Array.isArray(item.evidence) || item.evidence.length === 0 || !stringArray(item.changeGroups) || !stringArray(item.tests) || !stringArray(item.flows) || !stringArray(item.limitations)) return { valid: false, errors: ["Map output contains invalid or out-of-scope evidence."] };
     const evidence = item.evidence.map((entry) => recordWithKeys(entry, ["path", "line"]) ? entry as Record<string, unknown> : null);
     if (evidence.some((entry) => !entry || entry.path !== item.path || !(entry.line === null || (Number.isInteger(entry.line) && (entry.line as number) >= 1)))) return { valid: false, errors: ["Map output contains invalid or out-of-scope evidence."] };
-    observations.push({ path: item.path, segment: item.segment as number, summary: item.summary, evidence: evidence as Array<{ path: string; line: number | null }>, changeGroups: [...item.changeGroups as string[]], tests: [...item.tests as string[]], flows: [...item.flows as string[]], limitations: [...item.limitations as string[]] });
-    observed.add(`${item.path}:${item.segment}`);
+    const key = `${item.path}:${item.segment}`;
+    const next = { path: item.path, segment: item.segment as number, summary: item.summary, evidence: evidence as Array<{ path: string; line: number | null }>, changeGroups: [...item.changeGroups as string[]], tests: [...item.tests as string[]], flows: [...item.flows as string[]], limitations: [...item.limitations as string[]] };
+    const previous = observations.get(key);
+    observations.set(key, previous ? mergeObservation(previous, next) : next);
   }
-  if (observed.size !== output.observations.length || [...allowed].some((key) => !observed.has(key))) return { valid: false, errors: ["Map output did not cover every assigned unit exactly once."] };
-  return { valid: true, output: { taskId: task.id, observations }, errors: [] };
+  if ([...allowed].some((key) => !observations.has(key))) return { valid: false, errors: ["Map output did not cover every assigned unit exactly once."] };
+  return { valid: true, output: { taskId: task.id, observations: task.files.map((file) => observations.get(unitKey(file))!) }, errors: [] };
 }
 
 function recordWithKeys(value: unknown, keys: string[]): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key)); }
 function stringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every((entry) => typeof entry === "string" && entry.trim().length > 0); }
 function unitKey(value: Pick<BatchFile, "path" | "segment">): string { return `${value.path}:${value.segment}`; }
+function mergeObservation(left: BatchMapOutput["observations"][number], right: BatchMapOutput["observations"][number]): BatchMapOutput["observations"][number] {
+  const unique = <T>(items: T[], key: (item: T) => string) => [...new Map(items.map((item) => [key(item), item])).values()];
+  const summary = unique([left.summary, right.summary], String).join("\n\n").slice(0, 8_000);
+  return { ...left, summary, evidence: unique([...left.evidence, ...right.evidence], (item) => `${item.path}:${item.line}`), changeGroups: unique([...left.changeGroups, ...right.changeGroups], String), tests: unique([...left.tests, ...right.tests], String), flows: unique([...left.flows, ...right.flows], String), limitations: unique([...left.limitations, ...right.limitations], String) };
+}
 function parseHeaderPaths(value: string): [string, string] {
   if (!value.includes('"')) { const boundary = value.lastIndexOf(" b/"); if (boundary > 0) return [value.slice(0, boundary), value.slice(boundary + 1)]; }
   const tokens: string[] = []; let rest = value.trim();
