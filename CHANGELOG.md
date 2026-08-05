@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/roeyazroel/pr-atlas/compare/v0.3.0...v0.3.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* prevent updater destination clobber ([737f57c](https://github.com/roeyazroel/pr-atlas/commit/737f57cf7dd06ae307c680b09c8ca7037e5c5b52))
+
 ## [0.3.0](https://github.com/roeyazroel/pr-atlas/compare/v0.2.2...v0.3.0) (2026-08-05)
 
 
