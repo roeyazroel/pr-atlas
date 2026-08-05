@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/roeyazroel/pr-atlas/compare/v0.4.0...v0.4.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* show update download progress ([e713c24](https://github.com/roeyazroel/pr-atlas/commit/e713c24dfe5e26f70a7fdedaa3dcc543eaf7fc41))
+
 ## [0.4.0](https://github.com/roeyazroel/pr-atlas/compare/v0.3.1...v0.4.0) (2026-08-05)
 
 
