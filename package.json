@@ -1,0 +1,91 @@
+{
+  "name": "pr-atlas",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A local-first desktop workspace for understanding pull requests.",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:desktop\"",
+    "dev:web": "vite --host 127.0.0.1",
+    "dev:desktop": "wait-on http://127.0.0.1:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.cjs",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build": "npm run build:electron && npm run typecheck && npm run typecheck:electron && vite build",
+    "preview": "vite preview",
+    "package": "npm run build && electron-builder --publish never",
+    "package:mac": "npm run build && electron-builder --mac --publish never",
+    "package:win": "npm run build && electron-builder --win --publish never",
+    "package:linux": "npm run build && electron-builder --linux --publish never",
+    "test": "vitest --config vitest.config.ts run",
+    "test:watch": "vitest --config vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.24.2",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.pratlas.desktop",
+    "productName": "PR Atlas",
+    "artifactName": "PR-Atlas-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "maintainer": "PR Atlas <releases@pr-atlas.dev>"
+    }
+  }
+}

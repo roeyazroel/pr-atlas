@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+# A release-please run can create a commit that starts another run. Keep the
+# release and its packaging jobs serialized so two runs cannot upload into one
+# another's release.
+concurrency:
+  group: pr-atlas-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Create release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  quality:
+    name: Validate release source
+    needs: release
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out released tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+          fetch-depth: 1
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Check package version matches release
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: >-
+          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); const expected = process.env.EXPECTED_VERSION; const tag = process.env.TAG_NAME; if (!expected || !tag || tag !== "v" + expected || pkg.version !== expected) { throw new Error("Release/tag/package mismatch: tag=" + tag + ", expected=" + expected + ", package=" + pkg.version); }'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test -- --run
+      - name: Typecheck renderer
+        run: npm run typecheck
+      - name: Typecheck Electron
+        run: npm run typecheck:electron
+      - name: Build application
+        run: npm run build
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs:
+      - release
+      - quality
+    if: needs.release.outputs.release_created == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mac
+            os: macos-13
+          - target: win
+            os: windows-2022
+          - target: linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out released tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+          fetch-depth: 1
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Check package version matches release
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+        run: >-
+          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); const expected = process.env.EXPECTED_VERSION; const tag = process.env.TAG_NAME; if (!expected || !tag || tag !== "v" + expected || pkg.version !== expected) { throw new Error("Release/tag/package mismatch: tag=" + tag + ", expected=" + expected + ", package=" + pkg.version); }'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build signed-agnostic Electron package
+        run: npm run package -- --${{ matrix.target }}
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-atlas-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  attach:
+    name: Attach artifacts to release
+    needs:
+      - release
+      - package
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out released tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+          fetch-depth: 1
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+      - name: Download platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-atlas-*-${{ github.run_id }}
+          path: release-assets
+          merge-multiple: true
+      - name: Verify and attach artifacts to exact release
+        env:
+          EXPECTED_VERSION: ${{ needs.release.outputs.version }}
+          TAG_NAME: ${{ needs.release.outputs.tag_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")); if (pkg.version !== process.env.EXPECTED_VERSION || process.env.TAG_NAME !== "v" + process.env.EXPECTED_VERSION) { throw new Error("Release/tag/package mismatch: tag=" + process.env.TAG_NAME + ", expected=" + process.env.EXPECTED_VERSION + ", package=" + pkg.version); }'
+          test -n "$TAG_NAME"
+          test -n "$EXPECTED_VERSION"
+          test -d release-assets
+          test -n "$(find release-assets -maxdepth 1 -type f -print -quit)"
+          gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null
+          mapfile -d '' asset_files < <(find release-assets -maxdepth 1 -type f -print0)
+          ((${#asset_files[@]} > 0))
+          gh release upload "$TAG_NAME" --repo "$GITHUB_REPOSITORY" "${asset_files[@]}" --clobber
