@@ -41,17 +41,17 @@ describe('PR Atlas landing page', () => {
   it('keeps the product promise and review narrative visible in static HTML', async () => {
     const html = await readHtml()
 
-    expect(html).toContain('Understand the changed system, not just the changed files.')
+    expect(html).toContain('Coding agents made changing code fast.')
     expect(html).toContain('https://github.com/roeyazroel/pr-atlas/releases/latest')
     expect(html).toContain('https://github.com/roeyazroel/pr-atlas')
 
     for (const anchor of [
-      /Files are implementation containers/i,
-      /Comprehension before judgment/i,
+      /Agent slop is not only bad code/i,
+      /Generation scales\. Judgment does not/i,
       /Logical change groups/i,
       /Behavior flows/i,
-      /Review insights/i,
-      /Test coverage/i,
+      /Review insight clustering/i,
+      /Tests tied to behavior/i,
       /Local-first/i,
       /Explicit provider consent/i,
       /validated UI/i,
@@ -63,6 +63,26 @@ describe('PR Atlas landing page', () => {
     ]) {
       expect(html).toMatch(anchor)
     }
+  })
+
+  it('makes the agent-era review problem explicit and visual', async () => {
+    const html = await readHtml()
+    const problemSection = sectionMarkup(html, 'why')
+    const problemText = visibleText(problemSection)
+
+    expect(html).toContain('Coding agents made changing code fast.')
+    expect(html).toContain('Understanding it is still human work.')
+    expect(html).toMatch(/machine-speed changes/i)
+    expect(html).toMatch(/human judgment/i)
+
+    expect(problemSection).not.toBe('')
+    expect(problemSection).toMatch(/aria-label=["']Anatomy of a hard-to-review agent pull request["']/i)
+    expect(problemText).toMatch(/requested change/i)
+    expect(problemText).toMatch(/unrelated changes/i)
+    expect(problemText).toMatch(/oversized refactor/i)
+    expect(problemText).toMatch(/abandoned approach/i)
+    expect(problemText).toMatch(/cheap to generate/i)
+    expect(problemText).toMatch(/expensive to verify/i)
   })
 
   it('uses semantic landmarks for the page structure', async () => {

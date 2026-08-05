@@ -13,6 +13,20 @@ logical changes, evidence, tests, review signals, and guided system flows. It
 keeps the review surface deterministic while using a coding-agent runtime to
 collect and explain repository evidence.
 
+## Why PR Atlas exists
+
+Coding agents can produce changes faster and at a larger aggregate volume than
+humans can reasonably absorb. The result can be agent slop: a pull request that
+looks plausible but may include:
+
+- unrelated changes or speculative leftovers mixed with intended work;
+- oversized refactors that obscure the behavior being changed; and
+- plausible-looking code whose scope and correctness are expensive to verify.
+
+PR Atlas restores human comprehension and judgment by organizing each pull
+request into logical changes, evidence, tests, and guided system flows, so people
+can see what changed and decide what to trust.
+
 ## What users get
 
 - A read-only view of repositories and open pull requests discovered through the

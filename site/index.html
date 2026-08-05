@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#f6f8f5" />
-    <meta name="description" content="PR Atlas turns a pull request into an evidence-backed walkthrough of the changed system." />
-    <title>PR Atlas — understand the changed system</title>
+    <meta name="description" content="PR Atlas turns machine-speed, agent-generated pull requests into evidence-backed maps humans can understand and review." />
+    <title>PR Atlas — understand what coding agents changed</title>
     <link rel="icon" type="image/png" href="assets/favicon.png" />
     <link rel="stylesheet" href="styles.css" />
     <script src="script.js" defer></script>
@@ -30,9 +30,9 @@
     <main id="main-content">
       <section class="hero shell" id="overview" aria-labelledby="hero-title">
         <div class="hero-copy reveal">
-          <p class="kicker"><span class="kicker-dot" aria-hidden="true"></span> Pull-request comprehension / local-first</p>
-          <h1 id="hero-title">Understand the changed system, not just the changed files.</h1>
-          <p class="hero-lede">PR Atlas turns a large pull request into a clear, evidence-backed walkthrough of behavior, flows, tests, and review attention — in a fixed desktop workspace you can inspect at your own pace.</p>
+          <p class="kicker"><span class="kicker-dot" aria-hidden="true"></span> Built for the agent era / local-first</p>
+          <h1 id="hero-title">Coding agents made changing code fast. <em>Understanding it is still human work.</em></h1>
+          <p class="hero-lede">An agent can open a pull request in minutes — and leave you sorting the requested behavior from unrelated edits, broad refactors, and abandoned approaches. PR Atlas turns machine-speed changes into an evidence-backed map you can actually review.</p>
           <div class="hero-actions">
             <a class="button button-primary" href="https://github.com/roeyazroel/pr-atlas/releases/latest">Download the latest release <span aria-hidden="true">↗</span></a>
             <a class="button button-secondary" href="https://github.com/roeyazroel/pr-atlas">Read the repository <span aria-hidden="true">↗</span></a>
@@ -40,17 +40,46 @@
           <p class="hero-footnote"><span aria-hidden="true">⌁</span> Existing <code>gh</code> auth · application-managed checkout · human review stays yours</p>
         </div>
 
-        <div class="hero-index reveal" aria-label="PR Atlas at a glance">
-          <div class="index-rule"></div>
-          <div class="index-row"><span>01</span><span>Trace behavior</span><strong>→</strong></div>
-          <div class="index-row"><span>02</span><span>Read evidence</span><strong>→</strong></div>
-          <div class="index-row"><span>03</span><span>Choose what matters</span><strong>→</strong></div>
-          <p class="index-caption">A calm starting point for changes that cross services, state, and tests.</p>
+        <div class="review-pressure reveal" aria-label="Change production has accelerated beyond review comprehension">
+          <div class="pressure-head"><span>Change velocity</span><span>Review capacity</span></div>
+          <div class="pressure-lane pressure-agent">
+            <div><span>Agent output</span><strong>machine speed</strong></div>
+            <div class="pressure-track" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="pressure-lane pressure-human">
+            <div><span>Human understanding</span><strong>human pace</strong></div>
+            <div class="pressure-track" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <div class="pressure-equation" aria-hidden="true"><span>1 prompt</span><b>→</b><span>many files</span><b>→</b><span>1 human call</span></div>
+          <p>Generation scales. Judgment does not.</p>
+        </div>
+      </section>
+
+      <section class="statement-section shell reveal" id="why" aria-labelledby="why-title">
+        <div class="section-label"><span>Why Atlas</span><span>01 / 05</span></div>
+        <div class="statement-grid">
+          <div class="statement-intro">
+            <p class="kicker">The new review bottleneck</p>
+            <h2 id="why-title">The diff looks complete. The story is buried.</h2>
+            <p>Agent slop is not only bad code. It is review work that was cheap to generate and is expensive to verify — plausible changes whose purpose, scope, and side effects still need human judgment.</p>
+            <p class="statement-note">The risk is hidden in the mix.</p>
+          </div>
+          <div class="change-anatomy" aria-label="Anatomy of a hard-to-review agent pull request">
+            <div class="anatomy-head"><span>Pull #482</span><span>Requested: rotate session tokens</span></div>
+            <div class="change-stack">
+              <article class="change-slice is-intended"><span class="slice-code">01</span><div><b>Requested change</b><small>The behavior you asked the agent to implement</small></div><em>5 files</em></article>
+              <article class="change-slice is-unrelated"><span class="slice-code">?</span><div><b>Unrelated changes</b><small>Why did authentication also touch billing?</small></div><em>6 files</em></article>
+              <article class="change-slice is-refactor"><span class="slice-code">↗</span><div><b>Oversized refactor</b><small>A “cleanup” that obscures the functional change</small></div><em>9 files</em></article>
+              <article class="change-slice is-abandoned"><span class="slice-code">×</span><div><b>Abandoned approach</b><small>Speculative edits left behind after the agent changed direction</small></div><em>4 files</em></article>
+            </div>
+            <div class="anatomy-total"><span>24 files changed</span><strong>One reviewer must reconstruct the intent.</strong></div>
+            <div class="atlas-filter"><span>PR Atlas</span><b>intent</b><i>→</i><b>impact</b><i>→</i><b>tests</b><i>→</i><b>evidence</b></div>
+          </div>
         </div>
       </section>
 
       <section class="product-section shell reveal" aria-labelledby="product-title">
-        <div class="section-label"><span>Product view</span><span>01 / 05</span></div>
+        <div class="section-label"><span>Product view</span><span>02 / 05</span></div>
         <h2 id="product-title" class="sr-only">PR Atlas overview</h2>
         <figure class="product-figure">
           <div class="product-topline">
@@ -85,19 +114,6 @@
           </div>
           <figcaption><span>Fig. A</span> The captured PR Atlas demo fixture: the same evidence organized as a reviewable system map.</figcaption>
         </figure>
-      </section>
-
-      <section class="statement-section shell reveal" id="why" aria-labelledby="why-title">
-        <div class="section-label"><span>Why Atlas</span><span>02 / 05</span></div>
-        <div class="statement-grid">
-          <div class="statement-intro"><p class="kicker">The review surface is the problem</p><h2 id="why-title">A flat diff is a filing cabinet. A walkthrough is a map.</h2><p>Files are implementation containers, not the shape of a change. Atlas gives reviewers a sequence, the reason behind it, and a trail back to exact source evidence.</p><p class="statement-note">Comprehension before judgment.</p></div>
-          <div class="compare-table" role="table" aria-label="Flat diff compared with PR Atlas">
-            <div class="compare-head" role="row"><span role="columnheader">A familiar pull request</span><span role="columnheader">The Atlas lens</span></div>
-            <div class="compare-row" role="row"><span role="cell"><b>14 changed files</b><small>Scan names and guess the order</small></span><span role="cell"><b>4 logical changes</b><small>Review behavior in a suggested sequence</small></span></div>
-            <div class="compare-row" role="row"><span role="cell"><b>Scattered comments</b><small>Similar concerns repeat on separate lines</small></span><span role="cell"><b>Clustered review insights</b><small>Active, resolved, disputed, and outdated stay visible</small></span></div>
-            <div class="compare-row" role="row"><span role="cell"><b>“Is this covered?”</b><small>Search test folders after the fact</small></span><span role="cell"><b>Test coverage → behavior</b><small>Covered, partial, or missing — with evidence</small></span></div>
-          </div>
-        </div>
       </section>
 
       <section class="method-section shell reveal" id="method" aria-labelledby="method-title">
