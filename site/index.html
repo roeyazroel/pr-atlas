@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f8f5" />
+    <meta name="description" content="PR Atlas turns a pull request into an evidence-backed walkthrough of the changed system." />
+    <title>PR Atlas — understand the changed system</title>
+    <link rel="icon" type="image/png" href="assets/favicon.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="site-header">
+      <div class="shell nav-wrap">
+        <a class="wordmark" href="#overview" aria-label="PR Atlas home">
+          <img src="assets/pr-atlas-logo.png" width="174" height="42" alt="PR Atlas" />
+        </a>
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a href="#why">Why Atlas</a>
+          <a href="#method">Method</a>
+          <a href="#boundaries">Boundaries</a>
+          <a class="nav-cta" href="https://github.com/roeyazroel/pr-atlas/releases/latest">Get PR Atlas <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content">
+      <section class="hero shell" id="overview" aria-labelledby="hero-title">
+        <div class="hero-copy reveal">
+          <p class="kicker"><span class="kicker-dot" aria-hidden="true"></span> Pull-request comprehension / local-first</p>
+          <h1 id="hero-title">Understand the changed system, not just the changed files.</h1>
+          <p class="hero-lede">PR Atlas turns a large pull request into a clear, evidence-backed walkthrough of behavior, flows, tests, and review attention — in a fixed desktop workspace you can inspect at your own pace.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://github.com/roeyazroel/pr-atlas/releases/latest">Download the latest release <span aria-hidden="true">↗</span></a>
+            <a class="button button-secondary" href="https://github.com/roeyazroel/pr-atlas">Read the repository <span aria-hidden="true">↗</span></a>
+          </div>
+          <p class="hero-footnote"><span aria-hidden="true">⌁</span> Existing <code>gh</code> auth · application-managed checkout · human review stays yours</p>
+        </div>
+
+        <div class="hero-index reveal" aria-label="PR Atlas at a glance">
+          <div class="index-rule"></div>
+          <div class="index-row"><span>01</span><span>Trace behavior</span><strong>→</strong></div>
+          <div class="index-row"><span>02</span><span>Read evidence</span><strong>→</strong></div>
+          <div class="index-row"><span>03</span><span>Choose what matters</span><strong>→</strong></div>
+          <p class="index-caption">A calm starting point for changes that cross services, state, and tests.</p>
+        </div>
+      </section>
+
+      <section class="product-section shell reveal" aria-labelledby="product-title">
+        <div class="section-label"><span>Product view</span><span>01 / 05</span></div>
+        <h2 id="product-title" class="sr-only">PR Atlas overview</h2>
+        <figure class="product-figure">
+          <div class="product-topline">
+            <span><i class="status-dot" aria-hidden="true"></i> Local walkthrough fixture</span>
+            <span>atlas / pull #482 <b>·</b> c2f9a71</span>
+          </div>
+          <div class="product-viewport">
+            <img class="product-shot" src="assets/pr-atlas-overview.webp" alt="PR Atlas overview showing logical change groups and an evidence-backed pull request walkthrough" />
+            <div class="product-fallback" aria-label="Illustrated PR Atlas product preview">
+              <aside class="mock-sidebar">
+                <div class="mock-brand"><span class="mock-mark">A</span><span>PR Atlas</span></div>
+                <p class="mock-caption">WORKSPACE</p>
+                <div class="mock-nav active"><span>◈</span> Overview <em>1</em></div>
+                <div class="mock-nav"><span>⌁</span> Walkthrough</div>
+                <div class="mock-nav"><span>◎</span> Flows</div>
+                <div class="mock-nav"><span>⊙</span> Review attention <em>4</em></div>
+                <p class="mock-caption mock-caption-bottom">RUN HISTORY</p>
+                <div class="mock-history"><span class="history-check">✓</span><span>Aug 4 · 10:14<br /><small>Codex local</small></span></div>
+              </aside>
+              <div class="mock-main">
+                <div class="mock-header">
+                  <div><span class="mock-eyebrow">READY FOR REVIEW</span><h2>Rotate refresh tokens at the session boundary</h2><p>runway / atlas <span>·</span> #482</p></div>
+                  <span class="mock-pill">14 files <b>+286</b> <i>−91</i></span>
+                </div>
+                <div class="mock-metrics"><div><strong>4</strong><span>logical changes</span></div><div><strong>4</strong><span>flow views</span></div><div><strong>3</strong><span>review signals</span></div><div><strong>2 / 4</strong><span>tests mapped</span></div></div>
+                <div class="mock-columns">
+                  <div class="mock-panel change-panel"><div class="mock-panel-title"><span>LOGICAL CHANGES</span><a href="#features">View all →</a></div><div class="mock-change selected"><span class="change-number">01</span><span><b>Session ownership</b><small>2 files · high attention</small></span><i>→</i></div><div class="mock-change"><span class="change-number">02</span><span><b>Callback handoff</b><small>2 files · medium attention</small></span><i>→</i></div><div class="mock-change"><span class="change-number">03</span><span><b>Token storage migration</b><small>1 file · high attention</small></span><i>→</i></div></div>
+                  <div class="mock-panel insight-panel"><div class="mock-panel-title"><span>REVIEW ATTENTION</span><span class="attention-key"><i></i> active</span></div><div class="insight-chart"><span style="height: 34%"></span><span style="height: 56%"></span><span style="height: 78%"></span><span style="height: 45%"></span><span style="height: 88%"></span><span style="height: 65%"></span><span style="height: 40%"></span></div><div class="insight-note"><i>!</i><span><b>Rotation can invalidate parallel requests</b><small>session.service.ts:118 · 2 mentions</small></span></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <figcaption><span>Fig. A</span> The captured PR Atlas demo fixture: the same evidence organized as a reviewable system map.</figcaption>
+        </figure>
+      </section>
+
+      <section class="statement-section shell reveal" id="why" aria-labelledby="why-title">
+        <div class="section-label"><span>Why Atlas</span><span>02 / 05</span></div>
+        <div class="statement-grid">
+          <div class="statement-intro"><p class="kicker">The review surface is the problem</p><h2 id="why-title">A flat diff is a filing cabinet. A walkthrough is a map.</h2><p>Files are implementation containers, not the shape of a change. Atlas gives reviewers a sequence, the reason behind it, and a trail back to exact source evidence.</p><p class="statement-note">Comprehension before judgment.</p></div>
+          <div class="compare-table" role="table" aria-label="Flat diff compared with PR Atlas">
+            <div class="compare-head" role="row"><span role="columnheader">A familiar pull request</span><span role="columnheader">The Atlas lens</span></div>
+            <div class="compare-row" role="row"><span role="cell"><b>14 changed files</b><small>Scan names and guess the order</small></span><span role="cell"><b>4 logical changes</b><small>Review behavior in a suggested sequence</small></span></div>
+            <div class="compare-row" role="row"><span role="cell"><b>Scattered comments</b><small>Similar concerns repeat on separate lines</small></span><span role="cell"><b>Clustered review insights</b><small>Active, resolved, disputed, and outdated stay visible</small></span></div>
+            <div class="compare-row" role="row"><span role="cell"><b>“Is this covered?”</b><small>Search test folders after the fact</small></span><span role="cell"><b>Test coverage → behavior</b><small>Covered, partial, or missing — with evidence</small></span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="method-section shell reveal" id="method" aria-labelledby="method-title">
+        <div class="section-label"><span>Method</span><span>03 / 05</span></div>
+        <div class="method-header"><div><p class="kicker">A deliberate handoff</p><h2 id="method-title">From pull request to<br />shared understanding.</h2></div><p>Each run is bounded, explicit, and orchestrated from your machine. Choose the runtime, see the consent boundary, then follow validated output through the fixed UI.</p></div>
+        <div class="flow-layout">
+          <ol class="flow-steps" aria-label="How PR Atlas works">
+            <li><button class="flow-step is-active" type="button" data-step="0" aria-controls="flow-detail" aria-pressed="true"><span class="step-index">01</span><span><b>GitHub CLI</b><small>Read repositories, pull requests, and review threads</small></span><span class="step-arrow" aria-hidden="true">↘</span></button></li>
+            <li><button class="flow-step" type="button" data-step="1" aria-controls="flow-detail" aria-pressed="false"><span class="step-index">02</span><span><b>Managed checkout</b><small>Analyze an app-managed clone/worktree — never your branch</small></span><span class="step-arrow" aria-hidden="true">↘</span></button></li>
+            <li><button class="flow-step" type="button" data-step="2" aria-controls="flow-detail" aria-pressed="false"><span class="step-index">03</span><span><b>Chosen local agent</b><small>Codex CLI, Cursor Agent, or Claude Code after consent</small></span><span class="step-arrow" aria-hidden="true">↘</span></button></li>
+            <li><button class="flow-step" type="button" data-step="3" aria-controls="flow-detail" aria-pressed="false"><span class="step-index">04</span><span><b>Validated walkthrough</b><small>Schema, SHAs, evidence, and review coverage checked</small></span><span class="step-arrow" aria-hidden="true">↘</span></button></li>
+            <li><button class="flow-step" type="button" data-step="4" aria-controls="flow-detail" aria-pressed="false"><span class="step-index">05</span><span><b>Human review</b><small>Follow the map, inspect the evidence, make the call</small></span><span class="step-arrow" aria-hidden="true">↘</span></button></li>
+          </ol>
+          <div class="flow-detail" id="flow-detail" aria-live="polite">
+            <div class="flow-detail-top"><span class="flow-detail-label">STEP 01 / INPUT</span><span class="flow-pulse" aria-hidden="true"></span></div>
+            <div class="flow-icon" aria-hidden="true">⌘</div>
+            <h3>Start with the context you already trust.</h3>
+            <p>PR Atlas reuses your authenticated GitHub CLI session for read-oriented discovery. No account, OAuth flow, or personal-token store is introduced.</p>
+            <div class="flow-code"><span>$</span> gh pr view 482 --repo runway/atlas</div>
+          </div>
+        </div>
+        <div class="method-media">
+          <div class="method-media-copy"><p class="kicker">A short guided pass</p><h3>Behavior flows, one validated frame at a time.</h3><p>Switch from the system overview to data, dependency, and user-action paths without losing the evidence trail.</p></div>
+          <div class="demo-player">
+            <video class="product-demo" controls muted loop autoplay playsinline preload="metadata" poster="assets/pr-atlas-overview.webp" aria-label="PR Atlas walkthrough moving from logical changes to flow views">
+              <source src="assets/pr-atlas-demo.mp4" type="video/mp4" />
+            </video>
+            <div class="video-fallback"><img src="assets/pr-atlas-flows.webp" alt="PR Atlas flow view showing connected system nodes" /><span>Static flow view — press play when motion is welcome.</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="features-section shell reveal" id="features" aria-labelledby="features-title">
+        <div class="section-label"><span>Inside the map</span><span>04 / 05</span></div>
+        <div class="features-intro"><p class="kicker">One pull request, several useful readings</p><h2 id="features-title">Make the invisible structure legible.</h2><p>Start broad, zoom into a behavior, and always have a source path back to the changed code.</p></div>
+        <div class="media-pair" aria-label="PR Atlas product views"><figure><img src="assets/pr-atlas-groups.webp" alt="PR Atlas logical change groups view" /><figcaption><span>View 01</span> Change groups</figcaption></figure><figure><img src="assets/pr-atlas-flows.webp" alt="PR Atlas system and user flow view" /><figcaption><span>View 02</span> Behavior flows</figcaption></figure></div>
+        <div class="feature-list">
+          <article class="feature-row"><div class="feature-marker">A1</div><div class="feature-copy"><h3>Logical change groups</h3><p>Group files, symbols, rationale, before/after behavior, and review order into one explainable unit.</p></div><div class="feature-aside"><span>files → behavior</span><span class="feature-arrow">↗</span></div></article>
+          <article class="feature-row"><div class="feature-marker">A2</div><div class="feature-copy"><h3>Four flow views</h3><p>Trace the system overview, data flow, code dependency, and user action with changed/context filters and guided tours.</p></div><div class="feature-aside"><span>system · data · dependency · user</span><span class="feature-arrow">↗</span></div></article>
+          <article class="feature-row"><div class="feature-marker">A3</div><div class="feature-copy"><h3>Review insight clustering</h3><p>Keep human and automated threads connected while preserving active, resolved, disputed, and outdated state.</p></div><div class="feature-aside"><span>signal, not verdict</span><span class="feature-arrow">↗</span></div></article>
+          <article class="feature-row"><div class="feature-marker">A4</div><div class="feature-copy"><h3>Tests tied to behavior</h3><p>See which changed behaviors are covered, partial, or missing — and jump to the exact assertion or file evidence.</p></div><div class="feature-aside"><span>covered · partial · missing</span><span class="feature-arrow">↗</span></div></article>
+          <article class="feature-row"><div class="feature-marker">A5</div><div class="feature-copy"><h3>History you can trust</h3><p>Every validated run records provider, reported model, schema and skill versions, and analyzed commit SHA. New commits make it stale.</p></div><div class="feature-aside"><span>traceable by commit</span><span class="feature-arrow">↗</span></div></article>
+        </div>
+      </section>
+
+      <section class="boundaries-section shell reveal" id="boundaries" aria-labelledby="boundaries-title">
+        <div class="section-label"><span>Trust &amp; boundaries</span><span>05 / 05</span></div>
+        <div class="boundary-grid">
+          <div class="boundary-intro"><p class="kicker">Useful because it stays in its lane</p><h2 id="boundaries-title">Clarity without a hidden hand.</h2><p>PR Atlas is a comprehension and navigation tool. It does not replace human judgment with an automatic approval verdict.</p><a class="text-link" href="https://github.com/roeyazroel/pr-atlas#data-privacy-and-security-boundaries">Read the security boundaries <span aria-hidden="true">↗</span></a></div>
+          <ul class="boundary-list">
+            <li><span class="boundary-icon">01</span><span><b>Local-first by default</b><small>Source, inputs, logs, and validated walkthroughs stay in Electron app data; managed worktrees do not alter your checkout.</small></span></li>
+            <li><span class="boundary-icon">02</span><span><b>Explicit provider consent</b><small>See the provider-specific confirmation before repository context is sent to its configured model service.</small></span></li>
+            <li><span class="boundary-icon">03</span><span><b>Fixed, validated UI</b><small>Schema-checked JSON renders in the app. Provider-generated HTML and JavaScript never execute in the renderer.</small></span></li>
+            <li><span class="boundary-icon">04</span><span><b>Read-oriented GitHub access</b><small>Discovery fetches and reads. PR Atlas does not post, edit, resolve, or approve reviews.</small></span></li>
+          </ul>
+        </div>
+        <div class="runtime-row"><span class="runtime-label">Supported local runtimes</span><span class="runtime">Codex CLI <i>codex</i></span><span class="runtime">Cursor Agent <i>cursor-agent</i></span><span class="runtime">Claude Code <i>claude</i></span></div>
+      </section>
+
+      <section class="quickstart-section shell reveal" id="quickstart" aria-labelledby="quickstart-title">
+        <div class="quickstart-heading"><p class="kicker">Three small steps</p><h2 id="quickstart-title">Start with your next<br />hard-to-review PR.</h2></div>
+        <ol class="quickstart-list"><li><span>01</span><div><b>Authenticate GitHub CLI</b><code>gh auth login --hostname github.com</code></div></li><li><span>02</span><div><b>Install and launch</b><code>npm install &amp;&amp; npm run dev</code></div></li><li><span>03</span><div><b>Choose, consent, understand</b><p>Select a repository, PR, provider, and model. Then follow the evidence.</p></div></li></ol>
+      </section>
+
+      <section class="closing-section shell reveal" aria-labelledby="closing-title">
+        <div class="closing-rule"></div>
+        <p class="kicker">The next review can begin with a map.</p>
+        <h2 id="closing-title">See what changed.<br /><em>See why it matters.</em></h2>
+        <div class="hero-actions"><a class="button button-primary" href="https://github.com/roeyazroel/pr-atlas/releases/latest">Get PR Atlas <span aria-hidden="true">↗</span></a><a class="button button-secondary" href="https://github.com/roeyazroel/pr-atlas">Explore on GitHub <span aria-hidden="true">↗</span></a></div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-grid">
+        <a class="wordmark footer-mark" href="#overview" aria-label="PR Atlas home"><img src="assets/pr-atlas-logo.png" width="152" height="37" alt="PR Atlas" /></a>
+        <p>Understand the changed system, not just the changed files.</p>
+        <div class="footer-links"><a href="https://github.com/roeyazroel/pr-atlas">GitHub <span aria-hidden="true">↗</span></a><a href="https://github.com/roeyazroel/pr-atlas/releases/latest">Releases <span aria-hidden="true">↗</span></a><a href="#boundaries">Boundaries</a></div>
+        <small>© 2026 PR Atlas · Built for thoughtful review</small>
+      </div>
+    </footer>
+  </body>
+</html>
