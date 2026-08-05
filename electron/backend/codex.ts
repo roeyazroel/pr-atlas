@@ -33,6 +33,7 @@ export class CodexAdapter implements AgentAdapter {
         '--ephemeral',
         '--ignore-user-config',
         '--ignore-rules',
+        ...(task ? ['--skip-git-repo-check'] : []),
         '--output-schema', schemaPath,
         buildAnalysisPrompt(request, inputDirectory, task),
       ];

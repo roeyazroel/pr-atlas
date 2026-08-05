@@ -951,6 +951,16 @@ describe("provider-neutral agent adapters", () => {
     );
   });
 
+  it("allows an isolated Codex map task to run outside a Git worktree", async () => {
+    const calls: SpawnCall[] = [];
+    const adapter = new CodexAdapter({ run: vi.fn(async () => ({ stdout: "codex-cli 0.146.0" })) }, fakeSpawn('{"taskId":"map-001","observations":[]}', calls));
+    await adapter.analyze(requestFor("codex"), "/isolated/map", "/isolated/map", undefined, progress, undefined, { kind: "map", id: "map-001", total: 1, assignedPaths: ["src/a.ts"], assignedUnits: [] });
+    const flag = calls[0].args.indexOf("--skip-git-repo-check");
+    expect(flag).toBeGreaterThan(0);
+    expect(flag).toBeLessThan(calls[0].args.indexOf("--output-schema"));
+    expect(calls[0].args.at(-1)).toContain("map stage");
+  });
+
   it("starts Cursor Agent in ask mode with sandboxing and the worktree/input roots", async () => {
     const calls: SpawnCall[] = [];
     const runner = {
