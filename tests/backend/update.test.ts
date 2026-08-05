@@ -115,6 +115,31 @@ describe('desktop release update checks', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('does not overwrite a target created after collision checking', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-race-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const body = 'new artifact'
+      const target = join(root, artifactName)
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: digestFor(body),
+      }
+      const fetcher = async () => {
+        await writeFile(target, 'created by another process')
+        return new Response(body, { status: 200 })
+      }
+
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'darwin', arch: 'arm64', fetcher })
+
+      expect(result).toMatchObject({ success: true, artifactName })
+      expect(result.path).not.toBe(target)
+      await expect(readFile(target, 'utf8')).resolves.toBe('created by another process')
+      await expect(readFile(result.path!, 'utf8')).resolves.toBe(body)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('downloads the explicit Linux deb fallback when no AppImage is selected', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-deb-'))
     try {

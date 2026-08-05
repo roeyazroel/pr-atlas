@@ -1,4 +1,5 @@
-import { open, lstat, rename, stat, unlink } from 'node:fs/promises'
+import { copyFile, lstat, open, stat, unlink } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { join, parse, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import type { UpdateCheckResult } from '../../shared/contracts.js'
@@ -107,6 +108,11 @@ async function hashRegularFile(path: string): Promise<string | null> {
   } catch { return null }
 }
 
+/** Finalizes a verified download without replacing a file created by another process. */
+async function finalizeWithoutOverwrite(source: string, target: string): Promise<void> {
+  await copyFile(source, target, constants.COPYFILE_EXCL)
+}
+
 /** Downloads only an update result previously validated by checkForUpdate. */
 export async function downloadUpdateArtifact(update: UpdateCheckResult, options: UpdateDownloadOptions): Promise<UpdateDownloadResult> {
   const version = update.latestVersion
@@ -125,7 +131,7 @@ export async function downloadUpdateArtifact(update: UpdateCheckResult, options:
     const directory = resolve(options.downloadsPath)
     const directoryInfo = await stat(directory)
     if (!directoryInfo.isDirectory()) return failed()
-    const target = await chooseTarget(directory, artifactName)
+    let target = await chooseTarget(directory, artifactName)
     const temporaryPath = join(directory, `.${artifactName}.${randomUUID()}.part`)
     let temporaryCreated = false
     let targetCreated = false
@@ -142,11 +148,20 @@ export async function downloadUpdateArtifact(update: UpdateCheckResult, options:
       if (written.bytes === 0 || written.digest !== update.digest) return failed()
       const temporaryInfo = await stat(temporaryPath)
       if (!temporaryInfo.isFile() || temporaryInfo.size !== written.bytes || temporaryInfo.size > maxBytes) return failed()
-      await rename(temporaryPath, target)
-      targetCreated = true
+      while (true) {
+        try {
+          await finalizeWithoutOverwrite(temporaryPath, target)
+          targetCreated = true
+          break
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+          target = await chooseTarget(directory, artifactName)
+        }
+      }
+      await unlink(temporaryPath)
+      temporaryCreated = false
       const targetInfo = await lstat(target)
       if (!targetInfo.isFile() || targetInfo.size !== written.bytes || await hashRegularFile(target) !== update.digest) return failed()
-      temporaryCreated = false
       targetCreated = false
       return { success: true, artifactName, path: target, digest: update.digest }
     } finally {

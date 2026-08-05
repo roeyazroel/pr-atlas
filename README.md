@@ -249,15 +249,21 @@ path is deliberately narrow:
    (Linux may use the explicit deb fallback).
 4. Require the asset download URL to be the exact HTTPS GitHub release path;
    redirects are limited to GitHub’s release/CDN hosts.
-5. Download atomically into the user’s Downloads directory, stream-hash the
-   bytes, and require the GitHub-provided `sha256:<64 lowercase hex>` digest to
-   match. Existing files are never overwritten.
-6. Hash the completed file again immediately before opening it. A tampered,
-   missing, or otherwise mismatched artifact is refused.
+5. Download to a hidden temporary file in the user’s Downloads directory,
+   stream-hash the bytes, and require the GitHub-provided
+   `sha256:<64 lowercase hex>` digest to match. Finalization is exclusive, so
+   existing files and files created concurrently are never overwritten.
+6. Hash the completed file again immediately before opening it, refusing a
+   missing or mismatched artifact at that check.
 
 The sidebar provides a direct Download action, then a one-click Open installer
 action after verification; View release remains available as a fallback. The
 app does not silently replace the running binary.
+
+This protects against corrupt downloads and ordinary post-download tampering.
+A local actor that can replace files in Downloads during the narrow interval
+between the final hash and the operating system opening the path remains a
+residual risk of the path-based installer launch.
 
 ### Release Please flow
 
