@@ -199,6 +199,8 @@ export interface UpdateCheckResult {
   downloadUrl?: string;
   /** Safe basename of the selected installer asset. */
   artifactName?: string;
+  /** Exact GitHub-provided SHA-256 digest for the selected installer asset. */
+  digest?: string;
   checkedAt: string;
   /** Always generic; response bodies and network diagnostics never cross IPC. */
   error?: string;
@@ -229,6 +231,7 @@ export interface UpdateDownloadResult {
   success: boolean;
   artifactName?: string;
   path?: string;
+  digest?: string;
   /** Always generic; implementation diagnostics never cross IPC. */
   error?: string;
 }

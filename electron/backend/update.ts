@@ -76,6 +76,7 @@ export interface UpdateCheckOptions {
 interface ReleaseAsset {
   name?: unknown
   browser_download_url?: unknown
+  digest?: unknown
 }
 
 const ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/
@@ -85,13 +86,20 @@ export function safeArtifactName(value: unknown): value is string {
   return typeof value === 'string' && ARTIFACT_NAME.test(value) && value !== '.' && value !== '..' && !value.includes('..\\')
 }
 
+export function isSha256Digest(value: unknown): value is string {
+  return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value)
+}
+
 export function expectedAssetName(version: string, platform: NodeJS.Platform, arch: string, fallbackDeb = false): string | null {
   const os = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : platform === 'linux' ? 'linux' : null
   if (!os) return null
   if (platform === 'darwin' && arch !== 'x64' && arch !== 'arm64') return null
   if (platform === 'win32' && arch !== 'x64') return null
   if (platform === 'linux' && arch !== 'x64') return null
-  const extension = platform === 'darwin' ? 'dmg' : platform === 'win32' ? 'exe' : fallbackDeb ? 'deb' : 'AppImage'
+  if (platform === 'linux') {
+    return fallbackDeb ? `PR-Atlas-${version}-linux-amd64.deb` : `PR-Atlas-${version}-linux-x86_64.AppImage`
+  }
+  const extension = platform === 'darwin' ? 'dmg' : 'exe'
   return `PR-Atlas-${version}-${os}-${arch}.${extension}`
 }
 
@@ -105,7 +113,7 @@ export function safeArtifactUrl(value: unknown, version: string, name: string): 
   } catch { return null }
 }
 
-function selectAsset(assets: unknown, version: string, platform: NodeJS.Platform, arch: string): { name: string; downloadUrl: string } | null {
+function selectAsset(assets: unknown, version: string, platform: NodeJS.Platform, arch: string): { name: string; downloadUrl: string; digest: string } | null {
   if (!Array.isArray(assets)) return null
   const candidates = assets.filter((asset): asset is ReleaseAsset => Boolean(asset && typeof asset === 'object'))
   const names = platform === 'linux'
@@ -114,9 +122,11 @@ function selectAsset(assets: unknown, version: string, platform: NodeJS.Platform
   for (const expected of names) {
     if (!expected) continue
     const asset = candidates.find((candidate) => candidate.name === expected)
-    if (!asset || !safeArtifactName(asset.name)) continue
+    if (!asset) continue
+    if (!safeArtifactName(asset.name)) return null
     const downloadUrl = safeArtifactUrl(asset.browser_download_url, version, asset.name)
-    if (downloadUrl) return { name: asset.name, downloadUrl }
+    if (!downloadUrl || !isSha256Digest(asset.digest)) return null
+    return { name: asset.name, downloadUrl, digest: asset.digest }
   }
   return null
 }
@@ -153,7 +163,7 @@ export async function checkForUpdate(currentVersion: string, options: UpdateChec
       latestVersion: latest,
       available: true,
       releaseUrl,
-      ...(selected ? { downloadUrl: selected.downloadUrl, artifactName: selected.name } : {}),
+      ...(selected ? { downloadUrl: selected.downloadUrl, artifactName: selected.name, digest: selected.digest } : {}),
       checkedAt,
     }
   } catch { return failed() }

@@ -12,6 +12,7 @@ import type { AnalysisRequest, UpdateCheckResult, UpdateDownloadResult } from '.
 let analysis: AnalysisService;
 let latestSafeUpdate: UpdateCheckResult | null = null;
 let downloadedUpdatePath: string | null = null;
+let downloadedUpdateDigest: string | null = null;
 const GENERIC_UPDATE_DOWNLOAD_ERROR = 'Could not download the update.';
 
 export interface EvidenceOpenOptions {
@@ -100,8 +101,9 @@ function registerIpc(): void {
       platform: process.platform,
       arch: process.arch,
     });
-    latestSafeUpdate = result.available && result.downloadUrl && result.artifactName ? result : null;
+    latestSafeUpdate = result.available && result.downloadUrl && result.artifactName && result.digest ? result : null;
     downloadedUpdatePath = null;
+    downloadedUpdateDigest = null;
     return result;
   });
   ipcMain.handle('pr-atlas:download-update', async (): Promise<UpdateDownloadResult> => {
@@ -112,9 +114,10 @@ function registerIpc(): void {
       arch: process.arch,
     });
     downloadedUpdatePath = result.success ? result.path ?? null : null;
+    downloadedUpdateDigest = result.success ? result.digest ?? null : null;
     return result;
   });
-  ipcMain.handle('pr-atlas:open-downloaded-update', () => openDownloadedArtifact(downloadedUpdatePath, (path) => shell.openPath(path)));
+  ipcMain.handle('pr-atlas:open-downloaded-update', () => openDownloadedArtifact(downloadedUpdatePath, downloadedUpdateDigest, (path) => shell.openPath(path)));
 }
 app.whenReady().then(() => {
   analysis = new AnalysisService(app.getPath('userData'), undefined, (event) => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('pr-atlas:progress', event); });

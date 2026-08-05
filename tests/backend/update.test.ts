@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { checkForUpdate, compareVersions } from '../../electron/backend/update'
-import { downloadUpdateArtifact } from '../../electron/backend/update-download'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { downloadUpdateArtifact, openDownloadedArtifact } from '../../electron/backend/update-download'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+const digestFor = (body: string): string => `sha256:${createHash('sha256').update(body).digest('hex')}`
+const VALID_DIGEST = `sha256:${'a'.repeat(64)}`
 
 describe('desktop release update checks', () => {
   it('compares semantic versions including prereleases without lexical mistakes', () => {
@@ -40,9 +44,9 @@ describe('desktop release update checks', () => {
       draft: false,
       prerelease: false,
       assets: [
-        { name: 'PR-Atlas-9.4.0-mac-arm64.dmg', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-arm64.dmg' },
-        { name: 'PR-Atlas-9.4.0-mac-x64.dmg', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-x64.dmg' },
-        { name: 'PR-Atlas-9.4.0-win-x64.exe', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-win-x64.exe' },
+        { name: 'PR-Atlas-9.4.0-mac-arm64.dmg', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-arm64.dmg', digest: VALID_DIGEST },
+        { name: 'PR-Atlas-9.4.0-mac-x64.dmg', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-x64.dmg', digest: VALID_DIGEST },
+        { name: 'PR-Atlas-9.4.0-win-x64.exe', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-win-x64.exe', digest: VALID_DIGEST },
       ],
     }), { status: 200 }))
 
@@ -52,6 +56,7 @@ describe('desktop release update checks', () => {
       available: true,
       artifactName: 'PR-Atlas-9.4.0-mac-arm64.dmg',
       downloadUrl: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-arm64.dmg',
+      digest: VALID_DIGEST,
     })
   })
 
@@ -67,51 +72,110 @@ describe('desktop release update checks', () => {
     expect(JSON.stringify(failed)).not.toContain('do-not-return')
   })
 
+  it('selects the release-matrix Linux x86_64 AppImage for x64', async () => {
+    const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
+    const fetcher = async () => new Response(JSON.stringify({
+      tag_name: 'v9.4.0', html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', draft: false,
+      assets: [{ name: artifactName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: VALID_DIGEST }],
+    }), { status: 200 })
+    await expect(checkForUpdate('0.1.0', { fetcher, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: true, artifactName, digest: VALID_DIGEST })
+  })
+
+  it('fails closed when the selected asset digest is missing or malformed', async () => {
+    const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
+    const fallbackName = 'PR-Atlas-9.4.0-linux-amd64.deb'
+    for (const digest of [undefined, 'sha256:ABC', `sha256:${'a'.repeat(63)}g`]) {
+      const fetcher = async () => new Response(JSON.stringify({
+        tag_name: 'v9.4.0', html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', draft: false,
+        assets: [
+          { name: artifactName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, ...(digest === undefined ? {} : { digest }) },
+          { name: fallbackName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${fallbackName}`, digest: VALID_DIGEST },
+        ],
+      }), { status: 200 })
+      await expect(checkForUpdate('0.1.0', { fetcher, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: false, error: expect.any(String) })
+    }
+  })
+
   it('downloads the validated artifact into a collision-safe path and never overwrites an existing file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-'))
     try {
       const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const body = 'new artifact'
       const update = {
         currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
         releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
-        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`,
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: digestFor(body),
       }
       await (await import('node:fs/promises')).writeFile(join(root, artifactName), 'keep me')
-      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'darwin', arch: 'arm64', fetcher: async () => new Response('new artifact', { status: 200 }) })
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'darwin', arch: 'arm64', fetcher: async () => new Response(body, { status: 200 }) })
       expect(result).toMatchObject({ success: true, artifactName })
       expect(result.path).not.toBe(join(root, artifactName))
       await expect(readFile(join(root, artifactName), 'utf8')).resolves.toBe('keep me')
-      await expect(readFile(result.path!, 'utf8')).resolves.toBe('new artifact')
+      await expect(readFile(result.path!, 'utf8')).resolves.toBe(body)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('downloads the explicit Linux deb fallback when no AppImage is selected', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-deb-'))
     try {
-      const artifactName = 'PR-Atlas-9.4.0-linux-x64.deb'
+      const artifactName = 'PR-Atlas-9.4.0-linux-amd64.deb'
+      const body = 'deb artifact'
       const update = {
         currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
         releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
-        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`,
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: digestFor(body),
       }
-      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'linux', arch: 'x64', fetcher: async () => new Response('deb artifact', { status: 200 }) })
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'linux', arch: 'x64', fetcher: async () => new Response(body, { status: 200 }) })
       expect(result).toMatchObject({ success: true, artifactName })
-      await expect(readFile(result.path!, 'utf8')).resolves.toBe('deb artifact')
+      await expect(readFile(result.path!, 'utf8')).resolves.toBe(body)
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   it('rejects an empty artifact and leaves no downloaded file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-empty-'))
     try {
-      const artifactName = 'PR-Atlas-9.4.0-linux-x64.AppImage'
+      const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
       const update = {
         currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
         releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
-        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`,
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: digestFor(''),
       }
       const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'linux', arch: 'x64', fetcher: async () => new Response('', { status: 200 }) })
       expect(result).toMatchObject({ success: false, error: expect.any(String) })
       await expect(readFile(join(root, artifactName))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('rejects a digest mismatch and leaves no temporary or target artifact', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-mismatch-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: VALID_DIGEST,
+      }
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'linux', arch: 'x64', fetcher: async () => new Response('wrong bytes', { status: 200 }) })
+      expect(result).toMatchObject({ success: false, error: expect.any(String) })
+      await expect(readdir(root)).resolves.toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('refuses to open an artifact that was tampered with after download', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-tamper-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const body = 'verified bytes'
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: digestFor(body),
+      }
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'darwin', arch: 'arm64', fetcher: async () => new Response(body, { status: 200 }) })
+      await writeFile(result.path!, 'tampered bytes')
+      const openPath = vi.fn(async () => '')
+      await expect(openDownloadedArtifact(result.path!, digestFor(body), openPath)).resolves.toBe(false)
+      expect(openPath).not.toHaveBeenCalled()
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })
