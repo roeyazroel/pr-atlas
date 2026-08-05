@@ -10,7 +10,7 @@ import { analysisStages, pullRequests, repositories } from './data/demo';
 import { AnalysisStage, ChangeGroup, Evidence, Flow, FlowNode, PullRequest, PRStatus, Repository, ReviewInsight, ReviewReply, ReviewState, ReviewThread, TestMapping } from './types';
 import RichThreadsView from './components/ThreadsView';
 import SelectMenu from './components/SelectMenu';
-import { AGENT_PROVIDER_PRIORITY, type AgentInstallationStatus, type AgentProvider, type AnalysisProgressEvent, type AnalysisRunResult, type AnalysisRunSummary, type BootstrapResult, type Graph as ContractGraph, type GraphEdge, type GraphNode, type PullRequestDTO, type RepositoryDTO, type UpdateCheckResult, type WalkthroughDocument } from '../shared/contracts';
+import { AGENT_PROVIDER_PRIORITY, type AgentInstallationStatus, type AgentProvider, type AnalysisProgressEvent, type AnalysisRunResult, type AnalysisRunSummary, type BootstrapResult, type Graph as ContractGraph, type GraphEdge, type GraphNode, type PullRequestDTO, type RepositoryDTO, type UpdateCheckResult, type UpdateDownloadProgress, type WalkthroughDocument } from '../shared/contracts';
 
 type View = 'overview' | 'walkthrough' | 'groups' | 'insights' | 'flows' | 'files' | 'tests' | 'threads' | 'details';
 export type Filter = 'all' | PRStatus | 'mine' | 'review' | 'reviewed';
@@ -50,6 +50,15 @@ const accountFromBootstrap = (result: Pick<BootstrapResult, 'account' | 'warning
   : { label: 'GitHub CLI offline', detail: result.warnings.join(' ') || 'GitHub CLI is unavailable. Retry discovery after authentication.', live: false, initials: 'GH', avatarLabel: 'GitHub CLI offline' };
 const relativeDate = (iso: string) => { const timestamp = Date.parse(iso); if (Number.isNaN(timestamp)) return iso || 'unknown'; const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60_000)); return minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.round(minutes / 60)} hr ago` : `${Math.round(minutes / 1440)} days ago`; };
 const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' ? value as Record<string, unknown> : {};
+const formatBytes = (bytes: number): string => {
+  const safeBytes = Number.isFinite(bytes) && bytes > 0 ? Math.floor(bytes) : 0;
+  if (safeBytes < 1024) return `${safeBytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = safeBytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+};
 
 type ThemeMode = 'light' | 'dark' | 'system';
 type ResolvedTheme = Exclude<ThemeMode, 'system'>;
@@ -209,6 +218,19 @@ function Avatar({ initials, className = '', label }: { initials: string; classNa
   return <span className={`avatar ${className}`} aria-hidden={label ? undefined : true} aria-label={label}>{initials}</span>;
 }
 
+function UpdateProgressIndicator({ version, progress }: { version: string; progress: UpdateDownloadProgress | null }) {
+  const downloadedBytes = Number.isFinite(progress?.downloadedBytes) && Number(progress?.downloadedBytes) >= 0 ? Math.floor(Number(progress?.downloadedBytes)) : 0;
+  const totalBytes = Number.isFinite(progress?.totalBytes) && Number(progress?.totalBytes) > 0 ? Math.floor(Number(progress?.totalBytes)) : undefined;
+  const calculatedPercent = totalBytes ? Math.floor(downloadedBytes / totalBytes * 100) : undefined;
+  const percent = totalBytes ? Math.max(0, Math.min(100, Number.isFinite(progress?.percent) ? Math.floor(Number(progress?.percent)) : calculatedPercent ?? 0)) : undefined;
+  const byteLabel = totalBytes ? `${formatBytes(downloadedBytes)} of ${formatBytes(totalBytes)}` : `${formatBytes(downloadedBytes)} downloaded`;
+  const valueText = percent === undefined ? byteLabel : `${percent}% · ${byteLabel}`;
+  return <div className="update-progress" role="progressbar" aria-label={`Downloading update ${version}`} aria-valuemin={percent === undefined ? undefined : 0} aria-valuemax={percent === undefined ? undefined : 100} aria-valuenow={percent} aria-valuetext={valueText}>
+    <div className="update-progress-meta"><strong>{percent === undefined ? 'Downloading' : `${percent}%`}</strong><span>{byteLabel}</span></div>
+    <div className={`update-progress-track ${percent === undefined ? 'indeterminate' : ''}`} aria-hidden="true"><span style={percent === undefined ? undefined : { width: `${percent}%` }} /></div>
+  </div>;
+}
+
 function App() {
   const api = liveApi();
   const electronMode = Boolean(api);
@@ -242,7 +264,10 @@ function App() {
   const [providerError, setProviderError] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
   const [updateDownloadState, setUpdateDownloadState] = useState<UpdateDownloadState>('idle');
+  const updateDownloadStateRef = useRef<UpdateDownloadState>('idle');
+  const updateCheckSequenceRef = useRef(0);
   const [updateDownloadError, setUpdateDownloadError] = useState('');
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgress | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>(() => readProviderPreference() ?? AGENT_PROVIDER_PRIORITY[0]);
   const [selectedModels, setSelectedModels] = useState<Partial<Record<AgentProvider, string>>>(() => readStored(MODEL_STORAGE_KEY, {}));
   const [customPrompt, setCustomPrompt] = useState(() => readStored(CUSTOM_PROMPT_STORAGE_KEY, ''));
@@ -327,8 +352,14 @@ function App() {
   useEffect(() => {
     if (!api?.checkForUpdate) return;
     let cancelled = false;
-    void api.checkForUpdate().then((result) => { if (!cancelled) { setUpdateInfo(result); setUpdateDownloadState('idle'); setUpdateDownloadError(''); } }).catch(() => undefined);
+    const sequence = ++updateCheckSequenceRef.current;
+    void api.checkForUpdate().then((result) => { if (!cancelled && sequence === updateCheckSequenceRef.current && updateDownloadStateRef.current !== 'downloading') { setUpdateInfo(result); updateDownloadStateRef.current = 'idle'; setUpdateDownloadState('idle'); setUpdateDownloadError(''); setUpdateDownloadProgress(null); } }).catch(() => undefined);
     return () => { cancelled = true; };
+  }, [api]);
+
+  useEffect(() => {
+    if (!api?.subscribeUpdateDownloadProgress) return;
+    return api.subscribeUpdateDownloadProgress((progress) => setUpdateDownloadProgress(progress));
   }, [api]);
 
   useEffect(() => {
@@ -446,19 +477,22 @@ function App() {
   const refreshLive = () => {
     if (!api) return;
     loadProviders();
-    void api.checkForUpdate?.().then((result) => { setUpdateInfo(result); setUpdateDownloadState('idle'); setUpdateDownloadError(''); }).catch(() => undefined);
+    if (updateDownloadState !== 'downloading' && api.checkForUpdate) {
+      const sequence = ++updateCheckSequenceRef.current;
+      void api.checkForUpdate().then((result) => { if (sequence === updateCheckSequenceRef.current && updateDownloadStateRef.current !== 'downloading') { setUpdateInfo(result); updateDownloadStateRef.current = 'idle'; setUpdateDownloadState('idle'); setUpdateDownloadError(''); setUpdateDownloadProgress(null); } }).catch(() => undefined);
+    }
     if (isLiveRepository && selectedRepository) setLivePRs((current) => { const next = { ...current }; delete next[selectedRepository.id]; return next; });
     else { setLiveLoading(true); void api.bootstrap().then((result) => { setAccount(accountFromBootstrap(result)); const discoveredRepositories = result.repositories.map(mapRepository); setLiveRepositories(discoveredRepositories); setSelectedRepo((current) => discoveredRepositories.some((repo) => repo.id === current) ? current : discoveredRepositories[0]?.id ?? ''); setLiveError(result.warnings.length ? result.warnings.join(' ') : null); }).catch(() => setLiveError('Could not refresh GitHub discovery.')).finally(() => setLiveLoading(false)); }
   };
 
   const downloadAvailableUpdate = async () => {
     if (!api?.downloadUpdate || updateDownloadState === 'downloading') return;
-    setUpdateDownloadState('downloading'); setUpdateDownloadError('');
+    updateCheckSequenceRef.current += 1; updateDownloadStateRef.current = 'downloading'; setUpdateDownloadState('downloading'); setUpdateDownloadError(''); setUpdateDownloadProgress(null);
     try {
       const result = await api.downloadUpdate();
-      if (result.success) setUpdateDownloadState('downloaded');
-      else { setUpdateDownloadState('failed'); setUpdateDownloadError(result.error ?? 'Could not download the update.'); }
-    } catch { setUpdateDownloadState('failed'); setUpdateDownloadError('Could not download the update.'); }
+      if (result.success) { updateDownloadStateRef.current = 'downloaded'; setUpdateDownloadState('downloaded'); }
+      else { updateDownloadStateRef.current = 'failed'; setUpdateDownloadState('failed'); setUpdateDownloadError(result.error ?? 'Could not download the update.'); }
+    } catch { updateDownloadStateRef.current = 'failed'; setUpdateDownloadState('failed'); setUpdateDownloadError('Could not download the update.'); }
   };
 
   const openDownloadedUpdate = async () => {
@@ -544,7 +578,7 @@ function App() {
               })}
             </div>
           </div>
-          <div className="sidebar-footer">{updateInfo?.available && updateInfo.releaseUrl && <div className="update-notice" role="status" aria-label={`New version available ${updateInfo.latestVersion}`}><div className="update-summary"><ArrowUp size={14} /><span><strong>New version available</strong><b>v{updateInfo.latestVersion}</b><small>Current version {updateInfo.currentVersion}</small></span></div><div className="update-actions">{updateInfo.downloadUrl && updateInfo.artifactName && api?.downloadUpdate && (updateDownloadState === 'downloaded' ? <button aria-label={`Open downloaded update ${updateInfo.latestVersion}`} onClick={() => void openDownloadedUpdate()}><ExternalLink size={11} />Open installer</button> : <button aria-label={`${updateDownloadState === 'failed' ? 'Retry' : 'Download'} update ${updateInfo.latestVersion}`} disabled={updateDownloadState === 'downloading'} onClick={() => void downloadAvailableUpdate()}><ArrowDown size={11} />{updateDownloadState === 'downloading' ? 'Downloading…' : updateDownloadState === 'failed' ? 'Retry' : 'Download'}</button>)}<button className="update-release-link" aria-label={`View release ${updateInfo.latestVersion}`} onClick={() => void api?.openExternal(updateInfo.releaseUrl!)}>View release</button></div>{updateDownloadState === 'downloaded' && !updateDownloadError && <small className="update-message">Saved to Downloads.</small>}{updateDownloadError && <small className="update-message error">{updateDownloadError}</small>}</div>}<div className="footer-line"><ShieldCheck size={14} /> <span>Read-only GitHub access</span></div><div className="footer-line muted"><Clock3 size={14} /> <span>Synced just now</span></div><button className="help-button"><CircleHelp size={14} /> Keyboard shortcuts</button></div>
+          <div className="sidebar-footer">{updateInfo?.available && updateInfo.releaseUrl && <div className="update-notice" role="status" aria-label={`New version available ${updateInfo.latestVersion}`}><div className="update-summary"><ArrowUp size={14} /><span><strong>New version available</strong><b>v{updateInfo.latestVersion}</b><small>Current version {updateInfo.currentVersion}</small></span></div>{updateDownloadState === 'downloading' && <UpdateProgressIndicator version={updateInfo.latestVersion ?? 'update'} progress={updateDownloadProgress} />}<div className="update-actions">{updateInfo.downloadUrl && updateInfo.artifactName && api?.downloadUpdate && (updateDownloadState === 'downloaded' ? <button aria-label={`Open downloaded update ${updateInfo.latestVersion}`} onClick={() => void openDownloadedUpdate()}><ExternalLink size={11} />Open installer</button> : <button aria-label={`${updateDownloadState === 'failed' ? 'Retry' : 'Download'} update ${updateInfo.latestVersion}`} disabled={updateDownloadState === 'downloading'} onClick={() => void downloadAvailableUpdate()}><ArrowDown size={11} />{updateDownloadState === 'downloading' ? 'Downloading…' : updateDownloadState === 'failed' ? 'Retry' : 'Download'}</button>)}<button className="update-release-link" aria-label={`View release ${updateInfo.latestVersion}`} onClick={() => void api?.openExternal(updateInfo.releaseUrl!)}>View release</button></div>{updateDownloadState === 'downloaded' && !updateDownloadError && <small className="update-message">Saved to Downloads.</small>}{updateDownloadError && <small className="update-message error">{updateDownloadError}</small>}</div>}<div className="footer-line"><ShieldCheck size={14} /> <span>Read-only GitHub access</span></div><div className="footer-line muted"><Clock3 size={14} /> <span>Synced just now</span></div><button className="help-button"><CircleHelp size={14} /> Keyboard shortcuts</button></div>
         </aside>
 
         <section className="pr-list-pane" aria-label="Pull request list">

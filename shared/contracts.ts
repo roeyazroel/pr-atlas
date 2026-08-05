@@ -219,9 +219,17 @@ export interface PrAtlasApi {
   checkForUpdate?: () => Promise<UpdateCheckResult>;
   /** Downloads the most recently validated update; renderer supplies no URL or path. */
   downloadUpdate?: () => Promise<UpdateDownloadResult>;
+  /** Optional for source-compatible browser fixtures. Electron always supplies it. */
+  subscribeUpdateDownloadProgress?: (listener: (event: UpdateDownloadProgress) => void) => () => void;
   /** Opens only the artifact successfully downloaded by the main process. */
   openDownloadedUpdate?: () => Promise<boolean>;
   subscribeAnalysisProgress(listener: (event: AnalysisProgressEvent) => void): () => void;
+}
+
+export interface UpdateDownloadProgress {
+  downloadedBytes: number;
+  totalBytes?: number;
+  percent?: number;
 }
 
 export interface UpdateDownloadResult {

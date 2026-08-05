@@ -115,6 +115,86 @@ describe('desktop release update checks', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it('reports monotonic byte and percentage progress while streaming an installer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-progress-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const first = new TextEncoder().encode('first half')
+      const second = new TextEncoder().encode('second half')
+      const body = Buffer.concat([first, second])
+      const progress: Array<{ downloadedBytes: number; totalBytes?: number; percent?: number }> = []
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: `sha256:${createHash('sha256').update(body).digest('hex')}`,
+      }
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(first); controller.enqueue(second); controller.close() },
+      })
+
+      const result = await downloadUpdateArtifact(update, {
+        downloadsPath: root,
+        platform: 'darwin',
+        arch: 'arm64',
+        fetcher: async () => new Response(stream, { status: 200, headers: { 'content-length': String(body.byteLength) } }),
+        onProgress: (event) => progress.push(event),
+      })
+
+      expect(result).toMatchObject({ success: true, artifactName })
+      expect(progress[0]).toEqual({ downloadedBytes: 0, totalBytes: body.byteLength, percent: 0 })
+      expect(progress.at(-1)).toEqual({ downloadedBytes: body.byteLength, totalBytes: body.byteLength, percent: 100 })
+      expect(progress.some((event) => event.percent && event.percent > 0 && event.percent < 100)).toBe(true)
+      expect(progress.map((event) => event.downloadedBytes)).toEqual([...progress].map((event) => event.downloadedBytes).sort((a, b) => a - b))
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('fails and removes the partial installer when the response body stalls', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-stall-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: VALID_DIGEST,
+      }
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])) } })
+
+      const result = await downloadUpdateArtifact(update, {
+        downloadsPath: root,
+        platform: 'darwin',
+        arch: 'arm64',
+        stallTimeoutMs: 20,
+        fetcher: async () => new Response(stream, { status: 200, headers: { 'content-length': '100' } }),
+      })
+
+      expect(result).toEqual({ success: false, error: 'Could not download the update.' })
+      await expect(readdir(root)).resolves.toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('aborts the response signal when a post-header validation fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-abort-'))
+    try {
+      const artifactName = 'PR-Atlas-9.4.0-mac-arm64.dmg'
+      const update = {
+        currentVersion: '0.1.0', latestVersion: '9.4.0', available: true,
+        releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', checkedAt: new Date().toISOString(),
+        artifactName, downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: VALID_DIGEST,
+      }
+      const captured: { signal?: AbortSignal } = {}
+      const fetcher = async (_url: string | URL | Request, init?: RequestInit) => {
+        if (init?.signal) captured.signal = init.signal
+        return new Response('too large', { status: 200, headers: { 'content-length': '100' } })
+      }
+
+      const result = await downloadUpdateArtifact(update, { downloadsPath: root, platform: 'darwin', arch: 'arm64', maxBytes: 10, fetcher })
+
+      expect(result).toEqual({ success: false, error: 'Could not download the update.' })
+      expect(captured.signal?.aborted).toBe(true)
+      await expect(readdir(root)).resolves.toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('does not overwrite a target created after collision checking', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pr-atlas-update-race-'))
     try {

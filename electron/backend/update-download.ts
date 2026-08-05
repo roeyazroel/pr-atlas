@@ -2,10 +2,12 @@ import { copyFile, lstat, open, stat, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, parse, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import type { UpdateCheckResult } from '../../shared/contracts.js'
+import type { UpdateCheckResult, UpdateDownloadProgress } from '../../shared/contracts.js'
 import { compareVersions, expectedAssetName, isSha256Digest, safeArtifactName, safeArtifactUrl } from './update.js'
 
 export const DEFAULT_MAX_UPDATE_BYTES = 1_024 * 1_024 * 1_024
+export const DEFAULT_UPDATE_STALL_TIMEOUT_MS = 30_000
+const UNKNOWN_TOTAL_PROGRESS_INTERVAL = 256 * 1024
 const SAFE_REDIRECT_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com', 'release-assets.githubusercontent.com'])
 const GENERIC_DOWNLOAD_ERROR = 'Could not download the update.'
 
@@ -15,6 +17,8 @@ export interface UpdateDownloadOptions {
   arch: string
   fetcher?: typeof fetch
   maxBytes?: number
+  onProgress?: (event: UpdateDownloadProgress) => void
+  stallTimeoutMs?: number
 }
 
 export interface UpdateDownloadResult {
@@ -53,35 +57,135 @@ async function chooseTarget(directory: string, artifactName: string): Promise<st
   throw new Error('No safe update destination available.')
 }
 
-async function writeResponse(response: Response, temporaryPath: string, maxBytes: number): Promise<{ bytes: number; digest: string }> {
-  const contentLength = response.headers.get('content-length')
-  if (contentLength !== null) {
-    const parsedLength = Number(contentLength)
-    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maxBytes) throw new Error('Update exceeds the maximum size.')
+function parseContentLength(value: string | null, maxBytes: number): number | undefined {
+  if (value === null) return undefined
+  const candidate = value.trim()
+  if (!/^\d+$/.test(candidate)) throw new Error('Invalid update content length.')
+  const parsed = Number(candidate)
+  if (!Number.isSafeInteger(parsed)) throw new Error('Invalid update content length.')
+  if (parsed > maxBytes) throw new Error('Update exceeds the maximum size.')
+  return parsed
+}
+
+function normalizedStallTimeout(value: number | undefined): number {
+  return Number.isFinite(value) && value !== undefined && value > 0
+    ? Math.max(1, Math.floor(value))
+    : DEFAULT_UPDATE_STALL_TIMEOUT_MS
+}
+
+async function withStallTimeout<T>(operation: Promise<T>, timeoutMs: number, onTimeout: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout() } catch { /* Aborting is best effort; the timeout still fails closed. */ }
+      reject(new Error('Update download stalled.'))
+    }, timeoutMs)
+  })
+  try { return await Promise.race([operation, timeout]) }
+  finally { if (timer !== undefined) clearTimeout(timer) }
+}
+
+interface ProgressReporter {
+  initial(): void;
+  update(downloadedBytes: number): void;
+  complete(downloadedBytes: number): void;
+}
+
+function createProgressReporter(totalBytes: number | undefined, onProgress: ((event: UpdateDownloadProgress) => void) | undefined): ProgressReporter {
+  let lastPercent: number | undefined
+  let lastUnknownBytes = 0
+  const emit = (downloadedBytes: number, percent?: number) => {
+    if (!onProgress) return
+    const event: UpdateDownloadProgress = { downloadedBytes }
+    if (totalBytes !== undefined) {
+      event.totalBytes = totalBytes
+      event.percent = percent
+    }
+    try { onProgress(event) } catch { /* Progress listeners must never change download outcome. */ }
   }
+  return {
+    initial() {
+      lastPercent = 0
+      lastUnknownBytes = 0
+      emit(0, totalBytes === undefined ? undefined : 0)
+    },
+    update(downloadedBytes) {
+      if (totalBytes !== undefined) {
+        const percent = totalBytes > 0
+          ? Math.max(0, Math.min(99, Math.floor((downloadedBytes / totalBytes) * 100)))
+          : 0
+        if (percent === lastPercent) return
+        lastPercent = percent
+        emit(downloadedBytes, percent)
+        return
+      }
+      if (downloadedBytes - lastUnknownBytes < UNKNOWN_TOTAL_PROGRESS_INTERVAL) return
+      lastUnknownBytes = downloadedBytes
+      emit(downloadedBytes)
+    },
+    complete(downloadedBytes) {
+      if (totalBytes !== undefined) {
+        if (lastPercent === 100) return
+        lastPercent = 100
+        emit(downloadedBytes, 100)
+        return
+      }
+      if (downloadedBytes === lastUnknownBytes) return
+      lastUnknownBytes = downloadedBytes
+      emit(downloadedBytes)
+    },
+  }
+}
+
+interface WriteResponseOptions {
+  maxBytes: number;
+  stallTimeoutMs: number;
+  controller: AbortController;
+  progress: ProgressReporter;
+}
+
+async function writeResponse(response: Response, temporaryPath: string, options: WriteResponseOptions): Promise<{ bytes: number; digest: string }> {
   const file = await open(temporaryPath, 'wx')
   let total = 0
   const hash = createHash('sha256')
   try {
     if (response.body) {
       const reader = response.body.getReader()
+      let lastDataAt = Date.now()
       try {
         while (true) {
-          const next = await reader.read()
+          const remainingTimeout = Math.max(1, options.stallTimeoutMs - (Date.now() - lastDataAt))
+          const next = await withStallTimeout(reader.read(), remainingTimeout, () => {
+            options.controller.abort()
+            void reader.cancel().catch(() => undefined)
+          })
           if (next.done) break
           const chunk = Buffer.from(next.value)
+          if (chunk.byteLength === 0) {
+            if (Date.now() - lastDataAt >= options.stallTimeoutMs) {
+              options.controller.abort()
+              void reader.cancel().catch(() => undefined)
+              throw new Error('Update download stalled.')
+            }
+            continue
+          }
+          lastDataAt = Date.now()
           total += chunk.byteLength
-          if (total > maxBytes) throw new Error('Update exceeds the maximum size.')
+          if (total > options.maxBytes) throw new Error('Update exceeds the maximum size.')
           hash.update(chunk)
           await file.write(chunk)
+          options.progress.update(total)
         }
-      } finally { reader.releaseLock() }
+      } finally {
+        try { reader.releaseLock() } catch { /* A stalled reader may already have been released by the stream. */ }
+      }
     } else {
-      const body = Buffer.from(await response.arrayBuffer())
-      if (body.byteLength > maxBytes) throw new Error('Update exceeds the maximum size.')
+      const body = Buffer.from(await withStallTimeout(response.arrayBuffer(), options.stallTimeoutMs, () => options.controller.abort()))
+      if (body.byteLength > options.maxBytes) throw new Error('Update exceeds the maximum size.')
       total = body.byteLength
       hash.update(body)
       await file.write(body)
+      options.progress.update(total)
     }
     await file.sync()
   } finally { await file.close() }
@@ -120,6 +224,7 @@ export async function downloadUpdateArtifact(update: UpdateCheckResult, options:
   const platform = options.platform
   const arch = options.arch
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_UPDATE_BYTES
+  const stallTimeoutMs = normalizedStallTimeout(options.stallTimeoutMs)
   if (!update.available || !version || !artifactName || !safeArtifactName(artifactName) || !isSha256Digest(update.digest) || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) return failed()
   if (compareVersions(version, version) !== 0) return failed()
   const expected = expectedAssetName(version, platform, arch)
@@ -135,16 +240,31 @@ export async function downloadUpdateArtifact(update: UpdateCheckResult, options:
     const temporaryPath = join(directory, `.${artifactName}.${randomUUID()}.part`)
     let temporaryCreated = false
     let targetCreated = false
+    const controller = new AbortController()
+    let completed = false
     try {
-      const response = await (options.fetcher ?? fetch)(canonicalUrl, {
-        method: 'GET',
-        redirect: 'follow',
-        headers: { Accept: 'application/octet-stream', 'User-Agent': 'PR-Atlas update' },
-      })
-      if (response.status !== 200 || !response.ok) return failed()
-      if (response.url && !validRedirect(response.url, canonicalUrl)) return failed()
+      const response = await withStallTimeout(
+        Promise.resolve().then(() => (options.fetcher ?? fetch)(canonicalUrl, {
+          method: 'GET',
+          redirect: 'follow',
+          headers: { Accept: 'application/octet-stream', 'User-Agent': 'PR-Atlas update' },
+          signal: controller.signal,
+        })),
+        stallTimeoutMs,
+        () => controller.abort(),
+      )
+      if (response.status !== 200 || !response.ok) { controller.abort(); return failed() }
+      if (response.url && !validRedirect(response.url, canonicalUrl)) { controller.abort(); return failed() }
+      const totalBytes = parseContentLength(response.headers.get('content-length'), maxBytes)
+      const progress = createProgressReporter(totalBytes, options.onProgress)
+      progress.initial()
       temporaryCreated = true
-      const written = await writeResponse(response, temporaryPath, maxBytes)
+      const written = await writeResponse(response, temporaryPath, {
+        maxBytes,
+        stallTimeoutMs,
+        controller,
+        progress,
+      })
       if (written.bytes === 0 || written.digest !== update.digest) return failed()
       const temporaryInfo = await stat(temporaryPath)
       if (!temporaryInfo.isFile() || temporaryInfo.size !== written.bytes || temporaryInfo.size > maxBytes) return failed()
@@ -162,9 +282,12 @@ export async function downloadUpdateArtifact(update: UpdateCheckResult, options:
       temporaryCreated = false
       const targetInfo = await lstat(target)
       if (!targetInfo.isFile() || targetInfo.size !== written.bytes || await hashRegularFile(target) !== update.digest) return failed()
+      progress.complete(written.bytes)
       targetCreated = false
+      completed = true
       return { success: true, artifactName, path: target, digest: update.digest }
     } finally {
+      if (!completed) controller.abort()
       if (temporaryCreated) {
         try { await unlink(temporaryPath) } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

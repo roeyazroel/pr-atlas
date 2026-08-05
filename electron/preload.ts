@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AnalysisProgressEvent, AnalysisRequest, PrAtlasApi } from '../shared/contracts.js';
+import type { AnalysisProgressEvent, AnalysisRequest, PrAtlasApi, UpdateDownloadProgress } from '../shared/contracts.js';
 
 // Kept only as a source-compatible type while the renderer migrates to PrAtlasApi.
 export type GithubOperation = 'status' | 'viewer' | 'repository' | 'pulls';
@@ -16,6 +16,11 @@ const api: PrAtlasApi = {
   checkForUpdate: () => ipcRenderer.invoke('pr-atlas:check-for-update'),
   downloadUpdate: () => ipcRenderer.invoke('pr-atlas:download-update'),
   openDownloadedUpdate: () => ipcRenderer.invoke('pr-atlas:open-downloaded-update'),
+  subscribeUpdateDownloadProgress: (listener: (event: UpdateDownloadProgress) => void) => {
+    const receive = (_event: Electron.IpcRendererEvent, event: UpdateDownloadProgress) => listener(event);
+    ipcRenderer.on('pr-atlas:update-download-progress', receive);
+    return () => ipcRenderer.removeListener('pr-atlas:update-download-progress', receive);
+  },
   subscribeAnalysisProgress: (listener) => { const receive = (_event: Electron.IpcRendererEvent, event: AnalysisProgressEvent) => listener(event); ipcRenderer.on('pr-atlas:progress', receive); return () => ipcRenderer.removeListener('pr-atlas:progress', receive); },
 };
 contextBridge.exposeInMainWorld('prAtlas', api);

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
@@ -164,8 +164,11 @@ const providers: AgentInstallationStatus[] = [
   { provider: 'cursor', displayName: 'Cursor Agent', executable: 'cursor-agent', installed: false, capabilities, models: [], error: 'Cursor Agent was not found.' },
 ]
 
+type UpdateProgress = { downloadedBytes: number; totalBytes?: number; percent?: number }
+let updateProgressListener: ((event: UpdateProgress) => void) | null = null
+
 function installLiveApi() {
-  const api: PrAtlasApi = {
+  const api = {
     bootstrap: vi.fn(async (): Promise<BootstrapResult> => ({ account: { source: 'github', login: 'maya', name: 'Maya Chen', avatarUrl: null }, repositories: [repository], warnings: [] })),
     listProviders: vi.fn(async () => providers),
     listPullRequests: vi.fn(async (name: string) => name === repository.fullName ? [pullRequest] : []),
@@ -178,8 +181,12 @@ function installLiveApi() {
     checkForUpdate: vi.fn(async () => ({ currentVersion: '0.1.0', latestVersion: '0.1.0', available: false, checkedAt: '2026-08-05T08:00:00.000Z' })),
     downloadUpdate: vi.fn(async () => ({ success: true, artifactName: 'PR-Atlas-9.4.0-mac-arm64.dmg', path: '/Users/maya/Downloads/PR-Atlas-9.4.0-mac-arm64.dmg' })),
     openDownloadedUpdate: vi.fn(async () => true),
+    subscribeUpdateDownloadProgress: vi.fn((listener: (event: UpdateProgress) => void) => {
+      updateProgressListener = listener
+      return () => { if (updateProgressListener === listener) updateProgressListener = null }
+    }),
     subscribeAnalysisProgress: vi.fn(() => () => undefined),
-  }
+  } as PrAtlasApi & { subscribeUpdateDownloadProgress(listener: (event: UpdateProgress) => void): () => void }
   Object.defineProperty(window, 'prAtlas', { configurable: true, writable: true, value: api })
   return api
 }
@@ -187,6 +194,7 @@ function installLiveApi() {
 describe('live Electron renderer contract', () => {
   beforeEach(() => {
     window.localStorage.clear()
+    updateProgressListener = null
     Object.defineProperty(window, 'prAtlas', { configurable: true, writable: true, value: undefined })
   })
 
@@ -229,7 +237,7 @@ describe('live Electron renderer contract', () => {
   it('downloads and opens a newer installer inside the client while retaining a release-page fallback', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
-    vi.mocked(api.checkForUpdate!).mockResolvedValue({
+    const availableUpdate = {
       currentVersion: '0.1.0',
       latestVersion: '9.4.0',
       available: true,
@@ -237,19 +245,68 @@ describe('live Electron renderer contract', () => {
       artifactName: 'PR-Atlas-9.4.0-mac-arm64.dmg',
       downloadUrl: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-arm64.dmg',
       checkedAt: '2026-08-05T08:00:00.000Z',
-    })
+    }
+    vi.mocked(api.checkForUpdate!).mockResolvedValue(availableUpdate)
+    let resolveDownload!: (result: Awaited<ReturnType<NonNullable<PrAtlasApi['downloadUpdate']>>>) => void
+    vi.mocked(api.downloadUpdate!).mockReturnValue(new Promise((resolve) => { resolveDownload = resolve }))
 
     render(<App />)
 
     const notification = await screen.findByLabelText(/new version available.*9\.4\.0/i)
     expect(notification).toBeInTheDocument()
     expect(screen.getByText(/current version 0\.1\.0/i)).toBeInTheDocument()
+    let resolveRefreshCheck!: (result: typeof availableUpdate) => void
+    vi.mocked(api.checkForUpdate!).mockReturnValueOnce(new Promise((resolve) => { resolveRefreshCheck = resolve }))
+    await user.click(screen.getAllByRole('button', { name: /refresh pull requests/i })[0])
+    expect(api.checkForUpdate).toHaveBeenCalledTimes(2)
     await user.click(screen.getByRole('button', { name: /download update 9\.4\.0/i }))
     expect(api.downloadUpdate).toHaveBeenCalledOnce()
+    expect(updateProgressListener).not.toBeNull()
+    act(() => updateProgressListener?.({ downloadedBytes: 50, totalBytes: 100, percent: 50 }))
+    const progressbar = screen.getByRole('progressbar', { name: /downloading update 9\.4\.0/i })
+    expect(progressbar).toHaveAttribute('aria-valuenow', '50')
+    expect(progressbar).toHaveAttribute('aria-valuetext', '50% · 50 B of 100 B')
+    expect(screen.getByText('50%')).toBeInTheDocument()
+    await user.click(screen.getAllByRole('button', { name: /refresh pull requests/i })[0])
+    expect(screen.getByRole('progressbar', { name: /downloading update 9\.4\.0/i })).toHaveAttribute('aria-valuenow', '50')
+    expect(screen.getByRole('button', { name: /download update 9\.4\.0/i })).toBeDisabled()
+    expect(api.downloadUpdate).toHaveBeenCalledOnce()
+    expect(api.checkForUpdate).toHaveBeenCalledTimes(2)
+    act(() => resolveDownload({ success: true, artifactName: 'PR-Atlas-9.4.0-mac-arm64.dmg', path: '/Users/maya/Downloads/PR-Atlas-9.4.0-mac-arm64.dmg' }))
+    expect(await screen.findByRole('button', { name: /open downloaded update 9\.4\.0/i })).toBeInTheDocument()
+    await act(async () => resolveRefreshCheck(availableUpdate))
+    expect(screen.getByRole('button', { name: /open downloaded update 9\.4\.0/i })).toBeInTheDocument()
     await user.click(await screen.findByRole('button', { name: /open downloaded update 9\.4\.0/i }))
     expect(api.openDownloadedUpdate).toHaveBeenCalledOnce()
     await user.click(screen.getByRole('button', { name: /view release 9\.4\.0/i }))
     expect(api.openExternal).toHaveBeenCalledWith('https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0')
+  })
+
+  it('keeps the newest update check when concurrent refreshes resolve out of order', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    const update = (version: string) => ({
+      currentVersion: '0.1.0', latestVersion: version, available: true,
+      releaseUrl: `https://github.com/roeyazroel/pr-atlas/releases/tag/v${version}`,
+      artifactName: `PR-Atlas-${version}-mac-arm64.dmg`,
+      downloadUrl: `https://github.com/roeyazroel/pr-atlas/releases/download/v${version}/PR-Atlas-${version}-mac-arm64.dmg`,
+      checkedAt: '2026-08-05T08:00:00.000Z',
+    })
+    vi.mocked(api.checkForUpdate!).mockResolvedValue(update('9.3.0'))
+    render(<App />)
+    expect(await screen.findByLabelText(/new version available.*9\.3\.0/i)).toBeInTheDocument()
+
+    let resolveOlder!: (result: ReturnType<typeof update>) => void
+    let resolveNewer!: (result: ReturnType<typeof update>) => void
+    vi.mocked(api.checkForUpdate!).mockReturnValueOnce(new Promise((resolve) => { resolveOlder = resolve })).mockReturnValueOnce(new Promise((resolve) => { resolveNewer = resolve }))
+    const refresh = screen.getAllByRole('button', { name: /refresh pull requests/i })[0]
+    await user.click(refresh)
+    await user.click(refresh)
+    await act(async () => resolveNewer(update('9.5.0')))
+    expect(screen.getByLabelText(/new version available.*9\.5\.0/i)).toBeInTheDocument()
+    await act(async () => resolveOlder(update('9.4.0')))
+    expect(screen.getByLabelText(/new version available.*9\.5\.0/i)).toBeInTheDocument()
+    expect(screen.queryByLabelText(/new version available.*9\.4\.0/i)).not.toBeInTheDocument()
   })
 
   it('uses tool-reported models, persists supplemental guidance, and auto-starts consent for an unprocessed PR', async () => {

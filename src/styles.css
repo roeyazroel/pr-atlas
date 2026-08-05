@@ -324,5 +324,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .update-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 25px; padding: 4px 7px; border: 1px solid var(--teal); border-radius: 4px; background: var(--teal); color: white; font-size: 8px; font-weight: 700; cursor: pointer; }
 .update-actions button:disabled { cursor: wait; opacity: .7; }
 .update-actions .update-release-link { border-color: var(--line-strong); background: transparent; color: var(--muted); font-weight: 600; }
+.update-progress { display: grid; gap: 4px; color: var(--ink); }
+.update-progress-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; font-size: 8px; }
+.update-progress-meta strong { flex: 0 0 auto; color: var(--teal); font-variant-numeric: tabular-nums; }
+.update-progress-meta span { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.update-progress-track { height: 4px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--teal) 15%, transparent); }
+.update-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--teal); transition: width .2s ease; }
+.update-progress-track.indeterminate span { width: 38%; animation: update-progress-sweep 1.15s ease-in-out infinite; }
+@keyframes update-progress-sweep { from { transform: translateX(-110%); } to { transform: translateX(290%); } }
 .update-message { color: var(--muted); font-size: 8px; line-height: 1.35; }
 .update-message.error { color: var(--danger); }

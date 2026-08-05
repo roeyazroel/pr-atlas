@@ -9,12 +9,15 @@ import { safeExternalUrl, validatePullNumber, validateRepository } from './backe
 import { resolveEvidencePath } from './backend/evidence.js';
 import { checkForUpdate } from './backend/update.js';
 import { downloadUpdateArtifact, openDownloadedArtifact } from './backend/update-download.js';
-import type { AnalysisRequest, UpdateCheckResult, UpdateDownloadResult } from '../shared/contracts.js';
+import type { AnalysisRequest, UpdateCheckResult, UpdateDownloadProgress, UpdateDownloadResult } from '../shared/contracts.js';
 
 let analysis: AnalysisService;
 let latestSafeUpdate: UpdateCheckResult | null = null;
 let downloadedUpdatePath: string | null = null;
 let downloadedUpdateDigest: string | null = null;
+let activeUpdateDownload: Promise<UpdateDownloadResult> | null = null;
+let updateDownloadGeneration = 0;
+let updateCheckSequence = 0;
 const GENERIC_UPDATE_DOWNLOAD_ERROR = 'Could not download the update.';
 
 export interface EvidenceOpenOptions {
@@ -92,26 +95,39 @@ function registerIpc(): void {
     } catch { return false; }
   });
   ipcMain.handle('pr-atlas:check-for-update', async () => {
+    const checkSequence = ++updateCheckSequence;
+    const downloadGenerationAtStart = updateDownloadGeneration;
+    const startedDuringDownload = activeUpdateDownload !== null;
     const result = await checkForUpdate(app.getVersion(), {
       feedUrl: process.env.PR_ATLAS_UPDATE_FEED_URL,
       platform: process.platform,
       arch: process.arch,
     });
-    latestSafeUpdate = result.available && result.downloadUrl && result.artifactName && result.digest ? result : null;
-    downloadedUpdatePath = null;
-    downloadedUpdateDigest = null;
+    if (checkSequence === updateCheckSequence && !startedDuringDownload && downloadGenerationAtStart === updateDownloadGeneration) {
+      latestSafeUpdate = result.available && result.downloadUrl && result.artifactName && result.digest ? result : null;
+      downloadedUpdatePath = null;
+      downloadedUpdateDigest = null;
+    }
     return result;
   });
-  ipcMain.handle('pr-atlas:download-update', async (): Promise<UpdateDownloadResult> => {
-    if (!latestSafeUpdate) return { success: false, error: GENERIC_UPDATE_DOWNLOAD_ERROR };
-    const result = await downloadUpdateArtifact(latestSafeUpdate, {
+  ipcMain.handle('pr-atlas:download-update', async (event): Promise<UpdateDownloadResult> => {
+    if (!latestSafeUpdate || activeUpdateDownload) return { success: false, error: GENERIC_UPDATE_DOWNLOAD_ERROR };
+    updateDownloadGeneration += 1;
+    const task = downloadUpdateArtifact(latestSafeUpdate, {
       downloadsPath: app.getPath('downloads'),
       platform: process.platform,
       arch: process.arch,
+      onProgress: (progress: UpdateDownloadProgress) => {
+        try { event.sender.send('pr-atlas:update-download-progress', progress); } catch { /* The invoking renderer may have closed during download. */ }
+      },
+    }).then((result) => {
+      downloadedUpdatePath = result.success ? result.path ?? null : null;
+      downloadedUpdateDigest = result.success ? result.digest ?? null : null;
+      return result;
     });
-    downloadedUpdatePath = result.success ? result.path ?? null : null;
-    downloadedUpdateDigest = result.success ? result.digest ?? null : null;
-    return result;
+    activeUpdateDownload = task;
+    try { return await task; }
+    finally { if (activeUpdateDownload === task) activeUpdateDownload = null; }
   });
   ipcMain.handle('pr-atlas:open-downloaded-update', () => openDownloadedArtifact(downloadedUpdatePath, downloadedUpdateDigest, (path) => shell.openPath(path)));
 }
