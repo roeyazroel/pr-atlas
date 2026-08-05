@@ -444,6 +444,9 @@ describe("PR Atlas desktop workflow", () => {
 
     expect(screen.getByText(/building your walkthrough/i)).toBeInTheDocument();
     expect(screen.getByText(/stage 1 of 6/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/analysis may take several minutes/i),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /cancel/i }));
 
@@ -512,9 +515,9 @@ describe("PR Atlas desktop workflow", () => {
       headSha: "head-sha",
       updatedAt: "2026-08-04T08:30:00.000Z",
       isDraft: false,
-      additions: 2,
-      deletions: 1,
-      changedFiles: 1,
+      additions: 1_200,
+      deletions: 150,
+      changedFiles: 30,
       labels: [],
       reviewDecision: null,
       reviewRequested: false,
@@ -569,6 +572,11 @@ describe("PR Atlas desktop workflow", () => {
         screen.getAllByRole("button", { name: /^analyze$/i }),
       ).toHaveLength(1);
       fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      expect(
+        screen.getByText(
+          /large pr: 30 files and 1,350 changed lines\. analysis may take several minutes\./i,
+        ),
+      ).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: /continue/i }));
       expect(startAnalysis).toHaveBeenCalledTimes(1);
 
@@ -581,6 +589,11 @@ describe("PR Atlas desktop workflow", () => {
         screen.getByText(/building your walkthrough/i),
       ).toBeInTheDocument();
       expect(screen.getByText(/stage 1 of 6/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /large pr: 30 files and 1,350 changed lines\. analysis may take several minutes\./i,
+        ),
+      ).toBeInTheDocument();
     } finally {
       Object.defineProperty(window, "prAtlas", {
         configurable: true,

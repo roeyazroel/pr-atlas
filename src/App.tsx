@@ -99,6 +99,20 @@ type AccountState = {
 };
 const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
+const LARGE_PR_FILE_THRESHOLD = 20;
+const LARGE_PR_CHANGE_THRESHOLD = 1_000;
+
+function analysisDurationNotice(
+  pr: Pick<PullRequest, "files" | "additions" | "deletions">,
+): string | null {
+  const changedLines = pr.additions + pr.deletions;
+  if (
+    pr.files < LARGE_PR_FILE_THRESHOLD &&
+    changedLines < LARGE_PR_CHANGE_THRESHOLD
+  )
+    return null;
+  return `Large PR: ${pr.files} files and ${changedLines.toLocaleString()} changed lines. Analysis may take several minutes.`;
+}
 
 const statusMeta: Record<PRStatus, { label: string; tone: string }> = {
   ready: { label: "Ready", tone: "ready" },
@@ -1370,6 +1384,9 @@ function App() {
             ],
           }
         : baseSelectedPR;
+  const largePRNotice = selectedPR
+    ? analysisDurationNotice(selectedPR)
+    : null;
 
   useEffect(() => {
     const runId = selectedPR?.walkthrough?.run.id;
@@ -2309,6 +2326,11 @@ function App() {
               configured model service. The validated walkthrough stays in local
               artifacts.
             </p>
+            {largePRNotice && (
+              <p className="analysis-message" role="status">
+                {largePRNotice}
+              </p>
+            )}
             {selectedModels[selectedProvider] && (
               <p className="confirm-detail">
                 Model: <code>{selectedModels[selectedProvider]}</code>
@@ -3079,6 +3101,7 @@ function ViewContent({
   )
     return (
       <AnalysisProgress
+        pr={pr}
         analysis={activeAnalysis}
         providerName={providerName}
         message={analysisMessage}
@@ -3269,11 +3292,13 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
 }
 
 function AnalysisProgress({
+  pr,
   analysis,
   providerName,
   onCancel,
   message,
 }: {
+  pr: Pick<PullRequest, "files" | "additions" | "deletions">;
   analysis: {
     stage: number;
     running: boolean;
@@ -3284,6 +3309,7 @@ function AnalysisProgress({
   onCancel: () => void;
   message?: string;
 }) {
+  const largePRNotice = analysisDurationNotice(pr);
   const live = Boolean(analysis.live);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -3309,6 +3335,11 @@ function AnalysisProgress({
           ? `${providerName} is processing repository context. Progress is streamed from the local Electron service; no result is installed until validation succeeds.`
           : "This demo analysis is a deterministic local fixture and is not an analysis of a real pull request."}
       </p>
+      {largePRNotice && (
+        <p className="analysis-message" role="status">
+          {largePRNotice}
+        </p>
+      )}
       {message && (
         <div className="analysis-message" role="status">
           {message}

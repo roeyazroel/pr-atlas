@@ -35,10 +35,10 @@ describe('desktop PATH normalization', () => {
       '/opt/homebrew/bin',
       '/usr/local/bin',
       `${homePath}/.local/bin`,
+      '/usr/bin',
       `${homePath}/.nvm/versions/node/v22.1.0/bin`,
       `${homePath}/.nvm/versions/node/v20.10.0/bin`,
       `${homePath}/.nvm/versions/node/v20.9.0/bin`,
-      '/usr/bin',
     ].join(':'))
   })
 
@@ -50,6 +50,23 @@ describe('desktop PATH normalization', () => {
       homePath,
       nvmVersionPaths: [nvmBin, nvmBin],
     })).toBe(`/opt/homebrew/bin:/usr/local/bin:${localBin}:${nvmBin}:/usr/bin`)
+  })
+
+  it('keeps an existing user-local CLI ahead of a discovered NVM fallback bin', () => {
+    const homePath = '/Users/alice'
+    const localBin = `${homePath}/.local/bin`
+    const olderNvmBin = `${homePath}/.nvm/versions/node/v20.13.1/bin`
+
+    expect(normalizeDesktopPath(`${localBin}:/usr/bin`, 'darwin', {
+      homePath,
+      nvmVersionPaths: [olderNvmBin],
+    })).toBe([
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      localBin,
+      '/usr/bin',
+      olderNvmBin,
+    ].join(':'))
   })
 
   it('discovers readable NVM version bins, ignores failures, and sorts semver versions newest first', () => {
