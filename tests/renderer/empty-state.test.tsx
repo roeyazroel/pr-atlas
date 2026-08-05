@@ -50,7 +50,7 @@ describe('renderer empty repository state', () => {
     await waitFor(() => expect(api.listPullRequests).toHaveBeenCalledWith(repository.fullName))
 
     const main = screen.getByRole('main')
-    expect(within(main).getByRole('heading', { name: 'No open pull requests' })).toBeInTheDocument()
+    expect(await within(main).findByRole('heading', { name: 'No open pull requests' })).toBeInTheDocument()
     expect(within(main).getByText(repository.fullName)).toBeInTheDocument()
     expect(within(main).getByRole('button', { name: 'Refresh pull requests' })).toBeInTheDocument()
     expect(within(main).queryByText('Select a pull request to open its walkthrough.')).not.toBeInTheDocument()

@@ -175,7 +175,6 @@ function installLiveApi() {
     loadAnalysisRun: vi.fn(async () => runResult),
     openExternal: vi.fn(async () => true),
     openEvidence: vi.fn(async () => true),
-    mapLocalRepository: vi.fn(async (name: string) => ({ repository: name, path: '/Users/maya/atlas' })),
     checkForUpdate: vi.fn(async () => ({ currentVersion: '0.1.0', latestVersion: '0.1.0', available: false, checkedAt: '2026-08-05T08:00:00.000Z' })),
     downloadUpdate: vi.fn(async () => ({ success: true, artifactName: 'PR-Atlas-9.4.0-mac-arm64.dmg', path: '/Users/maya/Downloads/PR-Atlas-9.4.0-mac-arm64.dmg' })),
     openDownloadedUpdate: vi.fn(async () => true),
@@ -192,7 +191,9 @@ describe('live Electron renderer contract', () => {
   })
 
   it('bootstraps discovery and renders the selected pull request from the Electron API', async () => {
+    const user = userEvent.setup()
     const api = installLiveApi()
+    window.localStorage.setItem('atlas:selected-repo', JSON.stringify('atlas'))
 
     render(<App />)
 
@@ -201,9 +202,28 @@ describe('live Electron renderer contract', () => {
     await waitFor(() => expect(api.listAnalysisRuns).toHaveBeenCalledWith(repository.fullName, pullRequest.number, pullRequest.headSha))
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalledWith(repository.fullName, pullRequest.number, runSummary.runId))
 
-    expect(screen.getByRole('combobox', { name: /repository/i })).toHaveValue(repository.fullName)
+    const repositorySelect = screen.getByRole('button', { name: /select repository/i })
+    expect(repositorySelect).toHaveTextContent(repository.fullName)
+    await user.click(repositorySelect)
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([repository.fullName])
+    await user.keyboard('{Escape}')
+    expect(screen.getByLabelText('GitHub account Maya Chen')).toHaveTextContent('MC')
+    expect(screen.queryByText('LOCAL MVP')).not.toBeInTheDocument()
     expect(screen.getByRole('listitem', { name: /#42 persist local walkthrough history/i })).toBeInTheDocument()
     expect(screen.getByText(document.summary.intent)).toBeInTheDocument()
+  })
+
+  it('falls back to the GitHub login when the account has no display name', async () => {
+    const api = installLiveApi()
+    vi.mocked(api.bootstrap).mockResolvedValue({
+      account: { source: 'github', login: 'singleword', name: null, avatarUrl: null },
+      repositories: [repository],
+      warnings: [],
+    })
+
+    render(<App />)
+
+    expect(await screen.findByLabelText('GitHub account singleword')).toHaveTextContent('S')
   })
 
   it('downloads and opens a newer installer inside the client while retaining a release-page fallback', async () => {
@@ -240,22 +260,22 @@ describe('live Electron renderer contract', () => {
     render(<App />)
 
     await waitFor(() => expect(api.listProviders).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('button', { name: /codex cli/i })).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/active provider: codex cli/i)).toBeInTheDocument()
+
     await user.click(screen.getByRole('button', { name: /open settings/i }))
-
     expect(screen.getByRole('radio', { name: /codex cli/i })).toBeChecked()
-    expect(screen.getByText(/1\.2\.3/)).toBeInTheDocument()
-    expect(screen.getByText(/0\.9\.0/)).toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /cursor agent/i })).toBeDisabled()
-    expect(screen.getByText(/unavailable/i)).toBeInTheDocument()
-
     await user.click(screen.getByRole('radio', { name: /claude code/i }))
     await user.click(screen.getByRole('radio', { name: /codex cli/i }))
     expect(JSON.parse(window.localStorage.getItem('atlas:provider') ?? 'null')).toBe('codex')
-    const model = screen.getByRole('combobox', { name: /model for codex cli/i })
-    expect(within(model).getAllByRole('option').map((option) => option.textContent)).toEqual(['GPT-5.6', 'GPT-5.6 mini'])
-    await user.selectOptions(model, 'gpt-5.6-mini')
+    const model = screen.getByRole('button', { name: /model for codex cli/i })
+    expect(model).toHaveTextContent('GPT-5.6')
+    await user.click(model)
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['GPT-5.6', 'GPT-5.6 mini'])
+    await user.click(screen.getByRole('option', { name: 'GPT-5.6 mini' }))
     await user.type(screen.getByRole('textbox', { name: /supplemental collection guidance/i }), 'Collect more migration and rollback evidence.')
-    expect(screen.getByRole('button', { name: /codex cli/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/active provider: codex cli/i)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /open settings/i }))
     await user.click(screen.getByRole('listitem', { name: /#42 persist local walkthrough history/i }))
@@ -349,7 +369,7 @@ describe('live Electron renderer contract', () => {
     expect(api.openEvidence).toHaveBeenLastCalledWith(repository.fullName, historicalSummary.headSha, 'electron/backend/store.ts', undefined)
   })
 
-  it('opens exact evidence in the managed worktree and maps an existing checkout', async () => {
+  it('opens exact evidence in the managed worktree without checkout mapping controls', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
     render(<App />)
@@ -358,10 +378,7 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /analysis details/i }))
     await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
     expect(api.openEvidence).toHaveBeenCalledWith(repository.fullName, pullRequest.headSha, 'electron/backend/store.ts', undefined)
-
-    await user.click(screen.getByRole('button', { name: /map existing checkout/i }))
-    expect(api.mapLocalRepository).toHaveBeenCalledWith(repository.fullName)
-    expect(await screen.findByText(/mapped \/Users\/maya\/atlas/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /map existing checkout/i })).not.toBeInTheDocument()
   })
 
   it('renders complete review threads with metadata and every reply', async () => {
@@ -382,16 +399,58 @@ describe('live Electron renderer contract', () => {
     expect(screen.getByRole('link', { name: /open review thread/i })).toHaveAttribute('href', 'https://github.com/runway/atlas/pull/42#discussion_r1')
   })
 
-  it('preserves a previously selected demo repository after live discovery', async () => {
+  it('replaces a previously selected demo repository after live discovery', async () => {
     window.localStorage.setItem('atlas:selected-repo', JSON.stringify('atlas'))
     const api = installLiveApi()
 
     render(<App />)
 
     await waitFor(() => expect(api.bootstrap).toHaveBeenCalledTimes(1))
-    expect(screen.getByRole('combobox', { name: /repository/i })).toHaveValue('atlas')
+    await waitFor(() => expect(api.listPullRequests).toHaveBeenCalledWith(repository.fullName))
+    expect(screen.getByRole('button', { name: /select repository/i })).toHaveTextContent(repository.fullName)
+    expect(screen.queryByText('Rotate refresh tokens at the session boundary')).not.toBeInTheDocument()
+  })
+
+  it('never falls back to demo repositories in Electron and recovers repository selection on refresh', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    vi.mocked(api.bootstrap).mockResolvedValueOnce({
+      account: null,
+      repositories: [],
+      warnings: ['GitHub CLI is not authenticated.'],
+    }).mockResolvedValueOnce({
+      account: { source: 'github', login: 'maya', name: 'Maya Chen', avatarUrl: null },
+      repositories: [repository],
+      warnings: [],
+    })
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'GitHub repositories unavailable' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /select repository/i })).toHaveTextContent('Choose repository')
+    expect(screen.queryByText('Rotate refresh tokens at the session boundary')).not.toBeInTheDocument()
+    expect(screen.queryByText(/demo repository/i)).not.toBeInTheDocument()
+    expect(screen.getByText('GitHub CLI offline')).not.toHaveAttribute('title', expect.stringMatching(/fixture/i))
     expect(api.listPullRequests).not.toHaveBeenCalled()
-    expect(screen.getAllByText('Rotate refresh tokens at the session boundary').length).toBeGreaterThan(0)
+
+    await user.click(screen.getByRole('button', { name: 'Retry GitHub discovery' }))
+
+    await waitFor(() => expect(api.bootstrap).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.listPullRequests).toHaveBeenCalledWith(repository.fullName))
+    expect(screen.getByRole('button', { name: /select repository/i })).toHaveTextContent(repository.fullName)
+    expect(screen.getByText('@maya')).toBeInTheDocument()
+    expect(screen.getByLabelText('GitHub account Maya Chen')).toHaveTextContent('MC')
+  })
+
+  it('does not present a stored provider as active when no provider is installed', async () => {
+    const api = installLiveApi()
+    vi.mocked(api.listProviders!).mockResolvedValue(providers.map((status) => ({ ...status, installed: false })))
+
+    render(<App />)
+
+    await waitFor(() => expect(api.listProviders).toHaveBeenCalledOnce())
+    expect(await screen.findByLabelText('Provider status: No provider available')).toHaveTextContent('No provider available')
+    expect(screen.queryByLabelText(/active provider:/i)).not.toBeInTheDocument()
   })
 
   it('exposes four graph views with changed/context filters, group highlighting, comments, search, pan, zoom, and tours', async () => {
@@ -418,7 +477,8 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /changed nodes/i }))
     expect(screen.queryByRole('button', { name: /data flow node context:/i })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /all nodes/i }))
-    await user.selectOptions(screen.getByRole('combobox', { name: /highlight change group/i }), 'group-history')
+    await user.click(screen.getByRole('button', { name: /highlight change group/i }))
+    await user.click(screen.getByRole('option', { name: 'History persistence' }))
     expect(screen.getByRole('region', { name: /data flow graph/i }).querySelector('[data-change-group-highlight="true"]')).toBeTruthy()
     await user.click(screen.getByText('Data flow node', { selector: 'button' }))
     expect(screen.getByText(/keep the history write atomic/i)).toBeInTheDocument()

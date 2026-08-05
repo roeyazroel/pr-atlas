@@ -1,8 +1,10 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, shell } from 'electron';
 import { spawn as nodeSpawn } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { AnalysisService } from './backend/service.js';
+import { discoverNvmVersionBinPaths, normalizeDesktopPath } from './backend/desktop-path.js';
 import { safeExternalUrl, validatePullNumber, validateRepository } from './backend/validation.js';
 import { resolveEvidencePath } from './backend/evidence.js';
 import { checkForUpdate } from './backend/update.js';
@@ -89,12 +91,6 @@ function registerIpc(): void {
       return openEvidenceInEditor(target, line);
     } catch { return false; }
   });
-  ipcMain.handle('pr-atlas:map-local-repository', async (_event, repository: unknown) => {
-    if (!validateRepository(repository)) return null;
-    const selected = await dialog.showOpenDialog({ title: `Map ${repository}`, properties: ['openDirectory'] });
-    if (selected.canceled || selected.filePaths.length !== 1) return null;
-    return analysis.mapLocalRepository(repository, selected.filePaths[0]);
-  });
   ipcMain.handle('pr-atlas:check-for-update', async () => {
     const result = await checkForUpdate(app.getVersion(), {
       feedUrl: process.env.PR_ATLAS_UPDATE_FEED_URL,
@@ -120,6 +116,9 @@ function registerIpc(): void {
   ipcMain.handle('pr-atlas:open-downloaded-update', () => openDownloadedArtifact(downloadedUpdatePath, downloadedUpdateDigest, (path) => shell.openPath(path)));
 }
 app.whenReady().then(() => {
+  const homePath = app.getPath('home');
+  const nvmVersionPaths = discoverNvmVersionBinPaths(homePath, (directory) => readdirSync(directory));
+  process.env.PATH = normalizeDesktopPath(process.env.PATH, process.platform, { homePath, nvmVersionPaths });
   analysis = new AnalysisService(app.getPath('userData'), undefined, (event) => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('pr-atlas:progress', event); });
   registerIpc(); createWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

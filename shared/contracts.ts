@@ -50,8 +50,6 @@ export interface BootstrapResult {
   warnings: string[];
 }
 
-export interface LocalRepositoryMapping { repository: string; path: string; }
-
 /** Providers supported by the local analysis orchestration boundary. */
 export type AgentProvider = 'claude' | 'codex' | 'cursor';
 /** Stable discovery/default priority requested by the product contract. */
@@ -217,7 +215,6 @@ export interface PrAtlasApi {
   loadAnalysisRun(repository: string, pullNumber: number, runId: string): Promise<AnalysisRunResult | null>;
   openExternal(url: string): Promise<boolean>;
   openEvidence?: (repository: string, headSha: string, path: string, line?: number) => Promise<boolean>;
-  mapLocalRepository?: (repository: string) => Promise<LocalRepositoryMapping | null>;
   /** Optional for source-compatible browser fixtures. Electron always supplies it. */
   checkForUpdate?: () => Promise<UpdateCheckResult>;
   /** Downloads the most recently validated update; renderer supplies no URL or path. */

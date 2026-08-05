@@ -8,7 +8,6 @@ import { AnalysisStore } from './store.js';
 import { ClaudeAdapter } from './claude.js';
 import { CodexAdapter } from './codex.js';
 import { CursorAdapter } from './cursor.js';
-import { readRepositoryMapping, repositoriesMatch, repositoryFromRemote, writeRepositoryMapping } from './mappings.js';
 import { redactProviderOutput, SKILL_CONTRACT_VERSION, SKILL_REFERENCE_URL } from './agent.js';
 import { safeError, validateAnalysisRequest, validateRepository } from './validation.js';
 import { normalizeDocumentEvidencePaths } from './evidence.js';
@@ -27,28 +26,6 @@ export class AnalysisService {
   private readonly runner: CommandRunner;
   bootstrap(): Promise<BootstrapResult> { return this.github.bootstrap(); }
   listPullRequests(repository: string): Promise<PullRequestDTO[]> { return this.github.listPullRequests(repository); }
-  async mapLocalRepository(repository: string, localPath: string): Promise<{ repository: string; path: string }> {
-    if (!validateRepository(repository)) throw new Error('Invalid repository.');
-    if (typeof localPath !== 'string' || !localPath.trim()) throw new Error('A local repository path is required.');
-    const candidate = resolve(localPath);
-    let canonicalPath: string;
-    let remote: string;
-    try {
-      const root = await this.runner.run('git', ['rev-parse', '--show-toplevel'], { cwd: candidate, timeout: 10_000 });
-      canonicalPath = resolve(root.stdout.trim());
-      if (!root.stdout.trim()) throw new Error('missing repository root');
-      remote = (await this.runner.run('git', ['remote', 'get-url', 'origin'], { cwd: canonicalPath, timeout: 10_000 })).stdout.trim();
-    } catch {
-      throw new Error('Could not verify the selected local Git repository.');
-    }
-    const remoteRepository = repositoryFromRemote(remote);
-    if (!remoteRepository || !repositoriesMatch(remoteRepository, repository)) throw new Error('The local repository origin does not match the selected GitHub repository.');
-    // Never persist a credential-bearing origin (for example an HTTPS token).
-    // The validated repository identity is sufficient to reconstruct the
-    // canonical GitHub origin when seeding the managed clone.
-    await writeRepositoryMapping(this.dataRoot, { repository, path: canonicalPath, remote: `https://github.com/${repository}.git`, updatedAt: new Date().toISOString() });
-    return { repository, path: canonicalPath };
-  }
   async listProviders(): Promise<AgentInstallationStatus[]> {
     return Promise.all([...this.adapters.values()].map(async (adapter) => {
       const status = await adapter.detect();
@@ -111,16 +88,7 @@ export class AnalysisService {
   loadAnalysisRun(repository: string, pullNumber: number, runId: string): Promise<AnalysisRunResult | null> { return this.store.loadRun(repository, pullNumber, runId); }
   private async prepareWorktree(request: AnalysisRequest, signal: AbortSignal): Promise<string> {
     const clone = repoPath(this.dataRoot, request.repository); const worktree = resolve(this.dataRoot, 'worktrees', 'github.com', ...request.repository.split('/'), request.headSha); if (!inside(this.dataRoot, clone) || !inside(this.dataRoot, worktree)) throw new Error('Unsafe worktree path.'); await mkdir(resolve(clone, '..'), { recursive: true });
-    if (!existsSync(resolve(clone, '.git'))) {
-      const mapping = await readRepositoryMapping(this.dataRoot, request.repository);
-      if (mapping) {
-        // Clone the user's repository into an application-owned checkout. This
-        // reads the source repository without changing its branch or worktree;
-        // resetting origin makes later fetches deterministic and GitHub-backed.
-        await this.runner.run('git', ['clone', '--no-local', mapping.path, clone], { timeout: 120_000, signal });
-        await this.runner.run('git', ['remote', 'set-url', 'origin', `https://github.com/${request.repository}.git`], { cwd: clone, timeout: 10_000, signal });
-      } else await this.runner.run('gh', ['repo', 'clone', request.repository, clone], { timeout: 120_000, signal });
-    }
+    if (!existsSync(resolve(clone, '.git'))) await this.runner.run('gh', ['repo', 'clone', request.repository, clone], { timeout: 120_000, signal });
     await this.runner.run('git', ['fetch', '--no-tags', 'origin', `pull/${request.pullNumber}/head:refs/pr-atlas/${request.pullNumber}`], { cwd: clone, timeout: 120_000, signal });
     if (!existsSync(worktree)) { await mkdir(resolve(worktree, '..'), { recursive: true }); await this.runner.run('git', ['worktree', 'add', '--detach', worktree, request.headSha], { cwd: clone, timeout: 120_000, signal }); }
     return worktree;

@@ -34,10 +34,9 @@ human judgment with an automatic approval or code-review verdict.
 ### Local-first PR discovery
 
 PR Atlas reuses `gh` authentication for `github.com`, lists repositories and
-open pull requests, and reads pull-request metadata and review data. A local
-checkout can be mapped to a GitHub repository; analysis then runs in an
-application-managed clone/worktree so the user’s branch and working tree are
-not changed.
+open pull requests, and reads pull-request metadata and review data. Analysis
+runs in an application-managed clone/worktree so the user’s branches and
+working trees are not changed.
 
 ### Provider-backed analysis
 

@@ -13,7 +13,6 @@ const api: PrAtlasApi = {
   loadAnalysisRun: (repository, pullNumber, runId) => ipcRenderer.invoke('pr-atlas:load-run', { repository, pullNumber, runId }),
   openExternal: (url) => ipcRenderer.invoke('pr-atlas:open-external', url),
   openEvidence: (repository, headSha, path, line) => ipcRenderer.invoke('pr-atlas:open-evidence', { repository, headSha, path, line }),
-  mapLocalRepository: (repository) => ipcRenderer.invoke('pr-atlas:map-local-repository', repository),
   checkForUpdate: () => ipcRenderer.invoke('pr-atlas:check-for-update'),
   downloadUpdate: () => ipcRenderer.invoke('pr-atlas:download-update'),
   openDownloadedUpdate: () => ipcRenderer.invoke('pr-atlas:open-downloaded-update'),

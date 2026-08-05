@@ -70,7 +70,7 @@ describe('PR Atlas desktop workflow', () => {
 
     expect(screen.getByText('PR Atlas', { exact: true })).toBeInTheDocument()
     expect(document.querySelector('.brand-mark')).toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: /repository/i })).toHaveValue('atlas')
+    expect(screen.getByRole('button', { name: /select repository/i })).toHaveTextContent('runway/atlas')
     const list = screen.getByRole('list', { name: /pull request list/i })
     expect(list).toBeInTheDocument()
     expect(within(list).getByRole('listitem', { name: /#482/i })).toHaveClass('selected')
@@ -80,6 +80,7 @@ describe('PR Atlas desktop workflow', () => {
     render(<App />)
 
     expect(screen.getByText('PR Atlas', { exact: true })).toBeInTheDocument()
+    expect(screen.queryByText('LOCAL MVP')).not.toBeInTheDocument()
   })
 
   it('filters the pull-request list without losing the selected item', async () => {
@@ -115,7 +116,8 @@ describe('PR Atlas desktop workflow', () => {
 
     const list = screen.getByRole('list', { name: /pull request list/i })
     await user.click(within(list).getByRole('listitem', { name: /#455/i }))
-    await user.click(screen.getByRole('button', { name: /analyze locally/i }))
+    expect(screen.getAllByRole('button', { name: /^analyze$/i })).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: /^analyze$/i }))
 
     expect(screen.getByText(/building your walkthrough/i)).toBeInTheDocument()
     expect(screen.getByText(/stage 1 of 5/i)).toBeInTheDocument()
@@ -131,7 +133,7 @@ describe('PR Atlas desktop workflow', () => {
       render(<App />)
       const list = screen.getByRole('list', { name: /pull request list/i })
       fireEvent.click(within(list).getByRole('listitem', { name: /#455/i }))
-      fireEvent.click(screen.getByRole('button', { name: /analyze locally/i }))
+      fireEvent.click(screen.getByRole('button', { name: /^analyze$/i }))
 
       await act(async () => { vi.advanceTimersByTime(5200) })
 
@@ -184,7 +186,8 @@ describe('PR Atlas desktop workflow', () => {
       expect(api.listPullRequests).toHaveBeenCalled()
       const list = screen.getByRole('list', { name: /pull request list/i })
       fireEvent.click(within(list).getByRole('listitem', { name: /#42 pending live analysis/i }))
-      fireEvent.click(screen.getByRole('button', { name: /analyze locally/i }))
+      expect(screen.getAllByRole('button', { name: /^analyze$/i })).toHaveLength(1)
+      fireEvent.click(screen.getByRole('button', { name: /^analyze$/i }))
       fireEvent.click(screen.getByRole('button', { name: /continue/i }))
       expect(startAnalysis).toHaveBeenCalledTimes(1)
 
@@ -256,7 +259,7 @@ describe('PR Atlas desktop workflow', () => {
       await user.click(screen.getByRole('radio', { name: /codex cli/i }))
       await user.click(screen.getByRole('button', { name: /open settings/i }))
 
-      await user.click(screen.getByRole('button', { name: /analyze locally/i }))
+      await user.click(screen.getByRole('button', { name: /^analyze$/i }))
       expect(screen.getByRole('heading', { name: /send repository context to codex cli/i })).toBeInTheDocument()
       await user.click(screen.getByRole('button', { name: /continue/i }))
       await act(async () => { await Promise.resolve(); await Promise.resolve() })

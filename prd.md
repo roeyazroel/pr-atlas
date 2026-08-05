@@ -248,7 +248,6 @@ The MVP includes:
 - GitHub.com support.
 - GitHub CLI authentication.
 - Repository discovery and selection.
-- Local repository mapping.
 - Application-managed repository cloning.
 - Open pull-request listing.
 - Pull-request filters.
@@ -379,15 +378,13 @@ The header contains:
 The repository selector should include:
 
 - Recent repositories.
-- Locally mapped repositories.
 - Repositories grouped by owner or organization.
 - Fuzzy search.
-- Clone or map status.
+- Managed-clone status.
 - Optional pinning.
 
 Each repository can have one of these local states:
 
-- Local repository mapped.
 - Application-managed clone available.
 - Remote only.
 - Clone unavailable.
@@ -1493,20 +1490,9 @@ Each adapter should report:
 
 # 28. Repository Management
 
-## 28.1 Existing local repository
+## 28.1 Application-managed clone
 
-The user may map a GitHub repository to an existing local directory.
-
-The application verifies:
-
-- Git repository exists.
-- Remote corresponds to the selected GitHub repository.
-- Required commits can be fetched.
-- Repository is readable.
-
-## 28.2 Application-managed clone
-
-For repositories without a local mapping, PR Atlas clones into an application-controlled directory.
+PR Atlas clones repositories into an application-controlled directory when analysis first needs them.
 
 Example:
 
@@ -1517,7 +1503,7 @@ Example:
       repository/
 ```
 
-## 28.3 Worktree isolation
+## 28.2 Worktree isolation
 
 Each analysis should use an isolated Git worktree or equivalent isolated checkout.
 
@@ -1528,14 +1514,12 @@ Benefits:
 - Allows deterministic base and head access.
 - Supports parallel or historical analysis later.
 
-## 28.4 Worktree lifecycle
+## 28.3 Worktree lifecycle
 
 - Create before analysis.
 - Mark read-only where possible.
 - Reuse safely for the same head SHA.
 - Remove after a retention period.
-- Never delete a user-managed worktree.
-- Detect uncommitted local changes before operating on mapped repositories.
 - Avoid dependency installation by default.
 
 ---
@@ -1546,7 +1530,6 @@ A local embedded database, such as SQLite, should store:
 
 - GitHub hosts.
 - Repository metadata.
-- Repository local mappings.
 - Recent repositories.
 - Pull-request metadata cache.
 - Analysis runs.
@@ -1644,7 +1627,6 @@ The product should clearly state:
 - Detected hosts.
 - Authentication status.
 - Refresh repositories.
-- Repository mappings.
 - Clone directory.
 
 ## 31.3 Agents
@@ -1845,7 +1827,6 @@ A benchmark set of representative pull requests should be manually evaluated for
 
 ## Repository preparation
 
-- The user can map an existing local repository.
 - The application can create an application-managed clone.
 - Analysis does not change the user’s current branch.
 - Analysis runs in an isolated checkout.
@@ -1916,7 +1897,6 @@ Goals:
 - Pull-request list.
 - Filters.
 - Local storage.
-- Repository mapping.
 - Application-managed clone.
 
 Deliverable:

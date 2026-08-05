@@ -57,6 +57,7 @@ describe('ship-blocker renderer contracts', () => {
     const user = userEvent.setup()
     render(createElement(App))
     await user.type(screen.getByRole('searchbox', { name: /search repositories/i }), 'harbor')
+    await user.click(screen.getByRole('button', { name: /select repository/i }))
     const options = screen.getAllByRole('option').map((option) => option.textContent)
     expect(options).toContain('runway/harbor')
     expect(options).not.toContain('runway/orbit-cli')
