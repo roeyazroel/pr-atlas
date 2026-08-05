@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 
 import {
   buildFileBatchedPlan,
@@ -7,11 +8,12 @@ import {
   summarizePlan,
 } from "./planner.mjs";
 
-const pr9Input =
+const localPr9Input =
   "/Users/roeyazroel/Library/Application Support/Electron/analyses/github.com/roeyazroel/pr-atlas/9/409c6dbd44ce88dcb7602598f5ff3c56b3093193/8fab17aa-4367-4996-935d-201279627495/input";
+const pr9Input = process.env.PR_ATLAS_LARGE_PR_INPUT ?? (existsSync(localPr9Input) ? localPr9Input : undefined);
 
 describe("file-batched large PR PoC", () => {
-  it("loads every PR #9 changed file and derives its diff-byte cost from the patch", async () => {
+  it.runIf(Boolean(pr9Input))("loads every PR #9 changed file and derives its diff-byte cost from the patch", async () => {
     const run = await loadAtlasInput(pr9Input);
 
     expect(run.files.length).toBeGreaterThan(25);

@@ -19,3 +19,7 @@ Validation:
 ```sh
 npx vitest run pocs/large-pr/file-batched/planner.test.mjs
 ```
+
+Portable synthetic planner tests always run. The captured-input replay runs
+when the local capture above exists or when `PR_ATLAS_LARGE_PR_INPUT` points to
+an equivalent deterministic Atlas input directory.
