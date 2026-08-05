@@ -154,12 +154,25 @@
             <li><span class="boundary-icon">04</span><span><b>Read-oriented GitHub access</b><small>Discovery fetches and reads. PR Atlas does not post, edit, resolve, or approve reviews.</small></span></li>
           </ul>
         </div>
-        <div class="runtime-row"><span class="runtime-label">Supported local runtimes</span><span class="runtime">Codex CLI <i>codex</i></span><span class="runtime">Cursor Agent <i>cursor-agent</i></span><span class="runtime">Claude Code <i>claude</i></span></div>
+        <div class="runtime-row">
+          <span class="runtime-label">Supported local runtimes</span>
+          <span class="runtime"><img src="assets/provider-openai.svg" alt="OpenAI logo" /><span>Codex CLI</span></span>
+          <span class="runtime"><img src="assets/provider-cursor.svg" alt="Cursor logo" /><span>Cursor Agent</span></span>
+          <span class="runtime"><img src="assets/provider-claude.svg" alt="Claude logo" /><span>Claude Code</span></span>
+        </div>
       </section>
 
       <section class="quickstart-section shell reveal" id="quickstart" aria-labelledby="quickstart-title">
-        <div class="quickstart-heading"><p class="kicker">Three small steps</p><h2 id="quickstart-title">Start with your next<br />hard-to-review PR.</h2></div>
-        <ol class="quickstart-list"><li><span>01</span><div><b>Authenticate GitHub CLI</b><code>gh auth login --hostname github.com</code></div></li><li><span>02</span><div><b>Install and launch</b><code>npm install &amp;&amp; npm run dev</code></div></li><li><span>03</span><div><b>Choose, consent, understand</b><p>Select a repository, PR, provider, and model. Then follow the evidence.</p></div></li></ol>
+        <div class="quickstart-heading">
+          <p class="kicker">Download, then review</p>
+          <h2 id="quickstart-title">Get PR Atlas.<br />Open a pull request.</h2>
+          <p class="contributor-note"><span>Building or extending PR Atlas?</span><a href="https://github.com/roeyazroel/pr-atlas#quick-start">Open the contributor setup <span aria-hidden="true">↗</span></a></p>
+        </div>
+        <ol class="quickstart-list">
+          <li><span>01</span><div><b>Download the latest release</b><p>Choose the PR Atlas installer for macOS, Windows, or Linux.</p><a class="quickstart-link" href="https://github.com/roeyazroel/pr-atlas/releases/latest">View downloads <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>02</span><div><b>Open the desktop app</b><p>Launch PR Atlas. It reuses your authenticated GitHub CLI session and detects supported local runtimes.</p></div></li>
+          <li><span>03</span><div><b>Choose, consent, understand</b><p>Select a repository, PR, provider, and model. Then follow the evidence.</p></div></li>
+        </ol>
       </section>
 
       <section class="closing-section shell reveal" aria-labelledby="closing-title">

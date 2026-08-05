@@ -25,6 +25,18 @@ function localAssetUrls(html: string) {
   )
 }
 
+function sectionMarkup(html: string, id: string) {
+  return html.match(new RegExp(`<section\\b[^>]*\\bid=["']${id}["'][^>]*>([\\s\\S]*?)<\\/section>`, 'i'))?.[1] ?? ''
+}
+
+function visibleText(markup: string) {
+  return markup
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 describe('PR Atlas landing page', () => {
   it('keeps the product promise and review narrative visible in static HTML', async () => {
     const html = await readHtml()
@@ -103,6 +115,53 @@ describe('PR Atlas landing page', () => {
       const info = await stat(resolve(siteRoot, asset))
       expect(info.isFile()).toBe(true)
     }
+  })
+
+  it('shows each supported runtime with a local, accessibly named logo and no repeated command slug', async () => {
+    const html = await readHtml()
+    const runtimeRow = html.match(/<div\b[^>]*class=["'][^"']*\bruntime-row\b[^"']*["'][^>]*>([\s\S]*?)(?=<section\b|<\/main>)/i)?.[1] ?? ''
+    const runtimeText = visibleText(runtimeRow)
+
+    expect(runtimeRow).not.toBe('')
+    expect(runtimeText).toMatch(/Codex CLI/i)
+    expect(runtimeText).toMatch(/Cursor Agent/i)
+    expect(runtimeText).toMatch(/Claude Code/i)
+
+    const logoTags = [...runtimeRow.matchAll(/<img\b[^>]*>/gi)].map(([tag]) => tag)
+    expect(logoTags).toHaveLength(3)
+
+    for (const imageTag of logoTags) {
+      const logoUrl = imageTag.match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1] ?? ''
+      const accessibleName = imageTag.match(/\b(?:alt|aria-label)\s*=\s*["']([^"']+)["']/i)?.[1]?.trim() ?? ''
+
+      expect(logoUrl).toMatch(/^(?:\.\/)?assets\/[^?#]+$/i)
+      expect((await stat(resolve(siteRoot, logoUrl.split(/[?#]/, 1)[0]))).isFile()).toBe(true)
+      expect(accessibleName.length).toBeGreaterThan(0)
+    }
+
+    // The visible row should show each provider name once; its CLI command
+    // slugs must not be repeated as right-aligned labels.
+    const providerNamesRemoved = runtimeText.replace(/\b(?:Codex CLI|Cursor Agent|Claude Code)\b/gi, '')
+    expect(providerNamesRemoved).not.toMatch(/\b(?:codex|cursor-agent|claude)\b/i)
+  })
+
+  it('makes the ordinary-user quickstart a release download and launch path', async () => {
+    const html = await readHtml()
+    const quickstart = sectionMarkup(html, 'quickstart')
+    const quickstartText = visibleText(quickstart)
+
+    expect(quickstart).not.toBe('')
+    expect(quickstart).toContain('https://github.com/roeyazroel/pr-atlas/releases/latest')
+    expect(quickstartText).toMatch(/download/i)
+    expect(quickstartText).toMatch(/latest release/i)
+    expect(quickstartText).toMatch(/(?:launch|open|use)\b/i)
+    expect(quickstartText).toMatch(/PR Atlas/i)
+    expect(quickstartText).not.toMatch(/\bnpm\s+install\b|\bnpm\s+run\s+dev\b/i)
+
+    const developmentSections = [...html.matchAll(/<section\b[^>]*>([\s\S]*?)<\/section>/gi)]
+      .map(([, section]) => section)
+      .filter((section) => /\bnpm\s+install\b|\bnpm\s+run\s+dev\b/i.test(section))
+    expect(developmentSections.every((section) => /contributor|development|extension/i.test(section))).toBe(true)
   })
 
   it('keeps labelled landmarks and reveal content accessible without JavaScript', async () => {
