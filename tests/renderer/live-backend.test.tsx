@@ -277,9 +277,10 @@ describe('live Electron renderer contract', () => {
     render(<App />)
 
     await waitFor(() => expect(api.listPullRequests).toHaveBeenCalledWith(repository.fullName))
-    expect(await screen.findByText('No pull requests match.')).toBeInTheDocument()
+    expect(await screen.findByText('No open pull requests.')).toBeInTheDocument()
     expect(screen.queryByText('Rotate refresh tokens at the session boundary')).not.toBeInTheDocument()
-    expect(screen.getByText('Select a pull request to open its walkthrough.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'No open pull requests' })).toBeInTheDocument()
+    expect(screen.queryByText('Select a pull request to open its walkthrough.')).not.toBeInTheDocument()
   })
 
   it('does not show Ready when a saved artifact fails strict loading', async () => {

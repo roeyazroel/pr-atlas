@@ -49,6 +49,7 @@
   "build": {
     "appId": "com.pratlas.desktop",
     "productName": "PR Atlas",
+    "icon": "public/favicon.png",
     "artifactName": "PR-Atlas-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "release"

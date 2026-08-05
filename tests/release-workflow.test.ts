@@ -13,4 +13,14 @@ describe('release workflow', () => {
     expect(workflow).toContain('os: macos-15-intel');
     expect(workflow).not.toContain('os: macos-13');
   });
+
+  it('packages the existing PR Atlas logo as the desktop app icon', () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(process.cwd(), 'package.json'), 'utf8'),
+    ) as { build?: { icon?: string } };
+
+    expect(packageJson.build?.icon).toBe('public/favicon.png');
+    expect(readFileSync(resolve(process.cwd(), 'public/favicon.png')).byteLength).toBeGreaterThan(0);
+    expect(readFileSync(resolve(process.cwd(), 'public/pr-atlas-logo.png')).byteLength).toBeGreaterThan(0);
+  });
 });
