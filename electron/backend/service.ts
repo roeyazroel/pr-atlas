@@ -14,6 +14,7 @@ import {
   type AnalysisRunSummary,
   type BootstrapResult,
   type PullRequestDTO,
+  type PullRequestComment,
   type ReviewProgress,
   type RunRetentionSettings,
   type AgentAnalysisResult,
@@ -115,6 +116,12 @@ export class AnalysisService {
   }
   listPullRequests(repository: string): Promise<PullRequestDTO[]> {
     return this.github.listPullRequests(repository);
+  }
+  listPullRequestComments(repository: string, pullNumber: number): Promise<PullRequestComment[]> {
+    return this.github.listPullRequestComments(repository, pullNumber);
+  }
+  createPullRequestComment(repository: string, pullNumber: number, body: string): Promise<PullRequestComment> {
+    return this.github.createPullRequestComment(repository, pullNumber, body);
   }
   async listProviders(): Promise<AgentInstallationStatus[]> {
     return Promise.all(

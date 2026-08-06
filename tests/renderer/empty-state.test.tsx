@@ -24,6 +24,8 @@ function installEmptyRepositoryApi() {
     })),
     listProviders: vi.fn(async () => []),
     listPullRequests: vi.fn(async () => []),
+    listPullRequestComments: vi.fn(async () => []),
+    createPullRequestComment: vi.fn(async () => { throw new Error('unused in empty repository state') }),
     startAnalysis: vi.fn(async () => { throw new Error('unused in empty repository state') }),
     cancelAnalysis: vi.fn(async () => true),
     listAnalysisRuns: vi.fn(async () => []),

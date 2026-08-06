@@ -13,6 +13,10 @@ const api: PrAtlasApi = {
   listProviders: () => ipcRenderer.invoke("pr-atlas:list-providers"),
   listPullRequests: (repository) =>
     ipcRenderer.invoke("pr-atlas:list-pulls", repository),
+  listPullRequestComments: (repository, pullNumber) =>
+    ipcRenderer.invoke("pr-atlas:list-pr-comments", { repository, pullNumber }),
+  createPullRequestComment: (repository, pullNumber, body) =>
+    ipcRenderer.invoke("pr-atlas:create-pr-comment", { repository, pullNumber, body }),
   startAnalysis: (request: AnalysisRequest) =>
     ipcRenderer.invoke("pr-atlas:start-analysis", request),
   cancelAnalysis: (runId) =>

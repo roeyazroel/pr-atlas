@@ -11,9 +11,11 @@ import {
 } from "./backend/desktop-path.js";
 import {
   safeExternalUrl,
+  validateCommentBody,
   validatePullNumber,
   validateRepository,
 } from "./backend/validation.js";
+import { sanitizeGhError } from "./backend/github.js";
 import { readEvidenceDetail, resolveEvidencePath } from "./backend/evidence.js";
 import { checkForUpdate } from "./backend/update.js";
 import {
@@ -164,6 +166,24 @@ function registerIpc(): void {
   ipcMain.handle("pr-atlas:list-pulls", (_event, repository: unknown) => {
     if (!validateRepository(repository)) throw new Error("Invalid repository.");
     return analysis.listPullRequests(repository);
+  });
+  ipcMain.handle("pr-atlas:list-pr-comments", async (_event, payload: unknown) => {
+    const input = payload as { repository?: unknown; pullNumber?: unknown };
+    if (!validateRepository(input?.repository) || !validatePullNumber(input?.pullNumber)) throw new Error("Invalid pull request comments request.");
+    try {
+      return await analysis.listPullRequestComments(input.repository, input.pullNumber);
+    } catch (error) {
+      throw new Error(sanitizeGhError(error));
+    }
+  });
+  ipcMain.handle("pr-atlas:create-pr-comment", async (_event, payload: unknown) => {
+    const input = payload as { repository?: unknown; pullNumber?: unknown; body?: unknown };
+    if (!validateRepository(input?.repository) || !validatePullNumber(input?.pullNumber) || !validateCommentBody(input?.body)) throw new Error("Invalid pull request comment request.");
+    try {
+      return await analysis.createPullRequestComment(input.repository, input.pullNumber, input.body);
+    } catch (error) {
+      throw new Error(sanitizeGhError(error));
+    }
   });
   ipcMain.handle("pr-atlas:start-analysis", (_event, request: unknown) =>
     analysis.startAnalysis(request as AnalysisRequest),

@@ -107,4 +107,69 @@ describe('GitHub CLI backend', () => {
     expect(safe).not.toContain('abc123')
     expect(safe).toMatch(/github|cli|request|authentication|failed/i)
   })
+
+  it('reads paginated top-level pull request comments, drops malformed records, and sorts chronologically', async () => {
+    const run = vi.fn()
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify({ login: 'Viewer' }), stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([]), stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([
+        [
+          { id: 2, node_id: 'IC_2', body: 'later', user: { login: 'other', avatar_url: 'https://avatars.example/other' }, author_association: 'CONTRIBUTOR', created_at: '2026-08-06T10:00:00Z', updated_at: '2026-08-06T10:00:00Z', html_url: 'https://github.com/example/backend/issues/7#issuecomment-2' },
+          { id: 'bad-id', node_id: 'IC_BAD', body: 'ignored', user: { login: 'other' }, author_association: 'NONE', created_at: '2026-08-06T09:00:00Z', updated_at: '2026-08-06T09:00:00Z', html_url: 'https://github.com/example/backend/issues/7#issuecomment-bad' },
+          { id: 5, node_id: 'IC_HTTP', body: 'ignored insecure URL', user: { login: 'other' }, author_association: 'NONE', created_at: '2026-08-06T08:00:00Z', updated_at: '2026-08-06T08:00:00Z', html_url: 'http://github.com/example/backend/issues/7#issuecomment-5' },
+          { id: 6, node_id: 'IC_EVIL_HOST', body: 'ignored untrusted host', user: { login: 'other' }, author_association: 'NONE', created_at: '2026-08-06T08:00:00Z', updated_at: '2026-08-06T08:00:00Z', html_url: 'https://evil.example/example/backend/issues/7#issuecomment-6' },
+        ],
+        [
+          { id: 1, node_id: 'IC_1', body: 'first', user: { login: 'Viewer', avatar_url: null }, author_association: null, created_at: '2026-08-06T09:00:00Z', updated_at: '2026-08-06T09:30:00Z', html_url: 'https://github.com/example/backend/issues/7#issuecomment-1' },
+          { id: 3, node_id: 'IC_3', body: 'also later', user: { login: 'other' }, author_association: 'MEMBER', created_at: '2026-08-06T10:00:00Z', updated_at: '2026-08-06T10:00:00Z', html_url: 'https://github.com/example/backend/issues/7#issuecomment-3' },
+          { id: 4, node_id: 'IC_MALFORMED', body: 'ignored missing author', author_association: 'NONE', created_at: '2026-08-06T11:00:00Z', updated_at: '2026-08-06T11:00:00Z', html_url: 'https://github.com/example/backend/issues/7#issuecomment-4' },
+          { id: 7, node_id: 'IC_SUBDOMAIN', body: 'ignored github lookalike host', user: { login: 'other' }, author_association: 'NONE', created_at: '2026-08-06T08:00:00Z', updated_at: '2026-08-06T08:00:00Z', html_url: 'https://github.com.evil.example/example/backend/issues/7#issuecomment-7' },
+        ],
+      ]), stderr: '' })
+    const client = new GithubClient({ run })
+
+    await client.bootstrap()
+    await expect(client.listPullRequestComments('example/backend', 7)).resolves.toEqual([
+      expect.objectContaining({ id: 1, nodeId: 'IC_1', body: 'first', author: 'Viewer', authorAvatarUrl: null, authorAssociation: null, viewerDidAuthor: true }),
+      expect.objectContaining({ id: 2, nodeId: 'IC_2', body: 'later', author: 'other', viewerDidAuthor: false }),
+      expect.objectContaining({ id: 3, nodeId: 'IC_3', body: 'also later', author: 'other', viewerDidAuthor: false }),
+    ])
+    expect(run).toHaveBeenNthCalledWith(4, 'gh', [
+      'api', '--paginate', '--slurp', 'repos/example/backend/issues/7/comments?per_page=100',
+    ], expect.objectContaining({ timeout: 30_000 }))
+  })
+
+  it('posts one trimmed comment body as one fixed execFile argument and maps the canonical response', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: JSON.stringify({
+      id: 99,
+      node_id: 'IC_99',
+      body: 'hello from GitHub',
+      user: { login: 'viewer', avatar_url: 'https://avatars.example/viewer' },
+      author_association: 'MEMBER',
+      created_at: '2026-08-06T12:00:00Z',
+      updated_at: '2026-08-06T12:00:00Z',
+      html_url: 'https://github.com/example/backend/issues/7#issuecomment-99',
+    }), stderr: '' })
+    const client = new GithubClient({ run })
+
+    await expect(client.createPullRequestComment('example/backend', 7, '  hello from GitHub  ')).resolves.toMatchObject({
+      id: 99,
+      nodeId: 'IC_99',
+      body: 'hello from GitHub',
+      author: 'viewer',
+      viewerDidAuthor: false,
+    })
+    expect(run).toHaveBeenCalledWith('gh', [
+      'api', '--method', 'POST', 'repos/example/backend/issues/7/comments', '-f', 'body=hello from GitHub',
+    ], expect.objectContaining({ timeout: 30_000 }))
+  })
+
+  it('sanitizes comment command and parse failures', async () => {
+    const runnerFailure = new GithubClient({ run: vi.fn().mockRejectedValue(new Error('stderr token=secret')) })
+    await expect(runnerFailure.listPullRequestComments('example/backend', 7)).rejects.toThrow(/GitHub CLI request failed/)
+
+    const parseFailure = new GithubClient({ run: vi.fn().mockResolvedValue({ stdout: '{not-json', stderr: 'raw body' }) })
+    await expect(parseFailure.createPullRequestComment('example/backend', 7, 'hello')).rejects.toThrow(/GitHub CLI request failed/)
+  })
 })
