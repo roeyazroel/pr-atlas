@@ -109,6 +109,22 @@ describe("PR Atlas desktop workflow", () => {
     expect(screen.queryByText("LOCAL MVP")).not.toBeInTheDocument();
   });
 
+  it("keeps the pull-request navigation focused on useful controls and content", () => {
+    render(<App />);
+
+    expect(
+      screen.queryByRole("button", {
+        name: /more pull request list actions/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".sidebar-footer .footer-line"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".pr-list-pane .list-footer"),
+    ).not.toBeInTheDocument();
+  });
+
   it("filters the pull-request list without losing the selected item", async () => {
     const user = userEvent.setup();
     render(<App />);

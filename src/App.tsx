@@ -7,7 +7,6 @@ import {
   Bot,
   Check,
   CircleHelp,
-  Clock3,
   Code2,
   Download,
   ExternalLink,
@@ -20,7 +19,6 @@ import {
   ListFilter,
   Loader2,
   MessageSquare,
-  MoreHorizontal,
   Network,
   Play,
   RefreshCw,
@@ -2595,12 +2593,6 @@ function App() {
                 )}
               </div>
             )}
-            <div className="footer-line">
-              <ShieldCheck size={14} /> <span>Read-only GitHub access</span>
-            </div>
-            <div className="footer-line muted">
-              <Clock3 size={14} /> <span>Synced just now</span>
-            </div>
             <button className="help-button">
               <CircleHelp size={14} /> Keyboard shortcuts
             </button>
@@ -2617,12 +2609,6 @@ function App() {
               </div>
               <h1>Pull requests</h1>
             </div>
-            <button
-              className="icon-button"
-              aria-label="More pull request list actions"
-            >
-              <MoreHorizontal size={16} />
-            </button>
           </div>
           <div className="pr-list" role="list" aria-label="Pull request list">
             {!selectedRepository && liveLoading && (
@@ -2713,21 +2699,6 @@ function App() {
                   </button>
                 </div>
               ))}
-          </div>
-          <div className="list-footer">
-            <span>
-              <span className="live-dot" />{" "}
-              {electronMode || isLiveRepository
-                ? "Read-only GitHub data"
-                : "Read-only demo fixture"}
-            </span>
-            <span>
-              {selectedRepository && isLiveRepository
-                ? "Synced from GitHub"
-                : electronMode
-                  ? "GitHub CLI"
-                  : "Updated 2m ago"}
-            </span>
           </div>
         </section>
 
