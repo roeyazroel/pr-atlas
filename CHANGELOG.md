@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.1](https://github.com/roeyazroel/pr-atlas/compare/v0.6.0...v0.6.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* improve reviewer UX ([c9699e4](https://github.com/roeyazroel/pr-atlas/commit/c9699e4a548ff16af38a2ed0c88526b9eba7ba3f))
+* improve reviewer UX ([891284e](https://github.com/roeyazroel/pr-atlas/commit/891284e71fde92aecba98f72d3fb10308eab4c1f))
+* parse prose-prefixed Cursor map output ([ab4e2e3](https://github.com/roeyazroel/pr-atlas/commit/ab4e2e3ecc0ebd12ab054bcc78afb9cb7ac80cfa))
+* parse trailing Cursor map JSON ([efe986a](https://github.com/roeyazroel/pr-atlas/commit/efe986a12d50c2fda75f858390e316ad5ea428c5))
+* remove redundant pull request chrome ([325a5d1](https://github.com/roeyazroel/pr-atlas/commit/325a5d1a98d7d5b961a6132bb266ecb301ddad67))
+* remove redundant pull request chrome ([53b4065](https://github.com/roeyazroel/pr-atlas/commit/53b4065b401eb23d190d4ad3e839826d2fbd96dc))
+
 ## [0.6.0](https://github.com/roeyazroel/pr-atlas/compare/v0.5.0...v0.6.0) (2026-08-06)
 
 
