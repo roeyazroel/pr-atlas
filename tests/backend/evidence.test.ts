@@ -208,4 +208,51 @@ describe("local evidence path resolution", () => {
       readEvidenceDetail(root, "acme/repo", "abc1234", "assets/payload.bin"),
     ).rejects.toThrow(/binary|text/i);
   });
+
+  it("keeps hunk source lines while excluding metadata between files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-evidence-"));
+    const input = join(
+      root,
+      "analyses",
+      "github.com",
+      "acme",
+      "repo",
+      "42",
+      "abc1234",
+      "run-1",
+      "input",
+    );
+    await mkdir(input, { recursive: true });
+    const diff = join(input, "diff.patch");
+    await writeFile(
+      diff,
+      [
+        "diff --git a/src/one.ts b/src/one.ts",
+        "index 111..222 100644",
+        "--- a/src/one.ts",
+        "+++ b/src/one.ts",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "diff --git a/src/two.ts b/src/two.ts",
+        "index 333..444 100644",
+        "--- a/src/two.ts",
+        "+++ b/src/two.ts",
+        "@@ -3 +3 @@",
+        "--- value",
+        "+++ value",
+      ].join("\n"),
+    );
+
+    const detail = await readEvidenceDetail(
+      root,
+      "acme/repo",
+      "abc1234",
+      diff,
+    );
+    expect(detail.hunks).toEqual([
+      { header: "@@ -1 +1 @@", content: "-old\n+new" },
+      { header: "@@ -3 +3 @@", content: "--- value\n+++ value" },
+    ]);
+  });
 });

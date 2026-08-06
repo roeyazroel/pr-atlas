@@ -148,16 +148,47 @@ function parseDiffHunks(value: string): EvidenceDetail["hunks"] {
   const hunks: EvidenceDetail["hunks"] = [];
   let header = "";
   let body: string[] = [];
+  let collecting = false;
+  const flush = () => {
+    if (header)
+      hunks.push({ header, content: body.join("\n").slice(0, 32 * 1024) });
+    header = "";
+    body = [];
+    collecting = false;
+  };
+  const fileMetadataPrefixes = [
+    "diff --git ",
+    "index ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "GIT binary patch",
+    "Binary files ",
+  ];
+  const isFileMetadata = (line: string) =>
+    fileMetadataPrefixes.some((prefix) => line.startsWith(prefix));
   for (const line of value.split(/\r?\n/)) {
     if (line.startsWith("@@")) {
-      if (header)
-        hunks.push({ header, content: body.join("\n").slice(0, 32 * 1024) });
+      flush();
       header = line;
       body = [];
-    } else if (header && body.length < 240) body.push(line);
+      collecting = true;
+    } else if (collecting && line.startsWith("\\ No newline at end of file")) {
+      continue;
+    } else if (collecting && isFileMetadata(line)) {
+      flush();
+    } else if (collecting && body.length < 240) {
+      body.push(line);
+    }
   }
-  if (header)
-    hunks.push({ header, content: body.join("\n").slice(0, 32 * 1024) });
+  flush();
   return hunks.slice(0, 30);
 }
 

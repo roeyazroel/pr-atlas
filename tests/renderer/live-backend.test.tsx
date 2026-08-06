@@ -9,6 +9,7 @@ import type {
   BootstrapResult,
   Graph,
   GraphNode,
+  EvidenceDetail,
   PrAtlasApi,
   PullRequestDTO,
   RepositoryDTO,
@@ -436,6 +437,151 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
     expect(api.openEvidence).toHaveBeenCalledWith(repository.fullName, pullRequest.headSha, 'electron/backend/store.ts', undefined)
     expect(screen.queryByRole('button', { name: /map existing checkout/i })).not.toBeInTheDocument()
+  })
+
+  it('renders source evidence as unified lines and closes the drawer outside or with Escape', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    const detail: EvidenceDetail = {
+      path: 'electron/backend/store.ts',
+      line: 45,
+      source: 'worktree',
+      content: '   44 | export function read() {\n   45 |   return true\n   46 | }',
+      hunks: [],
+    }
+    api.getEvidenceDetail = vi.fn(async () => detail)
+
+    render(<App />)
+    await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: /analysis details/i }))
+    await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
+    expect(await screen.findByRole('table', { name: /unified evidence diff/i })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /Source line 45:/i })).toBeInTheDocument()
+    expect(globalThis.document.querySelectorAll('.evidence-line-source')).toHaveLength(3)
+    await user.click(globalThis.document.body)
+    expect(screen.queryByRole('dialog', { name: /evidence details/i })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
+    await screen.findByRole('dialog', { name: /evidence details/i })
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: /evidence details/i })).not.toBeInTheDocument()
+  })
+
+  it('makes change-group file chips open their matching evidence', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    api.getEvidenceDetail = vi.fn(async (): Promise<EvidenceDetail> => ({
+      path: 'electron/backend/store.ts',
+      line: 45,
+      source: 'worktree',
+      content: '   45 | return true',
+      hunks: [],
+    }))
+    render(<App />)
+    await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
+    await user.click(screen.getByRole('button', { name: /open evidence electron\/backend\/store\.ts/i }))
+    expect(api.getEvidenceDetail).toHaveBeenCalledWith(
+      repository.fullName,
+      pullRequest.headSha,
+      'electron/backend/store.ts',
+      undefined,
+    )
+  })
+
+  it('preserves evidence identity when a change group links repeated file paths', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    const duplicateDocument: WalkthroughDocument = {
+      ...document,
+      changeGroups: [{
+        ...document.changeGroups[0],
+        evidenceIds: ['evidence-store-line-44', 'evidence-store-line-45'],
+      }],
+      evidence: [
+        { ...document.evidence[0], id: 'evidence-store-line-44', line: 44 },
+        { ...document.evidence[0], id: 'evidence-store-line-45', line: 45 },
+      ],
+    }
+    api.loadAnalysisRun = vi.fn(async () => ({ ...runResult, document: duplicateDocument }))
+    api.getEvidenceDetail = vi.fn(async () => null)
+
+    render(<App />)
+    await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
+    const chips = screen.getAllByRole('button', { name: /open evidence electron\/backend\/store\.ts:/i })
+    expect(chips).toHaveLength(2)
+    await user.click(chips[1])
+    expect(api.getEvidenceDetail).toHaveBeenCalledWith(
+      repository.fullName,
+      pullRequest.headSha,
+      'electron/backend/store.ts',
+      45,
+    )
+  })
+
+  it('associates the evidence drawer by path and line for repeated file records', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    const associatedDocument: WalkthroughDocument = {
+      ...document,
+      evidence: [
+        { ...document.evidence[0], id: 'evidence-first', line: 44, url: 'https://github.com/runway/atlas/blob/head/electron/backend/store.ts#L44' },
+        { ...document.evidence[0], id: 'evidence-second', line: 45, url: 'https://github.com/runway/atlas/blob/head/electron/backend/store.ts#L45' },
+      ],
+      changeGroups: [
+        { ...document.changeGroups[0], id: 'group-first', title: 'First group', evidenceIds: ['evidence-first'] },
+        { ...document.changeGroups[0], id: 'group-second', title: 'Second group', evidenceIds: ['evidence-second'] },
+      ],
+      tests: [
+        { ...document.tests[0], id: 'test-first', title: 'first test', evidenceIds: ['evidence-first'] },
+        { ...document.tests[0], id: 'test-second', title: 'second test', evidenceIds: ['evidence-second'] },
+      ],
+      reviewThreads: [
+        { ...document.reviewThreads[0], id: 'thread-first', author: 'first reviewer', evidenceIds: ['evidence-first'] },
+        { ...document.reviewThreads[0], id: 'thread-second', author: 'second reviewer', evidenceIds: ['evidence-second'] },
+      ],
+    }
+    api.loadAnalysisRun = vi.fn(async () => ({ ...runResult, document: associatedDocument }))
+    api.getEvidenceDetail = vi.fn(async (): Promise<EvidenceDetail> => ({
+      path: 'electron/backend/store.ts',
+      line: 45,
+      source: 'worktree',
+      content: '   45 | return true',
+      hunks: [],
+    }))
+
+    render(<App />)
+    await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
+    await user.click(screen.getByRole('button', { name: /open evidence electron\/backend\/store\.ts:45/i }))
+    expect(await screen.findByRole('dialog', { name: /evidence details/i })).toBeInTheDocument()
+    expect(screen.getByText('Groups: Second group')).toBeInTheDocument()
+    expect(screen.queryByText('Groups: First group')).not.toBeInTheDocument()
+    expect(screen.getByText('Tests: second test')).toBeInTheDocument()
+    expect(screen.getByText('Review threads: second reviewer')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /view on github/i }))
+    expect(api.openExternal).toHaveBeenCalledWith(
+      'https://github.com/runway/atlas/blob/head/electron/backend/store.ts#L45',
+    )
+  })
+
+  it('announces added and removed unified-diff rows to assistive technology', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    api.getEvidenceDetail = vi.fn(async (): Promise<EvidenceDetail> => ({
+      path: 'electron/backend/store.ts',
+      line: null,
+      source: 'analysis-input',
+      content: '',
+      hunks: [{ header: '@@ -3,1 +4,1 @@', content: '-old\n+new' }],
+    }))
+    render(<App />)
+    await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
+    await user.click(screen.getByRole('button', { name: /analysis details/i }))
+    await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
+    expect(await screen.findByRole('row', { name: /Removed line 3: old/i })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /Added line 4: new/i })).toBeInTheDocument()
   })
 
   it('renders complete review threads with metadata and every reply', async () => {
