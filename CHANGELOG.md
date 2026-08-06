@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/roeyazroel/pr-atlas/compare/v0.5.0...v0.6.0) (2026-08-06)
+
+
+### Features
+
+* add analysis diagnostics and activity ([cc4efb1](https://github.com/roeyazroel/pr-atlas/commit/cc4efb1d1f1204399aa7d79b95518d31f4ede679))
+
+
+### Bug Fixes
+
+* parse Cursor map result envelopes ([b0a508f](https://github.com/roeyazroel/pr-atlas/commit/b0a508f875a68c0918dd730a55250f7cee14a7d6))
+
 ## [0.5.0](https://github.com/roeyazroel/pr-atlas/compare/v0.4.1...v0.5.0) (2026-08-06)
 
 
