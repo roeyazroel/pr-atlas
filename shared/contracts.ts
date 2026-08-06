@@ -44,6 +44,19 @@ export interface PullRequestDTO {
   reviewedByViewer?: boolean;
 }
 
+export interface PullRequestComment {
+  id: number;
+  nodeId: string;
+  body: string;
+  author: string;
+  authorAvatarUrl: string | null;
+  authorAssociation: string | null;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  viewerDidAuthor: boolean;
+}
+
 export interface BootstrapResult {
   account: GithubAccountDTO | null;
   repositories: RepositoryDTO[];
@@ -472,6 +485,15 @@ export interface PrAtlasApi {
   /** Optional for source-compatible browser fixtures from the single-provider MVP. */
   listProviders?: () => Promise<AgentInstallationStatus[]>;
   listPullRequests(repository: string): Promise<PullRequestDTO[]>;
+  listPullRequestComments(
+    repository: string,
+    pullNumber: number,
+  ): Promise<PullRequestComment[]>;
+  createPullRequestComment(
+    repository: string,
+    pullNumber: number,
+    body: string,
+  ): Promise<PullRequestComment>;
   startAnalysis(request: AnalysisRequest): Promise<AnalysisRunResult>;
   cancelAnalysis(runId: string): Promise<boolean>;
   listAnalysisRuns(

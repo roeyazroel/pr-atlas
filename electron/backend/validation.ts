@@ -25,6 +25,14 @@ export function validatePullNumber(value: unknown): value is number {
     (value as number) <= 2_147_483_647
   );
 }
+export function validateCommentBody(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length >= 1 &&
+    value.trim().length <= 65_536 &&
+    !/[\0\x01-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(value)
+  );
+}
 export function safeError(
   code: string,
   message: string,

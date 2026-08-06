@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { BootstrapResult, GithubAccountDTO, PullRequestDTO, RepositoryDTO } from '../../shared/contracts.js';
-import { validateRepository } from './validation.js';
+import type { BootstrapResult, GithubAccountDTO, PullRequestComment, PullRequestDTO, RepositoryDTO } from '../../shared/contracts.js';
+import { safeExternalUrl, validateCommentBody, validatePullNumber, validateRepository } from './validation.js';
 
 const execFileAsync = promisify(execFile);
 export interface CommandResult { stdout: string; stderr?: string; }
@@ -132,6 +132,35 @@ export class GithubClient {
     return pullRequests.map((entry) => entry.pullRequest).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  async listPullRequestComments(repository: string, pullNumber: number): Promise<PullRequestComment[]> {
+    if (!validateRepository(repository) || !validatePullNumber(pullNumber)) throw new Error('Invalid pull request comments request.');
+    try {
+      const result = await this.runner.run('gh', [
+        'api', '--paginate', '--slurp', `repos/${repository}/issues/${pullNumber}/comments?per_page=100`,
+      ], { timeout: 30_000 });
+      return flattenRestCommentPages(parseJson(result.stdout, 8 * 1024 * 1024))
+        .map((entry) => normalizePullRequestComment(entry, this.viewerLogin))
+        .filter((entry): entry is PullRequestComment => entry !== null)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id - right.id);
+    } catch (error) {
+      throw new Error(sanitizeGhError(error));
+    }
+  }
+
+  async createPullRequestComment(repository: string, pullNumber: number, body: string): Promise<PullRequestComment> {
+    if (!validateRepository(repository) || !validatePullNumber(pullNumber) || !validateCommentBody(body)) throw new Error('Invalid pull request comment request.');
+    try {
+      const result = await this.runner.run('gh', [
+        'api', '--method', 'POST', `repos/${repository}/issues/${pullNumber}/comments`, '-f', `body=${body.trim()}`,
+      ], { timeout: 30_000 });
+      const comment = normalizePullRequestComment(parseJson(result.stdout, 8 * 1024 * 1024), this.viewerLogin);
+      if (!comment) throw new Error('Unexpected GitHub comment response.');
+      return comment;
+    } catch (error) {
+      throw new Error(sanitizeGhError(error));
+    }
+  }
+
   /** Fetches raw, paginated GraphQL pages for a pull request's review threads. */
   async fetchReviewThreads(repository: string, pullNumber: number, signal?: AbortSignal): Promise<unknown> {
     if (!validateRepository(repository) || !Number.isInteger(pullNumber) || pullNumber < 1) throw new Error('Invalid pull request.');
@@ -248,6 +277,36 @@ export class GithubClient {
     const labels = Array.isArray(item.labels) ? item.labels.map((label) => str(asObject(label).name)).filter(Boolean).sort() : [];
     return { source: 'github', id: str(item.id, `${repository}#${number}`), repository, number: number as number, title: str(item.title), url: str(item.url, `https://github.com/${repository}/pull/${number}`), state: 'open', author: typeof asObject(item.author).login === 'string' ? str(asObject(item.author).login) : null, baseRef: str(item.baseRefName), headRef: str(item.headRefName), baseSha, headSha, updatedAt: str(item.updatedAt), isDraft: item.isDraft === true, additions: Number.isInteger(item.additions) && (item.additions as number) >= 0 ? item.additions as number : 0, deletions: Number.isInteger(item.deletions) && (item.deletions as number) >= 0 ? item.deletions as number : 0, changedFiles: Number.isInteger(item.changedFiles) && (item.changedFiles as number) >= 0 ? item.changedFiles as number : 0, labels, reviewDecision: typeof item.reviewDecision === 'string' ? item.reviewDecision : null, reviewRequested: false, authoredByViewer: Boolean(this.viewerLogin && str(asObject(item.author).login).toLowerCase() === this.viewerLogin.toLowerCase()), reviewedByViewer: false };
   }
+}
+
+function flattenRestCommentPages(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value.flatMap((page) => flattenRestCommentPages(page));
+  return value && typeof value === 'object' ? [value] : [];
+}
+
+function normalizePullRequestComment(value: unknown, viewerLogin: string | null): PullRequestComment | null {
+  const item = asObject(value);
+  const user = asObject(item.user);
+  const id = item.id;
+  const nodeId = str(item.node_id).trim();
+  const body = item.body;
+  const author = str(user.login).trim();
+  const createdAt = item.created_at;
+  const updatedAt = item.updated_at;
+  const url = str(item.html_url).trim();
+  if (!Number.isSafeInteger(id) || (id as number) < 1 || !nodeId || typeof body !== 'string' || !author || typeof createdAt !== 'string' || typeof updatedAt !== 'string' || !safeExternalUrl(url)) return null;
+  return {
+    id: id as number,
+    nodeId,
+    body,
+    author,
+    authorAvatarUrl: typeof user.avatar_url === 'string' ? user.avatar_url : null,
+    authorAssociation: typeof item.author_association === 'string' ? item.author_association : null,
+    createdAt,
+    updatedAt,
+    url,
+    viewerDidAuthor: Boolean(viewerLogin && author.toLowerCase() === viewerLogin.toLowerCase()),
+  };
 }
 
 function reviewThreadNodes(value: unknown): Array<Record<string, unknown>> {

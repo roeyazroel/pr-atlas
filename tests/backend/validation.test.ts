@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validateAnalysisRequest } from "../../electron/backend/validation";
+import { validateAnalysisRequest, validateCommentBody } from "../../electron/backend/validation";
 
 const validRequest = () => ({
   repository: "example/backend",
@@ -142,5 +142,15 @@ describe("analysis request validation", () => {
         },
       }).valid,
     ).toBe(false);
+  });
+});
+
+describe("pull request comment validation", () => {
+  it.each(["hello", "  hello  ", "x".repeat(65_536)])("accepts bounded non-empty body %j", (body) => {
+    expect(validateCommentBody(body)).toBe(true);
+  });
+
+  it.each([undefined, null, 42, "", "   ", "bad\0body", "bad\u007fbody", "x".repeat(65_537)])("rejects invalid body %j", (body) => {
+    expect(validateCommentBody(body)).toBe(false);
   });
 });

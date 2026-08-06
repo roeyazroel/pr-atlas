@@ -1,9 +1,18 @@
 import { Bot, ExternalLink, FileCode2, MessageSquare, UserRound } from 'lucide-react';
 import type { PullRequest, ReviewReply, ReviewState, ReviewThread } from '../types';
+import PullRequestComments, { type CommentResource, type CommentViewer } from './PullRequestComments';
 
 export interface ThreadsViewProps {
-  pr: Pick<PullRequest, 'threads'>;
+  pr: Pick<PullRequest, 'number' | 'threads'>;
   openEvidence: (path: string, line?: number) => void;
+  live: boolean;
+  viewer?: CommentViewer | null;
+  comments: CommentResource;
+  posting: boolean;
+  postError: string | null;
+  successMessage: string | null;
+  onPost: (body: string) => Promise<boolean>;
+  onRefresh: () => void;
 }
 
 const display = (value: string | null | undefined, fallback = 'Unknown') => value && value.trim() ? value : fallback;
@@ -93,13 +102,27 @@ function Thread({ thread, openEvidence }: { thread: ReviewThread; openEvidence: 
   </article>;
 }
 
-export default function ThreadsView({ pr, openEvidence }: ThreadsViewProps) {
+export default function ThreadsView({ pr, openEvidence, live, viewer, comments, posting, postError, successMessage, onPost, onRefresh }: ThreadsViewProps) {
   return <div className="view-section">
-    <div className="section-intro"><div className="eyebrow">Conversation context</div><h3>Review threads</h3><p>Complete comments, replies, provenance, and code locations stay visible so stale and disputed signals do not look active.</p></div>
-    <div className="thread-list">
-      {pr.threads.map((thread) => <Thread key={thread.id} thread={thread} openEvidence={openEvidence} />)}
-      {pr.threads.length === 0 && <div className="empty-analysis"><MessageSquare size={20} /><h4>No review threads</h4><p>GitHub reports no review discussion for this pull request.</p></div>}
-    </div>
+    <PullRequestComments
+      key={pr.number}
+      pullNumber={pr.number}
+      viewer={viewer}
+      live={live}
+      resource={comments}
+      posting={posting}
+      postError={postError}
+      successMessage={successMessage}
+      onPost={onPost}
+      onRefresh={onRefresh}
+    />
+    <section className="code-review-threads" aria-labelledby={`code-review-threads-${pr.number}`}>
+      <div className="section-intro"><div className="eyebrow">Walkthrough context</div><h3 id={`code-review-threads-${pr.number}`}>Code review threads</h3><p>Analysis-linked comments, replies, provenance, and code locations remain visible as a walkthrough snapshot.</p></div>
+      <div className="thread-list">
+        {pr.threads.map((thread) => <Thread key={thread.id} thread={thread} openEvidence={openEvidence} />)}
+        {pr.threads.length === 0 && <div className="empty-analysis"><MessageSquare size={20} /><h4>No code review threads</h4><p>This walkthrough contains no line-specific review discussion for the pull request.</p></div>}
+      </div>
+    </section>
   </div>;
 }
 

@@ -165,6 +165,32 @@ const providers: AgentInstallationStatus[] = [
   { provider: 'cursor', displayName: 'Cursor Agent', executable: 'cursor-agent', installed: false, capabilities, models: [], error: 'Cursor Agent was not found.' },
 ]
 
+const existingComment = {
+  id: 1001,
+  nodeId: 'IC_existing',
+  body: 'The migration plan looks good from the PR conversation.',
+  author: 'reviewer',
+  authorAvatarUrl: null,
+  authorAssociation: 'MEMBER',
+  createdAt: '2026-08-04T08:40:00.000Z',
+  updatedAt: '2026-08-04T08:40:00.000Z',
+  url: 'https://github.com/runway/atlas/pull/42#issuecomment-1001',
+  viewerDidAuthor: false,
+}
+
+const postedComment = {
+  id: 1002,
+  nodeId: 'IC_posted',
+  body: 'I verified the local persistence flow from Atlas.',
+  author: 'maya',
+  authorAvatarUrl: null,
+  authorAssociation: 'OWNER',
+  createdAt: '2026-08-04T08:42:00.000Z',
+  updatedAt: '2026-08-04T08:42:00.000Z',
+  url: 'https://github.com/runway/atlas/pull/42#issuecomment-1002',
+  viewerDidAuthor: true,
+}
+
 type UpdateProgress = { downloadedBytes: number; totalBytes?: number; percent?: number }
 let updateProgressListener: ((event: UpdateProgress) => void) | null = null
 
@@ -173,6 +199,8 @@ function installLiveApi() {
     bootstrap: vi.fn(async (): Promise<BootstrapResult> => ({ account: { source: 'github', login: 'maya', name: 'Maya Chen', avatarUrl: null }, repositories: [repository], warnings: [] })),
     listProviders: vi.fn(async () => providers),
     listPullRequests: vi.fn(async (name: string) => name === repository.fullName ? [pullRequest] : []),
+    listPullRequestComments: vi.fn(async () => [existingComment]),
+    createPullRequestComment: vi.fn(async () => postedComment),
     startAnalysis: vi.fn(async () => runResult),
     cancelAnalysis: vi.fn(async () => true),
     listAnalysisRuns: vi.fn(async () => [runSummary]),
@@ -220,6 +248,48 @@ describe('live Electron renderer contract', () => {
     expect(screen.queryByText('LOCAL MVP')).not.toBeInTheDocument()
     expect(screen.getByRole('listitem', { name: /#42 persist local walkthrough history/i })).toBeInTheDocument()
     expect(screen.getByText(document.summary.intent)).toBeInTheDocument()
+  })
+
+  it('loads the live PR conversation and makes a GitHub-confirmed comment visible immediately', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+
+    render(<App />)
+
+    await waitFor(() => expect(api.listPullRequestComments).toHaveBeenCalledWith(repository.fullName, pullRequest.number))
+    await user.click(await screen.findByRole('button', { name: /comments/i }))
+
+    expect(screen.getByRole('heading', { name: /pr conversation/i })).toBeInTheDocument()
+    expect(screen.getByText(existingComment.body)).toBeInTheDocument()
+    expect(screen.getByText('Keep the history write atomic.')).toBeInTheDocument()
+
+    const composer = screen.getByRole('textbox', { name: `Comment on pull request #${pullRequest.number}` })
+    await user.type(composer, `  ${postedComment.body}  `)
+    await user.click(screen.getByRole('button', { name: /^comment$/i }))
+
+    await waitFor(() => expect(api.createPullRequestComment).toHaveBeenCalledWith(repository.fullName, pullRequest.number, postedComment.body))
+    expect(await screen.findByText(postedComment.body)).toBeInTheDocument()
+    expect(composer).toHaveValue('')
+  })
+
+  it('does not let an older comment read hide a GitHub-confirmed comment', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    let resolveOlderRead!: (comments: typeof existingComment[]) => void
+    vi.mocked(api.listPullRequestComments).mockReturnValue(new Promise((resolve) => { resolveOlderRead = resolve }))
+
+    render(<App />)
+
+    await waitFor(() => expect(api.listPullRequestComments).toHaveBeenCalledOnce())
+    await user.click(await screen.findByRole('button', { name: /comments/i }))
+    const composer = screen.getByRole('textbox', { name: `Comment on pull request #${pullRequest.number}` })
+    await user.type(composer, postedComment.body)
+    await user.click(screen.getByRole('button', { name: /^comment$/i }))
+    expect(await screen.findByText(postedComment.body)).toBeInTheDocument()
+
+    await act(async () => resolveOlderRead([existingComment]))
+
+    expect(screen.getByText(postedComment.body)).toBeInTheDocument()
   })
 
   it('falls back to the GitHub login when the account has no display name', async () => {
@@ -351,6 +421,32 @@ describe('live Electron renderer contract', () => {
       effort: 'high',
       customPrompt: 'Collect more migration and rollback evidence.',
     })))
+  })
+
+  it('keeps live comments available while a first analysis is processing', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    vi.mocked(api.listAnalysisRuns).mockResolvedValue([])
+    let resolveAnalysis!: (result: AnalysisRunResult) => void
+    vi.mocked(api.startAnalysis).mockReturnValue(new Promise((resolve) => { resolveAnalysis = resolve }))
+
+    render(<App />)
+
+    await waitFor(() => expect(api.listProviders).toHaveBeenCalledTimes(1))
+    await user.click(await screen.findByRole('listitem', { name: /#42 persist local walkthrough history/i }))
+    expect(await screen.findByRole('heading', { name: /send repository context to codex cli/i })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(api.startAnalysis).toHaveBeenCalledOnce())
+    await waitFor(() => expect(api.listPullRequestComments).toHaveBeenCalledWith(repository.fullName, pullRequest.number))
+
+    await user.click(screen.getByRole('button', { name: /comments/i }))
+    expect(screen.getByRole('heading', { name: /pr conversation/i })).toBeInTheDocument()
+    const composer = screen.getByRole('textbox', { name: `Comment on pull request #${pullRequest.number}` })
+    await user.type(composer, 'Comment during first analysis')
+    await user.click(screen.getByRole('button', { name: /^comment$/i }))
+    await waitFor(() => expect(api.createPullRequestComment).toHaveBeenCalledWith(repository.fullName, pullRequest.number, 'Comment during first analysis'))
+
+    await act(async () => resolveAnalysis(runResult))
   })
 
   it('falls back to the safe default when persisted thinking effort is malformed', async () => {
@@ -606,7 +702,7 @@ describe('live Electron renderer contract', () => {
     render(<App />)
 
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalledWith(repository.fullName, pullRequest.number, runSummary.runId))
-    await user.click(screen.getByRole('button', { name: /review threads/i }))
+    await user.click(screen.getByRole('button', { name: /comments/i }))
 
     expect(screen.getByText('Keep the history write atomic.')).toBeInTheDocument()
     expect(screen.getByText('CONTRIBUTOR')).toBeInTheDocument()

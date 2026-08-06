@@ -70,6 +70,7 @@ import {
   type Graph as ContractGraph,
   type GraphEdge,
   type GraphNode,
+  type PullRequestComment,
   type PullRequestDTO,
   type RepositoryDTO,
   type ReviewProgress,
@@ -99,6 +100,22 @@ type AccountState = {
   initials: string;
   avatarLabel: string;
 };
+type CommentResource = {
+  status: "idle" | "loading" | "ready" | "error";
+  comments: PullRequestComment[];
+  error: string | null;
+  posting: boolean;
+  postError: string | null;
+  successMessage: string | null;
+};
+const emptyCommentResource = (): CommentResource => ({
+  status: "idle",
+  comments: [],
+  error: null,
+  posting: false,
+  postError: null,
+  successMessage: null,
+});
 const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
 const LARGE_PR_FILE_THRESHOLD = 20;
@@ -487,7 +504,7 @@ const viewItems: { id: View; label: string; icon: typeof LayoutList }[] = [
   { id: "flows", label: "Flows", icon: Network },
   { id: "files", label: "Files", icon: Files },
   { id: "tests", label: "Tests", icon: TestTube2 },
-  { id: "threads", label: "Review threads", icon: MessageSquare },
+  { id: "threads", label: "Comments", icon: MessageSquare },
   { id: "details", label: "Analysis details", icon: Code2 },
 ];
 
@@ -498,6 +515,13 @@ const safeString = (value: unknown, fallback = "") =>
 const safeArray = (value: unknown): unknown[] =>
   Array.isArray(value) ? value : [];
 const shortSha = (sha: string) => (sha ? sha.slice(0, 7) : "unknown");
+const orderPullRequestComments = (
+  comments: PullRequestComment[],
+): PullRequestComment[] =>
+  [...comments].sort(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.id - right.id,
+  );
 const initialsFor = (name: string | null) =>
   safeString(name, "GitHub")
     .split(/\s+/)
@@ -511,7 +535,7 @@ const accountFromBootstrap = (
   result.account
     ? {
         label: `@${result.account.login}`,
-        detail: result.warnings.join(" ") || "Read-only GitHub CLI session",
+        detail: result.warnings.join(" ") || "Authenticated GitHub CLI session",
         live: true,
         initials: initialsFor(result.account.name ?? result.account.login),
         avatarLabel: `GitHub account ${result.account.name ?? result.account.login}`,
@@ -1269,6 +1293,13 @@ function App() {
   const [liveDocuments, setLiveDocuments] = useState<
     Record<string, WalkthroughDocument>
   >({});
+  const [commentResources, setCommentResources] = useState<
+    Record<string, CommentResource>
+  >({});
+  const [commentReloads, setCommentReloads] = useState<Record<string, number>>(
+    {},
+  );
+  const commentWriteVersionsRef = useRef<Record<string, number>>({});
   const [liveLoading, setLiveLoading] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
   const [confirmLiveAnalysis, setConfirmLiveAnalysis] = useState(false);
@@ -1824,6 +1855,163 @@ function App() {
   const largePRNotice = selectedPR
     ? analysisDurationNotice(selectedPR)
     : null;
+  const selectedCommentResource = selectedPR
+    ? (commentResources[selectedPR.id] ?? emptyCommentResource())
+    : emptyCommentResource();
+  const selectedCommentReload = selectedPR
+    ? (commentReloads[selectedPR.id] ?? 0)
+    : 0;
+
+  useEffect(() => {
+    if (
+      !api ||
+      !selectedPR ||
+      selectedPR.source !== "github" ||
+      !selectedPR.repositoryFullName
+    )
+      return;
+    const key = selectedPR.id;
+    const repository = selectedPR.repositoryFullName;
+    const pullNumber = selectedPR.number;
+    const writeVersion = commentWriteVersionsRef.current[key] ?? 0;
+    let cancelled = false;
+    setCommentResources((current) => {
+      const previous = current[key] ?? emptyCommentResource();
+      return {
+        ...current,
+        [key]: { ...previous, status: "loading", error: null },
+      };
+    });
+    void api
+      .listPullRequestComments(repository, pullNumber)
+      .then((comments) => {
+        if (
+          cancelled ||
+          (commentWriteVersionsRef.current[key] ?? 0) !== writeVersion
+        )
+          return;
+        setCommentResources((current) => {
+          const previous = current[key] ?? emptyCommentResource();
+          return {
+            ...current,
+            [key]: {
+              ...previous,
+              status: "ready",
+              comments: orderPullRequestComments(comments),
+              error: null,
+            },
+          };
+        });
+      })
+      .catch(() => {
+        if (
+          cancelled ||
+          (commentWriteVersionsRef.current[key] ?? 0) !== writeVersion
+        )
+          return;
+        setCommentResources((current) => {
+          const previous = current[key] ?? emptyCommentResource();
+          return {
+            ...current,
+            [key]: {
+              ...previous,
+              status: "error",
+              error: "Could not load pull request comments. Try again.",
+            },
+          };
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    selectedPR?.id,
+    selectedPR?.repositoryFullName,
+    selectedPR?.number,
+    selectedCommentReload,
+  ]);
+
+  const refreshSelectedComments = () => {
+    if (!selectedPR || selectedPR.source !== "github") return;
+    setCommentReloads((current) => ({
+      ...current,
+      [selectedPR.id]: (current[selectedPR.id] ?? 0) + 1,
+    }));
+  };
+
+  const postSelectedComment = async (body: string): Promise<boolean> => {
+    if (
+      !api ||
+      !selectedPR ||
+      selectedPR.source !== "github" ||
+      !selectedPR.repositoryFullName
+    )
+      return false;
+    const trimmed = body.trim();
+    if (!trimmed || trimmed.length > 65_536) return false;
+    const key = selectedPR.id;
+    const repository = selectedPR.repositoryFullName;
+    const pullNumber = selectedPR.number;
+    setCommentResources((current) => {
+      const previous = current[key] ?? emptyCommentResource();
+      return {
+        ...current,
+        [key]: {
+          ...previous,
+          posting: true,
+          postError: null,
+          successMessage: null,
+        },
+      };
+    });
+    try {
+      const comment = await api.createPullRequestComment(
+        repository,
+        pullNumber,
+        trimmed,
+      );
+      commentWriteVersionsRef.current[key] =
+        (commentWriteVersionsRef.current[key] ?? 0) + 1;
+      setCommentResources((current) => {
+        const previous = current[key] ?? emptyCommentResource();
+        const comments = previous.comments.some(
+          (candidate) => candidate.id === comment.id,
+        )
+          ? previous.comments.map((candidate) =>
+              candidate.id === comment.id ? comment : candidate,
+            )
+          : [...previous.comments, comment];
+        return {
+          ...current,
+          [key]: {
+            ...previous,
+            status: "ready",
+            comments: orderPullRequestComments(comments),
+            posting: false,
+            postError: null,
+            successMessage: "Comment published on GitHub.",
+          },
+        };
+      });
+      return true;
+    } catch {
+      setCommentResources((current) => {
+        const previous = current[key] ?? emptyCommentResource();
+        return {
+          ...current,
+          [key]: {
+            ...previous,
+            posting: false,
+            postError:
+              "Could not publish this comment. Check your GitHub access and try again.",
+            successMessage: null,
+          },
+        };
+      });
+      return false;
+    }
+  };
 
   useEffect(() => {
     const runId = selectedPR?.walkthrough?.run.id;
@@ -2133,6 +2321,7 @@ function App() {
 
   const refreshLive = () => {
     if (!api) return;
+    refreshSelectedComments();
     loadProviders();
     if (updateDownloadState !== "downloading" && api.checkForUpdate) {
       const sequence = ++updateCheckSequenceRef.current;
@@ -3203,6 +3392,12 @@ function App() {
                         {selectedPR.insights.length}
                       </span>
                     )}
+                    {id === "threads" &&
+                      selectedCommentResource.comments.length > 0 && (
+                        <span className="nav-count">
+                          {selectedCommentResource.comments.length}
+                        </span>
+                      )}
                   </button>
                 ))}
               </nav>
@@ -3216,6 +3411,11 @@ function App() {
                   activeAnalysis={activeAnalysis}
                   providerName={activeAnalysisProviderName}
                   analysisMessage={analysisMessage}
+                  commentResource={selectedCommentResource}
+                  commentsLive={selectedPR.source === "github" && Boolean(api)}
+                  commentViewer={{ label: account.label, initials: account.initials }}
+                  onPostComment={postSelectedComment}
+                  onRefreshComments={refreshSelectedComments}
                   markGroup={markGroup}
                   reviewed={reviewed}
                   stepProgress={stepProgress}
@@ -3382,7 +3582,7 @@ function App() {
                       …
                     </>
                   ) : liveError ? (
-                    "Refresh the repository to try the read-only GitHub request again."
+                    "Refresh the repository to try the GitHub request again."
                   ) : (
                     <>
                       <strong>
@@ -3414,7 +3614,7 @@ function App() {
                 )}
                 <div className="empty-detail-meta">
                   <ShieldCheck size={14} />
-                  <span>Read-only GitHub data</span>
+                  <span>Authenticated GitHub data</span>
                   <span aria-hidden="true">·</span>
                   <span>Local analysis artifacts</span>
                 </div>
@@ -3437,6 +3637,11 @@ function ViewContent({
   activeAnalysis,
   providerName,
   analysisMessage,
+  commentResource,
+  commentsLive,
+  commentViewer,
+  onPostComment,
+  onRefreshComments,
   markGroup,
   reviewed,
   stepProgress,
@@ -3472,6 +3677,11 @@ function ViewContent({
   } | null;
   providerName: string;
   analysisMessage?: string;
+  commentResource: CommentResource;
+  commentsLive: boolean;
+  commentViewer: { label: string; initials: string };
+  onPostComment: (body: string) => Promise<boolean>;
+  onRefreshComments: () => void;
   markGroup: (group: ChangeGroup) => void;
   reviewed: Record<string, boolean>;
   stepProgress: Record<string, ReviewProgress>;
@@ -3497,6 +3707,7 @@ function ViewContent({
 }) {
   if (
     activeAnalysis?.running &&
+    view !== "threads" &&
     (view === "walkthrough" || pr.status === "unprocessed")
   )
     return (
@@ -3573,7 +3784,25 @@ function ViewContent({
   if (view === "tests")
     return <TestsView pr={pr} openEvidence={openEvidence} />;
   if (view === "threads")
-    return <RichThreadsView pr={pr} openEvidence={openEvidence} />;
+    return (
+      <RichThreadsView
+        key={pr.id}
+        pr={pr}
+        openEvidence={openEvidence}
+        live={commentsLive}
+        viewer={commentViewer}
+        comments={{
+          status: commentResource.status,
+          comments: commentResource.comments,
+          error: commentResource.error,
+        }}
+        posting={commentResource.posting}
+        postError={commentResource.postError}
+        successMessage={commentResource.successMessage}
+        onPost={onPostComment}
+        onRefresh={onRefreshComments}
+      />
+    );
   return (
     <DetailsView
       pr={pr}
