@@ -8,12 +8,341 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App from "../src/App";
+import App, {
+  buildEvidenceCodeLines,
+  calculateFitZoom,
+  mergeGroupEvidenceItems,
+  positionedGraphNodeBox,
+  routeGraphEdge,
+} from "../src/App";
 import { pullRequests } from "../src/data/demo";
 
 describe("PR Atlas desktop workflow", () => {
   beforeEach(() => {
     window.localStorage.clear();
+  });
+
+  it("normalizes source and diff evidence into unified line rows", () => {
+    expect(
+      buildEvidenceCodeLines(
+        "    7 | return true\n    8 | }",
+        "worktree",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "source",
+        newLine: 7,
+        text: "return true",
+      }),
+      expect.objectContaining({ kind: "source", newLine: 8, text: "}" }),
+    ]);
+    expect(
+      buildEvidenceCodeLines(
+        "diff --git a/src/App.tsx b/src/App.tsx\nindex 123..456 100644\nnew file mode 100644\nsimilarity index 95%\nrename from src/Old.tsx\nrename to src/App.tsx\ncopy from src/Old.tsx\ncopy to src/App.tsx\nGIT binary patch\n--- a/src/App.tsx\n+++ b/src/App.tsx\n@@ -10,1 +20,2 @@\n index = 1\n --- separator\n+added\n-removed\n\\ No newline at end of file",
+        "analysis-input",
+        "@@ -10,1 +20,2 @@",
+      ),
+    ).toEqual([
+      expect.objectContaining({ kind: "context", oldLine: 10, newLine: 20 }),
+      expect.objectContaining({ kind: "context", oldLine: 11, newLine: 21 }),
+      expect.objectContaining({ kind: "addition", newLine: 22 }),
+      expect.objectContaining({ kind: "deletion", oldLine: 12 }),
+    ]);
+    expect(
+      buildEvidenceCodeLines(
+        "@@ -10,1 +20,1 @@\n--- value\n+++ value",
+        "analysis-input",
+        "@@ -10,1 +20,1 @@",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "deletion",
+        oldLine: 10,
+        text: "-- value",
+      }),
+      expect.objectContaining({
+        kind: "addition",
+        newLine: 20,
+        text: "++ value",
+      }),
+    ]);
+  });
+
+  it("unions exact group evidence with unlinked application file locations", () => {
+    expect(
+      mergeGroupEvidenceItems(
+        [{ id: "callback-line", path: "apps/web/src/auth/callback.tsx", line: 44 }],
+        [
+          "apps/web/src/auth/callback.tsx",
+          "apps/api/src/session/session.service.ts:96",
+          "apps/api/src/session/session.service.ts:96",
+        ],
+      ),
+    ).toEqual([
+      { id: "callback-line", path: "apps/web/src/auth/callback.tsx", line: 44 },
+      {
+        id: "apps/api/src/session/session.service.ts:96",
+        path: "apps/api/src/session/session.service.ts",
+        line: 96,
+      },
+    ]);
+  });
+
+  it("fits flow surfaces to a measured narrow canvas viewport", () => {
+    expect(calculateFitZoom(700, 360, 546, 360)).toBe(78);
+    const measuredBounds = { x: 0, y: 0, width: 546, height: 360 };
+    const label = routeGraphEdge(
+      { x: 456.8, y: 48, width: 132, height: 44 },
+      { x: 456.8, y: 268, width: 132, height: 44 },
+      2,
+      3,
+      [],
+      [],
+      measuredBounds,
+    ).label;
+    expect(label.x - 60).toBeGreaterThanOrEqual(measuredBounds.x);
+    expect(label.x + 60).toBeLessThanOrEqual(
+      measuredBounds.x + measuredBounds.width,
+    );
+  });
+
+  it("routes graph edges from node boundaries and offsets labels into a lane", () => {
+    const fromBox = positionedGraphNodeBox(
+      { x: 90, y: 70 },
+      { width: 132, height: 44 },
+      true,
+    );
+    const toBox = positionedGraphNodeBox(
+      { x: 280, y: 70 },
+      { width: 132, height: 44 },
+      true,
+    );
+    expect(fromBox).toMatchObject({ x: 76.8, y: 48, width: 132, height: 44 });
+    expect(
+      routeGraphEdge(
+        fromBox,
+        toBox,
+      ),
+    ).toMatchObject({ from: { x: 208.8, y: 70 }, to: { x: 266.8, y: 70 } });
+    expect(
+      routeGraphEdge(
+        { x: 20, y: 20, width: 120, height: 44 },
+        { x: 300, y: 160, width: 120, height: 44 },
+      ).label,
+    ).not.toEqual({ x: 240, y: 114 });
+    const graphBounds = { x: 0, y: 0, width: 700, height: 360 };
+    const self = routeGraphEdge(fromBox, fromBox, 0, 1, [], [], graphBounds);
+    expect(self.path).toMatch(/^M /);
+    expect(self.label.x).toBeGreaterThan(fromBox.x + fromBox.width);
+    expect(self.label.y).toBeGreaterThan(fromBox.y + fromBox.height);
+    expect(self.pathControl?.y).toBeGreaterThan(fromBox.y + fromBox.height);
+    expect(self.to.y).toBeGreaterThanOrEqual(fromBox.y + fromBox.height);
+    const selfBoundsRect = {
+      x: self.label.x - 60,
+      y: self.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    expect(selfBoundsRect.x).toBeGreaterThanOrEqual(graphBounds.x);
+    expect(selfBoundsRect.y).toBeGreaterThanOrEqual(graphBounds.y);
+    expect(selfBoundsRect.x + selfBoundsRect.width).toBeLessThanOrEqual(
+      graphBounds.x + graphBounds.width,
+    );
+    expect(selfBoundsRect.y + selfBoundsRect.height).toBeLessThanOrEqual(
+      graphBounds.y + graphBounds.height,
+    );
+    const selfAbove = routeGraphEdge(fromBox, fromBox, 0, 2);
+    const selfBelow = routeGraphEdge(fromBox, fromBox, 1, 2);
+    expect(selfAbove.path).not.toEqual(selfBelow.path);
+    expect(selfAbove.label.y).toBeLessThan(fromBox.y);
+    expect(selfBelow.label.y).toBeGreaterThan(fromBox.y + fromBox.height);
+    const selfObstacle = { x: 210, y: -40, width: 80, height: 44 };
+    const selfRouted = routeGraphEdge(fromBox, fromBox, 0, 1, [selfObstacle]);
+    const selfLabelRect = {
+      x: selfRouted.label.x - 60,
+      y: selfRouted.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    expect(
+      selfLabelRect.x < selfObstacle.x + selfObstacle.width &&
+        selfLabelRect.x + selfLabelRect.width > selfObstacle.x &&
+        selfLabelRect.y < selfObstacle.y + selfObstacle.height &&
+        selfLabelRect.y + selfLabelRect.height > selfObstacle.y,
+    ).toBe(false);
+    const firstDuplicate = routeGraphEdge(fromBox, toBox, 0, 2);
+    const secondDuplicate = routeGraphEdge(fromBox, toBox, 1, 2);
+    expect(firstDuplicate.path).not.toEqual(secondDuplicate.path);
+    expect(firstDuplicate.label).not.toEqual(secondDuplicate.label);
+    expect(
+      Math.hypot(
+        firstDuplicate.label.x - secondDuplicate.label.x,
+        firstDuplicate.label.y - secondDuplicate.label.y,
+      ),
+    ).toBeGreaterThanOrEqual(24);
+    for (const geometry of [firstDuplicate, secondDuplicate]) {
+      const labelRect = {
+        x: geometry.label.x - 60,
+        y: geometry.label.y - 12,
+        width: 120,
+        height: 24,
+      };
+      expect(
+        labelRect.x < fromBox.x + fromBox.width &&
+          labelRect.x + labelRect.width > fromBox.x &&
+          labelRect.y < fromBox.y + fromBox.height &&
+          labelRect.y + labelRect.height > fromBox.y,
+      ).toBe(false);
+      expect(
+        labelRect.x < toBox.x + toBox.width &&
+          labelRect.x + labelRect.width > toBox.x &&
+          labelRect.y < toBox.y + toBox.height &&
+          labelRect.y + labelRect.height > toBox.y,
+      ).toBe(false);
+      expect(
+        Math.hypot(
+          geometry.label.x - (geometry.pathControl?.x ?? 0),
+          geometry.label.y - (geometry.pathControl?.y ?? 0),
+        ),
+      ).toBeGreaterThanOrEqual(18);
+    }
+    const obstacle = { x: 220, y: 0, width: 40, height: 44 };
+    const obstacleRouted = routeGraphEdge(fromBox, toBox, 0, 2, [obstacle]);
+    const obstacleLabelRect = {
+      x: obstacleRouted.label.x - 60,
+      y: obstacleRouted.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    expect(
+      obstacleLabelRect.x < obstacle.x + obstacle.width &&
+        obstacleLabelRect.x + obstacleLabelRect.width > obstacle.x &&
+        obstacleLabelRect.y < obstacle.y + obstacle.height &&
+        obstacleLabelRect.y + obstacleLabelRect.height > obstacle.y,
+    ).toBe(false);
+    const nodeFour = positionedGraphNodeBox(
+      { x: 280, y: 180 },
+      { width: 132, height: 44 },
+      true,
+    );
+    const nodeThree = positionedGraphNodeBox(
+      { x: 90, y: 180 },
+      { width: 132, height: 44 },
+      true,
+    );
+    const nonEndpoint = routeGraphEdge(fromBox, nodeFour, 0, 1, [nodeThree]);
+    const nonEndpointLabel = {
+      x: nonEndpoint.label.x - 60,
+      y: nonEndpoint.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    expect(
+      nonEndpointLabel.x < nodeThree.x + nodeThree.width &&
+        nonEndpointLabel.x + nonEndpointLabel.width > nodeThree.x &&
+        nonEndpointLabel.y < nodeThree.y + nodeThree.height &&
+        nonEndpointLabel.y + nonEndpointLabel.height > nodeThree.y,
+    ).toBe(false);
+    const verticalFrom = { x: 266.8, y: 48, width: 132, height: 44 };
+    const verticalTo = { x: 266.8, y: 268, width: 132, height: 44 };
+    const verticalObstacles = [
+      { x: 266.8, y: 158, width: 132, height: 44 },
+      { x: 76.8, y: 158, width: 132, height: 44 },
+    ];
+    const vertical = routeGraphEdge(
+      verticalFrom,
+      verticalTo,
+      0,
+      1,
+      verticalObstacles,
+    );
+    const verticalLabelRect = {
+      x: vertical.label.x - 60,
+      y: vertical.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    for (const obstacle of verticalObstacles) {
+      expect(
+        verticalLabelRect.x < obstacle.x + obstacle.width &&
+          verticalLabelRect.x + verticalLabelRect.width > obstacle.x &&
+          verticalLabelRect.y < obstacle.y + obstacle.height &&
+        verticalLabelRect.y + verticalLabelRect.height > obstacle.y,
+      ).toBe(false);
+    }
+    const horizontalFrom = { x: 76.8, y: 48, width: 132, height: 44 };
+    const horizontalTo = { x: 456.8, y: 48, width: 132, height: 44 };
+    const crossingPath = routeGraphEdge(verticalFrom, verticalTo);
+    const crossing = routeGraphEdge(
+      horizontalFrom,
+      horizontalTo,
+      0,
+      1,
+      [horizontalFrom, horizontalTo],
+      [{ from: crossingPath.from, to: crossingPath.to }],
+    );
+    const crossingLabelRect = {
+      x: crossing.label.x - 60,
+      y: crossing.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    const crossingPathBounds = {
+      minX: Math.min(crossingPath.from.x, crossingPath.to.x) - 6,
+      maxX: Math.max(crossingPath.from.x, crossingPath.to.x) + 6,
+      minY: Math.min(crossingPath.from.y, crossingPath.to.y) - 6,
+      maxY: Math.max(crossingPath.from.y, crossingPath.to.y) + 6,
+    };
+    expect(
+      crossingLabelRect.x < crossingPathBounds.maxX &&
+        crossingLabelRect.x + crossingLabelRect.width > crossingPathBounds.minX &&
+        crossingLabelRect.y < crossingPathBounds.maxY &&
+        crossingLabelRect.y + crossingLabelRect.height > crossingPathBounds.minY,
+    ).toBe(false);
+    const parallelFrom = { x: 76.8, y: 48, width: 132, height: 44 };
+    const parallelTo = { x: 76.8, y: 268, width: 132, height: 44 };
+    const parallel = routeGraphEdge(
+      parallelFrom,
+      parallelTo,
+      2,
+      3,
+      [],
+      [],
+      graphBounds,
+    );
+    const parallelLabelRect = {
+      x: parallel.label.x - 60,
+      y: parallel.label.y - 12,
+      width: 120,
+      height: 24,
+    };
+    expect(parallelLabelRect.x).toBeGreaterThanOrEqual(graphBounds.x);
+    expect(parallelLabelRect.y).toBeGreaterThanOrEqual(graphBounds.y);
+    expect(parallelLabelRect.x + parallelLabelRect.width).toBeLessThanOrEqual(
+      graphBounds.x + graphBounds.width,
+    );
+    expect(parallelLabelRect.y + parallelLabelRect.height).toBeLessThanOrEqual(
+      graphBounds.y + graphBounds.height,
+    );
+  });
+
+  it("closes settings with an outside click and Escape while preserving inside interaction", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /open settings/i }));
+    expect(screen.getByText("Workspace settings")).toBeInTheDocument();
+    await user.click(screen.getByText("Theme"));
+    expect(screen.getByText("Workspace settings")).toBeInTheDocument();
+    await user.click(document.body);
+    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /open settings/i }));
+    await user.click(screen.getByLabelText(/active provider:/i));
+    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /open settings/i }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
   });
 
   it("defaults to the system theme and exposes accessible theme controls in settings", async () => {

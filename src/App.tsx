@@ -39,6 +39,7 @@ import {
   ChangeGroup,
   Evidence,
   Flow,
+  FlowEdge,
   FlowNode,
   PullRequest,
   PRStatus,
@@ -100,6 +101,360 @@ const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
 const LARGE_PR_FILE_THRESHOLD = 20;
 const LARGE_PR_CHANGE_THRESHOLD = 1_000;
+
+export type EvidenceCodeLineKind =
+  | "context"
+  | "addition"
+  | "deletion"
+  | "source";
+
+export type EvidenceCodeLine = {
+  kind: EvidenceCodeLineKind;
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+};
+
+const isDiffMetadataLine = (line: string): boolean => {
+  return [
+    "diff --",
+    "index ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "GIT binary patch",
+    "Binary files ",
+    "--- ",
+    "+++ ",
+    "\\ No newline at end of file",
+  ].some((prefix) => line.startsWith(prefix));
+};
+
+/** Convert bounded source/diff text into rows that can share a unified-diff renderer. */
+export function buildEvidenceCodeLines(
+  content: string,
+  source: "worktree" | "analysis-input",
+  hunkHeader?: string,
+): EvidenceCodeLine[] {
+  const rawLines = content.split(/\r?\n/);
+  const firstHunkIndex = rawLines.findIndex((line) => line.startsWith("@@"));
+  const lines = rawLines.filter((line, index) => {
+    if (source !== "analysis-input") return true;
+    if (line.startsWith("@@")) return false;
+    if (line.startsWith("\\ No newline at end of file")) return false;
+    const metadataBeforeHunk =
+      firstHunkIndex >= 0 ? index < firstHunkIndex : !hunkHeader;
+    return !metadataBeforeHunk || !isDiffMetadataLine(line);
+  });
+  const hunk = hunkHeader?.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+  let oldLine = hunk ? Number(hunk[1]) : null;
+  let newLine = hunk ? Number(hunk[2]) : null;
+  return lines
+    .filter((line, index) => line.length > 0 || index < lines.length - 1)
+    .map((line): EvidenceCodeLine => {
+      if (!hunkHeader) {
+        const numbered = line.match(/^\s*(\d+)\s+\|\s?(.*)$/);
+        if (numbered)
+          return {
+            kind: source === "worktree" ? "source" : "context",
+            oldLine: null,
+            newLine: Number(numbered[1]),
+            text: numbered[2],
+          };
+      }
+      if (hunkHeader && line.startsWith("+")) {
+        const row = {
+          kind: "addition" as const,
+          oldLine: null,
+          newLine,
+          text: line.slice(1),
+        };
+        if (newLine !== null) newLine += 1;
+        return row;
+      }
+      if (hunkHeader && line.startsWith("-")) {
+        const row = {
+          kind: "deletion" as const,
+          oldLine,
+          newLine: null,
+          text: line.slice(1),
+        };
+        if (oldLine !== null) oldLine += 1;
+        return row;
+      }
+      const text = hunkHeader && line.startsWith(" ") ? line.slice(1) : line;
+      const row = {
+        kind: "context" as const,
+        oldLine,
+        newLine,
+        text,
+      };
+      if (oldLine !== null) oldLine += 1;
+      if (newLine !== null) newLine += 1;
+      return row;
+    });
+}
+
+type GraphBox = { x: number; y: number; width: number; height: number };
+type GraphPoint = { x: number; y: number };
+type GraphEdgeObstacle = {
+  from: GraphPoint;
+  to: GraphPoint;
+  pathControl?: GraphPoint;
+};
+type GroupEvidenceItem = { id: string; path: string; line?: number };
+
+export function mergeGroupEvidenceItems(
+  linked: GroupEvidenceItem[],
+  files: string[],
+): GroupEvidenceItem[] {
+  const representedLegacy = new Set<string>();
+  const legacy = files.flatMap((file) => {
+    const parsed = file.match(/^(.*?):(\d+)$/);
+    return [
+      {
+        id: file,
+        path: parsed?.[1] ?? file,
+        line: parsed ? Number(parsed[2]) : undefined,
+      },
+    ];
+  }).filter((item) => {
+    const exactMatch = linked.some(
+      (candidate) =>
+        candidate.path === item.path && candidate.line === item.line,
+    );
+    const pathMatch =
+      item.line === undefined &&
+      linked.some((candidate) => candidate.path === item.path);
+    if (exactMatch || pathMatch) return false;
+    const key = `${item.path}:${item.line ?? ""}`;
+    if (representedLegacy.has(key)) return false;
+    representedLegacy.add(key);
+    return true;
+  });
+  return [...linked, ...legacy];
+}
+
+/** Convert an anchored graph node position into the box painted by `.flow-node`. */
+export function positionedGraphNodeBox(
+  position: GraphPoint,
+  dimensions: Pick<GraphBox, "width" | "height">,
+  translated = true,
+): GraphBox {
+  return {
+    x: position.x - (translated ? dimensions.width * 0.1 : 0),
+    y: position.y - (translated ? dimensions.height * 0.5 : 0),
+    width: dimensions.width,
+    height: dimensions.height,
+  };
+}
+
+/** Route an edge from rectangle boundaries and place its label in a clear perpendicular lane. */
+export function routeGraphEdge(
+  from: GraphBox,
+  to: GraphBox,
+  laneIndex = 0,
+  laneCount = 1,
+  obstacles: GraphBox[] = [],
+  edgeObstacles: GraphEdgeObstacle[] = [],
+  bounds?: GraphBox,
+): {
+  from: GraphPoint;
+  to: GraphPoint;
+  label: GraphPoint;
+  path?: string;
+  pathControl?: GraphPoint;
+} {
+  const fromCenter = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+  const toCenter = { x: to.x + to.width / 2, y: to.y + to.height / 2 };
+  const dx = toCenter.x - fromCenter.x;
+  const dy = toCenter.y - fromCenter.y;
+  const length = Math.hypot(dx, dy);
+  const laneDelta = laneIndex - (laneCount - 1) / 2;
+  const labelHalfWidth = 60;
+  const labelHalfHeight = 12;
+  const overlapsNode = (point: GraphPoint, box: GraphBox) =>
+    point.x - labelHalfWidth < box.x + box.width &&
+    point.x + labelHalfWidth > box.x &&
+    point.y - labelHalfHeight < box.y + box.height &&
+    point.y + labelHalfHeight > box.y;
+  const overlapsEdge = (point: GraphPoint, edge: GraphEdgeObstacle) => {
+    const points = [edge.from, edge.to, edge.pathControl].filter(
+      (candidate): candidate is GraphPoint => Boolean(candidate),
+    );
+    const minX = Math.min(...points.map((candidate) => candidate.x));
+    const maxX = Math.max(...points.map((candidate) => candidate.x));
+    const minY = Math.min(...points.map((candidate) => candidate.y));
+    const maxY = Math.max(...points.map((candidate) => candidate.y));
+    const gap = 6;
+    return (
+      point.x - labelHalfWidth < maxX + gap &&
+      point.x + labelHalfWidth > minX - gap &&
+      point.y - labelHalfHeight < maxY + gap &&
+      point.y + labelHalfHeight > minY - gap
+    );
+  };
+  const clearObstacles = (point: GraphPoint) =>
+    !overlapsNode(point, from) &&
+    !overlapsNode(point, to) &&
+    obstacles.every((obstacle) => !overlapsNode(point, obstacle)) &&
+    edgeObstacles.every((edge) => !overlapsEdge(point, edge));
+  const withinBounds = (point: GraphPoint) =>
+    !bounds ||
+    (point.x - labelHalfWidth >= bounds.x &&
+      point.x + labelHalfWidth <= bounds.x + bounds.width &&
+      point.y - labelHalfHeight >= bounds.y &&
+      point.y + labelHalfHeight <= bounds.y + bounds.height);
+  if (length < 0.001) {
+    const outward = 30 + Math.abs(laneDelta) * 16;
+    const start = { x: from.x + from.width, y: fromCenter.y };
+    const preferredDirection =
+      laneDelta < 0 || laneCount === 1 ? -1 : 1;
+    const controlX = from.x + from.width + outward;
+    const labelForDirection = (direction: number) => ({
+      x: controlX,
+      y: fromCenter.y + direction * (from.height / 2 + outward + 24),
+    });
+    const preferredLabel = labelForDirection(preferredDirection);
+    const alternateDirection = preferredDirection * -1;
+    const direction =
+      bounds && !withinBounds(preferredLabel) && withinBounds(labelForDirection(alternateDirection))
+        ? alternateDirection
+        : preferredDirection;
+    const end = {
+      x: from.x + from.width / 2,
+      y: fromCenter.y + direction * (from.height / 2),
+    };
+    const controlY =
+      fromCenter.y + direction * (from.height / 2 + outward);
+    const baseLabel = labelForDirection(direction);
+    let label = baseLabel;
+    const selfClear = (point: GraphPoint) =>
+      Math.hypot(point.x - controlX, point.y - controlY) >= 18 &&
+      withinBounds(point) &&
+      clearObstacles(point);
+    let found = selfClear(label);
+    for (let distance = 1; distance <= 24 && !found; distance += 1) {
+      const offsets = [
+        { x: 0, y: direction * distance * 20 },
+        { x: -distance * 20, y: 0 },
+        { x: distance * 20, y: 0 },
+        { x: 0, y: -direction * distance * 20 },
+      ];
+      for (const offset of offsets) {
+        const candidate = {
+          x: baseLabel.x + offset.x,
+          y: baseLabel.y + offset.y,
+        };
+        if (selfClear(candidate)) {
+          label = candidate;
+          found = true;
+          break;
+        }
+      }
+    }
+    return {
+      from: start,
+      to: end,
+      label,
+      path: `M ${start.x} ${start.y} C ${controlX} ${start.y}, ${controlX} ${controlY}, ${end.x} ${end.y}`,
+      pathControl: { x: controlX, y: controlY },
+    };
+  }
+  const fromScale =
+    1 / Math.max(Math.abs(dx) / (from.width / 2), Math.abs(dy) / (from.height / 2), 1e-6);
+  const toScale =
+    1 / Math.max(Math.abs(dx) / (to.width / 2), Math.abs(dy) / (to.height / 2), 1e-6);
+  const fromPoint = {
+    x: fromCenter.x + dx * fromScale,
+    y: fromCenter.y + dy * fromScale,
+  };
+  const toPoint = {
+    x: toCenter.x - dx * toScale,
+    y: toCenter.y - dy * toScale,
+  };
+  const normal = { x: -dy / length, y: dx / length };
+  const tangent = { x: dx / length, y: dy / length };
+  const midpoint = {
+    x: (fromPoint.x + toPoint.x) / 2,
+    y: (fromPoint.y + toPoint.y) / 2,
+  };
+  const pathOffset = laneCount > 1 ? laneDelta * 20 : 0;
+  const initialLabelOffset =
+    laneCount > 1
+      ? laneDelta * 96 + (Math.abs(laneDelta) < 0.001 ? 48 : 0)
+      : 48;
+  const labelDirection = initialLabelOffset < 0 ? -1 : 1;
+  const pathHalfExtent =
+    labelHalfWidth * Math.abs(normal.x) +
+    labelHalfHeight * Math.abs(normal.y);
+  const minimumPathClearance = pathHalfExtent + 6;
+  const startingMagnitude = Math.max(
+    Math.abs(initialLabelOffset),
+    Math.abs(pathOffset) + minimumPathClearance,
+  );
+  const tangentOffsets = [0];
+  for (let step = 1; step <= 24; step += 1) {
+    tangentOffsets.push(-step * 20, step * 20);
+  }
+  let label = {
+    x: midpoint.x + normal.x * labelDirection * startingMagnitude,
+    y: midpoint.y + normal.y * labelDirection * startingMagnitude,
+  };
+  let labelFound = false;
+  for (let step = 0; step <= 24 && !labelFound; step += 1) {
+    const magnitude = startingMagnitude + step * 20;
+    for (const direction of [labelDirection, -labelDirection]) {
+      const labelOffset = direction * magnitude;
+      if (Math.abs(labelOffset - pathOffset) < minimumPathClearance)
+        continue;
+      for (const tangentOffset of tangentOffsets) {
+        const candidate = {
+          x:
+            midpoint.x +
+            normal.x * labelOffset +
+            tangent.x * tangentOffset,
+          y:
+            midpoint.y +
+            normal.y * labelOffset +
+            tangent.y * tangentOffset,
+        };
+        if (
+          withinBounds(candidate) &&
+          !overlapsNode(candidate, from) &&
+          !overlapsNode(candidate, to) &&
+          clearObstacles(candidate)
+        ) {
+          label = candidate;
+          labelFound = true;
+          break;
+        }
+      }
+      if (labelFound) break;
+    }
+  }
+  return {
+    from: fromPoint,
+    to: toPoint,
+    label,
+    ...(laneCount > 1
+      ? {
+          path: `M ${fromPoint.x} ${fromPoint.y} Q ${midpoint.x + normal.x * pathOffset} ${midpoint.y + normal.y * pathOffset} ${toPoint.x} ${toPoint.y}`,
+          pathControl: {
+            x: midpoint.x + normal.x * pathOffset,
+            y: midpoint.y + normal.y * pathOffset,
+          },
+        }
+      : {}),
+  };
+}
 
 function analysisDurationNotice(
   pr: Pick<PullRequest, "files" | "additions" | "deletions">,
@@ -525,6 +880,12 @@ export function mapWalkthroughDocument(
         : safeString(item.status, "") === "partial"
           ? "partial"
           : "missing") as TestMapping["status"],
+      evidenceIds: safeArray(item.evidenceIds).filter(
+        (id): id is string => typeof id === "string",
+      ),
+      changeGroupIds: safeArray(item.changeGroupIds).filter(
+        (id): id is string => typeof id === "string",
+      ),
       evidence: evidenceLocation(
         safeArray(item.evidenceIds)[0],
         "No evidence linked",
@@ -705,6 +1066,8 @@ export function matchesRelationshipFilter(
 export function calculateFitZoom(
   surfaceWidth: number,
   surfaceHeight: number,
+  viewportWidth = 700,
+  viewportHeight = 360,
 ): number {
   return Math.max(
     MIN_GRAPH_ZOOM,
@@ -712,8 +1075,8 @@ export function calculateFitZoom(
       120,
       Math.floor(
         Math.min(
-          700 / Math.max(1, surfaceWidth),
-          360 / Math.max(1, surfaceHeight),
+          viewportWidth / Math.max(1, surfaceWidth),
+          viewportHeight / Math.max(1, surfaceHeight),
         ) * 100,
       ),
     ),
@@ -913,6 +1276,9 @@ function App() {
   const [evidenceDetail, setEvidenceDetail] = useState<EvidenceDetail | null>(
     null,
   );
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsPopoverRef = useRef<HTMLDivElement>(null);
+  const evidenceDrawerRef = useRef<HTMLElement>(null);
   const [analysisDiagnostics, setAnalysisDiagnostics] =
     useState<AnalysisDiagnostics | null>(null);
   const [diagnosticExportMessage, setDiagnosticExportMessage] = useState("");
@@ -964,6 +1330,38 @@ function App() {
       JSON.stringify(analysisConfig),
     );
   }, [analysisConfig]);
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        settingsOpen &&
+        settingsTriggerRef.current &&
+        !settingsTriggerRef.current.contains(target) &&
+        settingsPopoverRef.current &&
+        !settingsPopoverRef.current.contains(target)
+      )
+        setSettingsOpen(false);
+      if (
+        evidenceDetail &&
+        evidenceDrawerRef.current &&
+        !evidenceDrawerRef.current.contains(target)
+      )
+        setEvidenceDetail(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (confirmLiveAnalysis) setConfirmLiveAnalysis(false);
+      setEvidenceDetail(null);
+      setSettingsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [confirmLiveAnalysis, evidenceDetail, settingsOpen]);
   useEffect(() => {
     if (!api?.getRetentionSettings) return;
     void api
@@ -2060,6 +2458,7 @@ function App() {
             className="icon-button"
             aria-label="Open settings"
             title="Settings"
+            ref={settingsTriggerRef}
             onClick={() => setSettingsOpen((open) => !open)}
           >
             <Settings size={16} />
@@ -2073,7 +2472,10 @@ function App() {
           </div>
           <Avatar initials={account.initials} label={account.avatarLabel} />
           {settingsOpen && (
-            <div className="popover settings-popover">
+            <div
+              className="popover settings-popover"
+              ref={settingsPopoverRef}
+            >
               <div className="popover-title">Workspace settings</div>
               <fieldset className="theme-fieldset">
                 <legend>Theme</legend>
@@ -2340,7 +2742,12 @@ function App() {
       </header>
 
       {confirmLiveAnalysis && (
-        <div className="modal-backdrop">
+        <div
+          className="modal-backdrop"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setConfirmLiveAnalysis(false);
+          }}
+        >
           <section
             className="confirm-panel"
             role="dialog"
@@ -2858,6 +3265,7 @@ function App() {
               {evidenceDetail && (
                 <aside
                   className="evidence-drawer"
+                  ref={evidenceDrawerRef}
                   role="dialog"
                   aria-label="Evidence details"
                 >
@@ -2879,7 +3287,10 @@ function App() {
                   </h4>
                   {(() => {
                     const item = selectedPR.evidence.find(
-                      (candidate) => candidate.path === evidenceDetail.path,
+                      (candidate) =>
+                        candidate.path === evidenceDetail.path &&
+                        (evidenceDetail.line == null ||
+                          candidate.line === evidenceDetail.line),
                     );
                     const evidenceId = item?.id;
                     const groups = evidenceId
@@ -2928,13 +3339,7 @@ function App() {
                       </div>
                     );
                   })()}
-                  <pre>{evidenceDetail.content}</pre>
-                  {evidenceDetail.hunks.map((hunk, index) => (
-                    <details key={index}>
-                      <summary>{hunk.header}</summary>
-                      <pre>{hunk.content}</pre>
-                    </details>
-                  ))}
+                  <EvidenceCodeView detail={evidenceDetail} />
                   <button
                     className="secondary-button"
                     onClick={() => {
@@ -3164,6 +3569,7 @@ function ViewContent({
         reviewed={reviewed}
         progress={stepProgress}
         updateProgress={updateStepProgress}
+        openEvidence={openEvidence}
       />
     );
   if (view === "insights")
@@ -3214,13 +3620,13 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
   const summary = pr.walkthrough?.summary;
   const list = (items: unknown[] | undefined, fallback: string) =>
     items?.length ? (
-      <ul>
+      <ul className="overview-note-list">
         {items.map((item, index) => (
           <li key={index}>{safeString(item, fallback)}</li>
         ))}
       </ul>
     ) : (
-      <p>{fallback}</p>
+      <p className="overview-note-empty">{fallback}</p>
     );
   const activeThreads = pr.threads.filter(
     (thread) => thread.state === "active" || thread.state === "open",
@@ -3273,19 +3679,25 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
         />
       </div>
       <div className="overview-columns">
-        <section>
-          <SectionTitle label="Behavioral changes" />
-          {list(
-            summary?.behavioralChanges,
-            "No user-visible changes were specified.",
-          )}
-          <SectionTitle label="Architectural impact" />
-          {list(
-            summary?.architecturalImpact,
-            "No architectural impact was specified.",
-          )}
-          <SectionTitle label="Known limitations" />
-          {list(summary?.limitations, "No analysis limitations were recorded.")}
+        <section className="overview-notes" aria-label="Walkthrough summary">
+          <section className="overview-note-block">
+            <SectionTitle label="Behavioral changes" />
+            {list(
+              summary?.behavioralChanges,
+              "No user-visible changes were specified.",
+            )}
+          </section>
+          <section className="overview-note-block">
+            <SectionTitle label="Architectural impact" />
+            {list(
+              summary?.architecturalImpact,
+              "No architectural impact was specified.",
+            )}
+          </section>
+          <section className="overview-note-block">
+            <SectionTitle label="Known limitations" />
+            {list(summary?.limitations, "No analysis limitations were recorded.")}
+          </section>
         </section>
         <section>
           <SectionTitle label="Recommended review order" />
@@ -3832,6 +4244,7 @@ function GroupsRich({
   reviewed,
   progress,
   updateProgress,
+  openEvidence,
 }: {
   pr: PullRequest;
   markGroup: (group: ChangeGroup) => void;
@@ -3842,6 +4255,7 @@ function GroupsRich({
     status: ReviewProgressStatus,
     note: string,
   ) => void;
+  openEvidence: (path: string, line?: number) => void;
 }) {
   const runId = pr.walkthrough?.run.id ?? pr.id;
   const steps = safeArray(pr.walkthrough?.walkthrough).map(objectValue);
@@ -3867,6 +4281,15 @@ function GroupsRich({
       linked.forEach((step) => updateProgress(String(step.id), next, ""));
     else markGroup(group);
   };
+  const groupEvidenceItems = (group: ChangeGroup) => {
+    const linked = (group.evidenceIds ?? []).flatMap((id) => {
+      const item = pr.evidence.find((candidate) => candidate.id === id);
+      return item
+        ? [{ id: item.id, path: item.path, line: item.line ?? undefined }]
+        : [];
+    });
+    return mergeGroupEvidenceItems(linked, group.files);
+  };
   return (
     <div className="view-section">
       <SectionIntro
@@ -3887,12 +4310,20 @@ function GroupsRich({
               </div>
               <p>{group.description}</p>
               <div className="file-chips">
-                {group.files.map((file) => (
-                  <span key={file}>
-                    <FileCode2 size={12} />
-                    {file.split("/").pop()}
-                  </span>
-                ))}
+                {groupEvidenceItems(group).map(({ id, path, line }) => {
+                  return (
+                    <button
+                      type="button"
+                      className="file-chip"
+                      aria-label={`Open evidence ${path}${line ? `:${line}` : ""}`}
+                      key={id}
+                      onClick={() => openEvidence(path, line)}
+                    >
+                      <FileCode2 size={12} />
+                      {path.split("/").pop()}
+                    </button>
+                  );
+                })}
               </div>
             </div>
             <div
@@ -4010,6 +4441,8 @@ function FlowsView({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tourStep, setTourStep] = useState(0);
+  const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
+  const flowCanvasRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{
     x: number;
     y: number;
@@ -4072,6 +4505,23 @@ function FlowsView({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [flow?.guidedTours, setFlowType]);
+  useEffect(() => {
+    const canvas = flowCanvasRef.current;
+    if (!canvas) return;
+    const measure = () =>
+      setCanvasViewport({ width: canvas.clientWidth, height: canvas.clientHeight });
+    measure();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(measure);
+    observer?.observe(canvas);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
   if (!flow) return <EmptyAnalysis />;
   const filteredNodes = flow.nodes.filter((node) => {
     const matchesKind =
@@ -4105,8 +4555,23 @@ function FlowsView({
   const rows = Math.max(1, Math.ceil(flow.nodes.length / (overview ? 2 : 3)));
   const surfaceWidth = overview ? 620 : 700;
   const surfaceHeight = Math.max(360, 100 + rows * (overview ? 145 : 110));
+  const viewportWidth = canvasViewport.width || 700;
+  const viewportHeight = canvasViewport.height || 360;
+  const graphBounds = {
+    x: 0,
+    y: 0,
+    width: viewportWidth / (zoom / 100),
+    height: viewportHeight / (zoom / 100),
+  };
   const fitToView = () => {
-    setZoom(calculateFitZoom(surfaceWidth, surfaceHeight));
+    setZoom(
+      calculateFitZoom(
+        surfaceWidth,
+        surfaceHeight,
+        viewportWidth,
+        viewportHeight,
+      ),
+    );
     setPan({ x: 0, y: 0 });
   };
   const resetView = () => {
@@ -4123,6 +4588,72 @@ function FlowsView({
   });
   const graphGroups = groups.filter((group) =>
     flow.nodes.some((node) => node.changeGroupIds.includes(group.id)),
+  );
+  const visibleEdges = flow.edges.filter(
+    (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+  );
+  const visibleNodeBoxes = filteredNodes.map((node) =>
+    positionedGraphNodeBox(
+      nodePosition(flow.nodes.findIndex((candidate) => candidate.id === node.id)),
+      { width: nodeWidth, height: nodeHeight },
+      !overview,
+    ),
+  );
+  const edgeLaneCounts = new Map<string, number>();
+  visibleEdges.forEach((edge) => {
+    const key = `${edge.source}->${edge.target}`;
+    edgeLaneCounts.set(key, (edgeLaneCounts.get(key) ?? 0) + 1);
+  });
+  const routeVisibleEdge = (
+    edge: FlowEdge,
+    edgeObstacles: GraphEdgeObstacle[] = [],
+  ) => {
+    const from = nodePosition(
+      flow.nodes.findIndex((node) => node.id === edge.source),
+    );
+    const to = nodePosition(
+      flow.nodes.findIndex((node) => node.id === edge.target),
+    );
+    const laneKey = `${edge.source}->${edge.target}`;
+    const laneCount = edgeLaneCounts.get(laneKey) ?? 1;
+    const laneIndex = visibleEdges
+      .slice(0, visibleEdges.indexOf(edge))
+      .filter(
+        (candidate) =>
+          `${candidate.source}->${candidate.target}` === laneKey,
+      ).length;
+    return routeGraphEdge(
+      positionedGraphNodeBox(
+        from,
+        { width: nodeWidth, height: nodeHeight },
+        !overview,
+      ),
+      positionedGraphNodeBox(
+        to,
+        { width: nodeWidth, height: nodeHeight },
+        !overview,
+      ),
+      laneIndex,
+      laneCount,
+      visibleNodeBoxes,
+      edgeObstacles,
+      graphBounds,
+    );
+  };
+  const initialEdgeRoutes = visibleEdges.map((edge) => routeVisibleEdge(edge));
+  const edgeRoutes = initialEdgeRoutes.map((_, index) =>
+    routeVisibleEdge(
+      visibleEdges[index]!,
+      initialEdgeRoutes.flatMap((route, routeIndex) =>
+        routeIndex === index
+          ? []
+          : [{
+              from: route.from,
+              to: route.to,
+              pathControl: route.pathControl,
+            }],
+      ),
+    ),
   );
   return (
     <div className="view-section">
@@ -4229,6 +4760,7 @@ function FlowsView({
       <div className="flow-layout">
         <div
           className="flow-canvas"
+          ref={flowCanvasRef}
           role="region"
           aria-label={`${tabLabels[flow.type]} graph`}
           onPointerDown={(event) => {
@@ -4288,34 +4820,34 @@ function FlowsView({
                     <path d="M0,0 L0,6 L7,3 z" fill="#75a9a1" />
                   </marker>
                 </defs>
-                {flow.edges
-                  .filter(
-                    (edge) =>
-                      visibleIds.has(edge.source) &&
-                      visibleIds.has(edge.target),
-                  )
-                  .map((edge) => {
-                    const from = nodePosition(
-                      flow.nodes.findIndex((node) => node.id === edge.source),
-                    );
-                    const to = nodePosition(
-                      flow.nodes.findIndex((node) => node.id === edge.target),
-                    );
+                {visibleEdges.map((edge, edgeIndex) => {
+                    const geometry = edgeRoutes[edgeIndex]!;
                     return (
                       <g key={edge.id}>
-                        <line
-                          x1={from.x + nodeWidth / 2}
-                          y1={from.y + nodeHeight / 2}
-                          x2={to.x + nodeWidth / 2}
-                          y2={to.y + nodeHeight / 2}
-                          markerEnd="url(#flow-arrow)"
-                        />
-                        <text
-                          x={(from.x + to.x + nodeWidth) / 2}
-                          y={(from.y + to.y + nodeHeight) / 2 - 7}
+                        {geometry.path ? (
+                          <path
+                            d={geometry.path}
+                            markerEnd="url(#flow-arrow)"
+                          />
+                        ) : (
+                          <line
+                            x1={geometry.from.x}
+                            y1={geometry.from.y}
+                            x2={geometry.to.x}
+                            y2={geometry.to.y}
+                            markerEnd="url(#flow-arrow)"
+                          />
+                        )}
+                        <foreignObject
+                          className="flow-edge-label-wrap"
+                          x={geometry.label.x - 60}
+                          y={geometry.label.y - 12}
+                          width="120"
+                          height="24"
+                          aria-label={edge.label}
                         >
-                          {edge.label}
-                        </text>
+                          <div className="flow-edge-label">{edge.label}</div>
+                        </foreignObject>
                       </g>
                     );
                   })}
@@ -4871,6 +5403,84 @@ function EmptyAnalysis() {
     </div>
   );
 }
+
+function EvidenceCodeView({ detail }: { detail: EvidenceDetail }) {
+  const sections = detail.hunks.length
+    ? detail.hunks
+    : [{ header: "", content: detail.content }];
+  return (
+    <div
+      className="evidence-code"
+      role="table"
+      aria-label="Unified evidence diff"
+    >
+      {sections.map((section, sectionIndex) => (
+        <section
+          className="evidence-code-section"
+          role="rowgroup"
+          key={`${section.header}-${sectionIndex}`}
+        >
+          {section.header && (
+            <div className="evidence-hunk-header" role="heading" aria-level={5}>
+              {section.header}
+            </div>
+          )}
+          <div className="evidence-code-lines">
+            {buildEvidenceCodeLines(
+              section.content,
+              detail.source,
+              section.header || undefined,
+            ).map((line, lineIndex) => (
+              <div
+                className={`evidence-code-line evidence-line-${line.kind} ${line.kind === "source" ? "evidence-line-context" : ""}`}
+                data-line-kind={line.kind}
+                role="row"
+                aria-label={`${line.kind === "addition" ? "Added" : line.kind === "deletion" ? "Removed" : line.kind === "source" ? "Source" : "Context"} line ${line.newLine ?? line.oldLine ?? ""}: ${line.text}`}
+                key={`${sectionIndex}-${lineIndex}`}
+              >
+                <span
+                  className="evidence-line-gutter"
+                  role="cell"
+                  aria-hidden="true"
+                >
+                  {line.oldLine ?? ""}
+                </span>
+                <span
+                  className="evidence-line-gutter"
+                  role="cell"
+                  aria-hidden="true"
+                >
+                  {line.newLine ?? ""}
+                </span>
+                <span
+                  className="evidence-line-marker"
+                  role="cell"
+                  aria-hidden={line.kind === "context" || line.kind === "source"}
+                >
+                  {line.kind === "addition"
+                    ? "+"
+                    : line.kind === "deletion"
+                      ? "−"
+                      : " "}
+                </span>
+                {line.kind === "addition" && (
+                  <span className="sr-only">Added line</span>
+                )}
+                {line.kind === "deletion" && (
+                  <span className="sr-only">Removed line</span>
+                )}
+                <span role="cell">
+                  <code>{line.text || " "}</code>
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function Metric({
   icon: Icon,
   label,
