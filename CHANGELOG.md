@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/roeyazroel/pr-atlas/compare/v0.7.0...v0.8.0) (2026-08-06)
+
+
+### Features
+
+* add live pull request comments ([7fe5afe](https://github.com/roeyazroel/pr-atlas/commit/7fe5afeee628062aad43e5ae15372f670ec9fac4))
+
 ## [0.7.0](https://github.com/roeyazroel/pr-atlas/compare/v0.6.1...v0.7.0) (2026-08-06)
 
 
