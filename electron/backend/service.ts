@@ -38,6 +38,7 @@ import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
 import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
+import { buildBundledValidatorCommand, buildWindowsValidatorLauncher, validatorLauncherName } from "./validator-command.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -530,8 +531,10 @@ export class AnalysisService {
         await mkdir(scope, { recursive: true });
         await writeFile(resolve(scope, "files.json"), JSON.stringify(task.files), "utf8");
         await writeFile(resolve(scope, "diff.patch"), task.files.map((file) => file.diff).join("\n"), "utf8");
-        await writeFile(resolve(scope, "validate-map-output.mjs"), buildBatchMapValidatorScript(task), "utf8");
-        const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
+        const validatorFile = "validate-map-output.mjs"; const launcherFile = validatorLauncherName("map");
+        await writeFile(resolve(scope, validatorFile), buildBatchMapValidatorScript(task), "utf8");
+        if (process.platform === "win32") await writeFile(resolve(scope, launcherFile), buildWindowsValidatorLauncher(validatorFile), "utf8");
+        const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(validatorFile, process.platform, launcherFile), assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
         const validated = response.status === "ready" && response.mapOutput
           ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)
           : undefined;
@@ -556,11 +559,13 @@ export class AnalysisService {
     await mkdir(reduceScope, { recursive: true });
     await writeFile(resolve(reduceScope, "map-results.json"), JSON.stringify(ordered), "utf8");
     await writeFile(resolve(reduceScope, "plan.json"), JSON.stringify(planManifest), "utf8");
-    await writeFile(resolve(reduceScope, "validate-reduce-output.mjs"), buildBatchReducerValidatorScript(), "utf8");
+    const reduceValidatorFile = "validate-reduce-output.mjs"; const reduceLauncherFile = validatorLauncherName("reduce");
+    await writeFile(resolve(reduceScope, reduceValidatorFile), buildBatchReducerValidatorScript(), "utf8");
+    if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
     progress("validating", `Validating ${ordered.length}/${plan.chunks.length} map batches and generating the reducer.`);
-    const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length });
+    const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
     const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };
     return timedOut
       ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }

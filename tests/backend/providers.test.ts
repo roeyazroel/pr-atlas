@@ -15,6 +15,7 @@ import { CursorAdapter } from "../../electron/backend/cursor";
 import {
   buildAnalysisPrompt,
   discoverCodexModels,
+  parseClaudeModelHelp,
   parseProviderModels,
   parseProviderOutput,
   schemaForProvider,
@@ -270,12 +271,14 @@ describe("provider analysis prompt", () => {
     expect(prompt).toMatch(/never modify files/i);
     expect(prompt).toMatch(/do not (?:read|inspect|search) outside/i);
     if (kind === "map") {
-      expect(prompt).toContain("node validate-map-output.mjs");
+      expect(prompt).toContain("ELECTRON_RUN_AS_NODE=1");
+      expect(prompt).toContain("validate-map-output.mjs");
       expect(prompt).toMatch(/before returning.*JSON/i);
       expect(prompt).toMatch(/stdin/i);
     }
     if (kind === "reduce") {
-      expect(prompt).toContain("node validate-reduce-output.mjs");
+      expect(prompt).toContain("ELECTRON_RUN_AS_NODE=1");
+      expect(prompt).toContain("validate-reduce-output.mjs");
       expect(prompt).toMatch(/before returning.*JSON/i);
       expect(prompt).toMatch(/stdin/i);
     }
@@ -751,6 +754,30 @@ describe("provider-neutral agent adapters", () => {
     expect(runner.run).toHaveBeenCalledTimes(2);
   });
 
+  it("prefers documented Claude aliases over a duplicate full-name example", async () => {
+    const runner = { run: vi.fn(async (_file: string, args: string[]) => {
+      if (args[0] === "models") throw new Error("unsupported models command");
+      return { stdout: `Options:
+  --model <model>                       Model for the current session. Aliases:
+                                        \`fable\`, \`opus\`, and \`sonnet\`.
+                                        Full model name example: \`claude-fable-5\`.
+  --next-option                         Another option
+` };
+    }) };
+    await expect(new ClaudeAdapter(runner).listModels()).resolves.toEqual([
+      { id: "fable", label: "fable" },
+      { id: "opus", label: "opus" },
+      { id: "sonnet", label: "sonnet" },
+    ]);
+  });
+
+  it("keeps a future full-name-only Claude model from help", () => {
+    expect(parseClaudeModelHelp(`Options:
+  --model <model>                       Full model name example: \`claude-future-9\`.
+  --next-option                         Another option
+`)).toEqual([{ id: "claude-future-9", label: "claude-future-9" }]);
+  });
+
   it("cancels a Codex app-server fallback and terminates the child process", async () => {
     const child = new EventEmitter() as FakeChild;
     child.stdout = new EventEmitter();
@@ -878,11 +905,12 @@ describe("provider-neutral agent adapters", () => {
     expect(calls[0].args.join(" ")).not.toMatch(
       /(?:--dangerously|--force|--yolo|\bBash\b|\bEdit\b|\bWrite\b)/i,
     );
+    expect(calls[0].options.env?.PR_ATLAS_VALIDATOR_RUNTIME).toBeUndefined();
   });
 
   it.each([
-    ["map", { kind: "map" as const, id: "map-001", total: 1, assignedPaths: ["src/a.ts"] }, "Bash(node validate-map-output.mjs *)"],
-    ["reduce", { kind: "reduce" as const, id: "reduce", total: 1 }, "Bash(node validate-reduce-output.mjs *)"],
+    ["map", { kind: "map" as const, id: "map-001", total: 1, assignedPaths: ["src/a.ts"], validatorRuntime: "/Applications/Átlas Runtime", validatorCommand: "ELECTRON_RUN_AS_NODE=1 \"$PR_ATLAS_VALIDATOR_RUNTIME\" 'validate-map-output.mjs'" }, "Bash(ELECTRON_RUN_AS_NODE=1 \"$PR_ATLAS_VALIDATOR_RUNTIME\" 'validate-map-output.mjs' *)"],
+    ["reduce", { kind: "reduce" as const, id: "reduce", total: 1, validatorRuntime: "/Applications/Átlas Runtime", validatorCommand: "ELECTRON_RUN_AS_NODE=1 \"$PR_ATLAS_VALIDATOR_RUNTIME\" 'validate-reduce-output.mjs'" }, "Bash(ELECTRON_RUN_AS_NODE=1 \"$PR_ATLAS_VALIDATOR_RUNTIME\" 'validate-reduce-output.mjs' *)"],
   ])("allows Claude %s tasks to run only their stdin validator", async (_kind, task, validatorTool) => {
     const calls: SpawnCall[] = [];
     const adapter = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, fakeSpawn("{}", calls));
@@ -891,8 +919,16 @@ describe("provider-neutral agent adapters", () => {
     const addDirectoryIndex = calls[0].args.indexOf("--add-dir");
     const allowed = calls[0].args.slice(allowedIndex + 1, addDirectoryIndex);
     expect(allowed).toEqual(["Read", "Grep", "Glob", validatorTool]);
+    expect(calls[0].options.env?.PR_ATLAS_VALIDATOR_RUNTIME).toBe("/Applications/Átlas Runtime");
     expect(allowed).not.toContain("Bash");
     expect(allowed.join(" ")).not.toMatch(/\b(?:Edit|Write)\b/);
+  });
+
+  it("does not inherit a host validator runtime outside a trusted task", async () => {
+    const previous = process.env.PR_ATLAS_VALIDATOR_RUNTIME; process.env.PR_ATLAS_VALIDATOR_RUNTIME = "/host/untrusted-runtime";
+    const calls: SpawnCall[] = []; const adapter = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, fakeSpawn("{}", calls));
+    try { await adapter.analyze(requestFor("claude"), "/worktree", "/input", undefined, progress); expect(calls[0].options.env?.PR_ATLAS_VALIDATOR_RUNTIME).toBeUndefined(); }
+    finally { if (previous === undefined) delete process.env.PR_ATLAS_VALIDATOR_RUNTIME; else process.env.PR_ATLAS_VALIDATOR_RUNTIME = previous; }
   });
 
   it.each([

@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage, ProviderAnalysisTask } from '../../shared/contracts.js';
 import { detectProvider, buildAnalysisPrompt, discoverClaudeModels, parseProviderOutput, runProviderProcess, schemaForProvider, READ_ONLY_CAPABILITIES, SKILL_CONTRACT_VERSION, SKILL_REFERENCE_URL, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
+import { buildBundledValidatorCommand, validatorLauncherName } from './validator-command.js';
 
 export { SKILL_CONTRACT_VERSION, SKILL_REFERENCE_URL } from './agent.js';
 export type ClaudeSpawn = ProviderSpawn;
@@ -25,9 +26,9 @@ export class ClaudeAdapter implements AgentAdapter {
     const selectedModel = model?.trim() || request.model?.trim();
     if (selectedModel) args.push('--model', selectedModel);
     const validatorTool = task?.kind === 'map'
-      ? 'Bash(node validate-map-output.mjs *)'
+      ? `Bash(${task.validatorCommand ?? buildBundledValidatorCommand('validate-map-output.mjs', process.platform, validatorLauncherName('map'))} *)`
       : task?.kind === 'reduce'
-        ? 'Bash(node validate-reduce-output.mjs *)'
+        ? `Bash(${task.validatorCommand ?? buildBundledValidatorCommand('validate-reduce-output.mjs', process.platform, validatorLauncherName('reduce'))} *)`
         : undefined;
     args.push(
       '--safe-mode',

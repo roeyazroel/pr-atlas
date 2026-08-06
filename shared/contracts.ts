@@ -158,6 +158,10 @@ export interface ProviderAnalysisTask {
   kind: "map" | "reduce";
   id: string;
   total: number;
+  /** Trusted, platform-specific command for the bundled Electron Node runtime. */
+  validatorCommand?: string;
+  /** Trusted bundled Electron executable injected only into the provider child environment. */
+  validatorRuntime?: string;
   assignedPaths?: string[];
   assignedUnits?: Array<{ path: string; segment: number }>;
 }

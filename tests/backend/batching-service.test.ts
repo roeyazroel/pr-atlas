@@ -97,6 +97,12 @@ describe("batched service orchestration", () => {
     finally { await rm(env.root, { recursive: true, force: true }); }
   });
 
+  it("passes a trusted bundled-runtime validator command to every map and reducer task", async () => {
+    const commands: Array<{ kind: string; command?: string; runtime?: string }> = []; const env = await setup(20, 50_000, async (_r, _w, _input, _s, _p, _m, task) => { commands.push({ kind: task?.kind ?? "single", command: task?.validatorCommand, runtime: task?.validatorRuntime }); return task?.kind === "map" ? { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) } : { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
+    try { await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true }); await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n"); expect((await env.service.startAnalysis(request)).status).toBe("ready"); const mapCommands = commands.filter(({ kind }) => kind === "map"); expect(mapCommands.length).toBeGreaterThan(0); expect(mapCommands.every(({ command, runtime }) => command?.includes("ELECTRON_RUN_AS_NODE=1") && command.includes("validate-map-output.mjs") && runtime === process.execPath)).toBe(true); const reducer = commands.find(({ kind }) => kind === "reduce"); expect(reducer?.command).toMatch(/ELECTRON_RUN_AS_NODE=1.*validate-reduce-output\.mjs/); expect(reducer?.runtime).toBe(process.execPath); }
+    finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
   it("installs a standalone reducer validator that catches semantic and relational failures", async () => {
     let reduceScope = ""; const env = await setup(20, 50_000, async (_r, _w, input, _s, _p, _m, task) => { if (task?.kind === "map") return { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) }; reduceScope = input; return { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
     try {
