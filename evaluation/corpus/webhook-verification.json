@@ -1,0 +1,48 @@
+{
+  "id": "webhook-verification",
+  "title": "Webhook verification error contract",
+  "threshold": 0.9,
+  "corpusThreshold": 0.9,
+  "expected": {
+    "intentKeywords": ["webhook", "signature", "error"],
+    "changeGroups": [
+      { "id": "verification-boundary", "titleKeywords": ["verification", "boundary"], "contentKeywords": ["raw", "body"] },
+      { "id": "error-contract", "titleKeywords": ["error", "contract"], "contentKeywords": ["actionable", "status"] },
+      { "id": "regression-tests", "titleKeywords": ["regression", "tests"], "contentKeywords": ["invalid", "timestamp"] }
+    ],
+    "reviewOrder": ["verification-boundary", "error-contract", "regression-tests"],
+    "evidencePaths": ["api/webhooks/verify.ts", "api/webhooks/errors.ts", "api/webhooks/verify.test.ts"],
+    "limitationKeywords": ["provider", "samples"],
+    "flowEdges": [{ "graph": "user-action", "source": "request", "target": "verifier", "labelKeywords": ["raw", "body"] }],
+    "tests": [{ "id": "test-expiry", "changeGroupId": "regression-tests", "status": "covered", "behaviorKeywords": ["expired", "timestamp"] }],
+    "reviewClusters": [{ "threadIds": ["thread-status", "thread-message"], "status": "disputed" }],
+    "threadStates": { "thread-status": "active", "thread-message": "disputed" }
+  },
+  "actual": {
+    "summary": {
+      "intent": "Preserve actionable webhook signature errors at the verification boundary.",
+      "behavioralChanges": ["Invalid signatures retain a stable status and reason."],
+      "architecturalImpact": ["Verification owns raw request body parsing."],
+      "limitations": ["Provider-specific samples cover documented payloads only."]
+    },
+    "changeGroups": [
+      { "id": "verification-boundary", "title": "Verification boundary", "summary": "Verifies the signature against the raw request body.", "evidenceIds": ["ev-verify"] },
+      { "id": "error-contract", "title": "Error contract", "summary": "Returns an actionable error status instead of a generic failure.", "evidenceIds": ["ev-errors"] },
+      { "id": "regression-tests", "title": "Regression tests", "summary": "Covers invalid signatures and expired timestamps.", "evidenceIds": ["ev-tests"] }
+    ],
+    "walkthrough": [
+      { "id": "step-1", "changeGroupId": "verification-boundary", "evidenceIds": ["ev-verify"] },
+      { "id": "step-2", "changeGroupId": "error-contract", "evidenceIds": ["ev-errors"] },
+      { "id": "step-3", "changeGroupId": "regression-tests", "evidenceIds": ["ev-tests"] }
+    ],
+    "graphs": { "userAction": { "id": "user-action", "edges": [{ "source": "request", "target": "verifier", "label": "passes raw body" }] } },
+    "tests": [{ "id": "test-expiry", "title": "Expired timestamp", "behavior": "Rejects an expired webhook timestamp.", "status": "covered", "changeGroupIds": ["regression-tests"], "evidenceIds": ["ev-tests"] }],
+    "reviewThreads": [{ "id": "thread-status", "status": "active", "evidenceIds": ["ev-errors"] }, { "id": "thread-message", "status": "disputed", "evidenceIds": ["ev-errors"] }],
+    "reviewInsights": [{ "id": "insight-errors", "status": "disputed", "reviewThreadIds": ["thread-status", "thread-message"], "evidenceIds": ["ev-errors"] }],
+    "evidence": [
+      { "id": "ev-verify", "path": "api/webhooks/verify.ts" },
+      { "id": "ev-errors", "path": "api/webhooks/errors.ts" },
+      { "id": "ev-tests", "path": "api/webhooks/verify.test.ts" }
+    ]
+  }
+}

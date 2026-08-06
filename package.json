@@ -18,6 +18,7 @@
     "package:linux": "npm run build && electron-builder --linux --publish never",
     "test": "vitest --config vitest.config.ts run",
     "test:watch": "vitest --config vitest.config.ts",
+    "evaluate": "node scripts/evaluate-walkthrough.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit"
   },

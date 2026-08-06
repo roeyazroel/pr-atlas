@@ -1,0 +1,48 @@
+{
+  "id": "session-ownership",
+  "title": "Cross-layer session ownership migration",
+  "threshold": 0.9,
+  "corpusThreshold": 0.9,
+  "expected": {
+    "intentKeywords": ["session", "ownership", "service"],
+    "changeGroups": [
+      { "id": "session-boundary", "titleKeywords": ["session", "boundary"], "contentKeywords": ["rotation", "server"] },
+      { "id": "storage-migration", "titleKeywords": ["storage", "migration"], "contentKeywords": ["hash", "expiry"] },
+      { "id": "callback-handoff", "titleKeywords": ["callback", "handoff"], "contentKeywords": ["redirect", "race"] }
+    ],
+    "reviewOrder": ["storage-migration", "session-boundary", "callback-handoff"],
+    "evidencePaths": ["db/migrations/session.sql", "api/session/service.ts", "web/auth/callback.tsx"],
+    "limitationKeywords": ["runtime", "concurrency"],
+    "flowEdges": [{ "graph": "data-flow", "source": "callback", "target": "session-service", "labelKeywords": ["creates"] }],
+    "tests": [{ "id": "test-race", "changeGroupId": "session-boundary", "status": "partial", "behaviorKeywords": ["concurrent", "refresh"] }],
+    "reviewClusters": [{ "threadIds": ["thread-race", "thread-retry"], "status": "disputed" }],
+    "threadStates": { "thread-race": "active", "thread-retry": "outdated" }
+  },
+  "actual": {
+    "summary": {
+      "intent": "Move session ownership into the server-side session service.",
+      "behavioralChanges": ["The service rotates refresh credentials before returning a session."],
+      "architecturalImpact": ["Session state moves from the browser to the API boundary."],
+      "limitations": ["Runtime concurrency behavior was inferred and not executed."]
+    },
+    "changeGroups": [
+      { "id": "storage-migration", "title": "Storage migration", "summary": "Stores a hash with an expiry index.", "evidenceIds": ["ev-migration"] },
+      { "id": "session-boundary", "title": "Session boundary", "summary": "Moves rotation into the server service.", "evidenceIds": ["ev-service"] },
+      { "id": "callback-handoff", "title": "Callback handoff", "summary": "Orders durable state before redirect to avoid a race.", "evidenceIds": ["ev-callback"] }
+    ],
+    "walkthrough": [
+      { "id": "step-1", "changeGroupId": "storage-migration", "evidenceIds": ["ev-migration"] },
+      { "id": "step-2", "changeGroupId": "session-boundary", "evidenceIds": ["ev-service"] },
+      { "id": "step-3", "changeGroupId": "callback-handoff", "evidenceIds": ["ev-callback"] }
+    ],
+    "graphs": { "dataFlow": { "id": "data-flow", "edges": [{ "source": "callback", "target": "session-service", "label": "creates session" }] } },
+    "tests": [{ "id": "test-race", "title": "Concurrent refresh", "behavior": "Concurrent refresh calls converge safely.", "status": "partial", "changeGroupIds": ["session-boundary"], "evidenceIds": ["ev-service"] }],
+    "reviewThreads": [{ "id": "thread-race", "status": "active", "evidenceIds": ["ev-service"] }, { "id": "thread-retry", "status": "outdated", "evidenceIds": ["ev-service"] }],
+    "reviewInsights": [{ "id": "insight-race", "status": "disputed", "reviewThreadIds": ["thread-race", "thread-retry"], "evidenceIds": ["ev-service"] }],
+    "evidence": [
+      { "id": "ev-migration", "path": "db/migrations/session.sql" },
+      { "id": "ev-service", "path": "api/session/service.ts" },
+      { "id": "ev-callback", "path": "web/auth/callback.tsx" }
+    ]
+  }
+}

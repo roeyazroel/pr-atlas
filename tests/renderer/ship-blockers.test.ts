@@ -24,12 +24,12 @@ const graph = (id: 'system-overview' | 'data-flow' | 'code-dependency' | 'user-a
 })
 
 const document: WalkthroughDocument = {
-  schemaVersion: '1.0.0',
+  schemaVersion: '1.1.0',
   run: { id: 'run-1', createdAt: '2026-08-05T00:00:00Z', provider: 'codex', model: 'codex', skillVersion: '1' },
   pullRequest: { host: 'github.com', repository: 'acme/repo', number: 1, baseSha: 'base', headSha: 'head' },
   summary: { intent: 'Trace exact evidence', behavioralChanges: [], architecturalImpact: [], limitations: [] },
   changeGroups: [{ id: 'group-1', title: 'Evidence', summary: 'Summary', motivation: 'Why', previousBehavior: 'Before', newBehavior: 'After', attention: 'high', evidenceIds: ['ev-1'] }],
-  walkthrough: [{ id: 'step-1', title: 'Read evidence', changeGroupId: 'group-1', evidenceIds: ['ev-1'] }],
+  walkthrough: [{ id: 'step-1', title: 'Read evidence', reason: 'The evidence anchors the review.', summary: 'Inspect the linked source evidence.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-1', flowNodeIds: ['data-flow-node'], evidenceIds: ['ev-1'], testIds: ['test-1'], reviewInsightIds: [] }],
   graphs: { systemOverview: graph('system-overview'), dataFlow: graph('data-flow'), codeDependency: graph('code-dependency'), userAction: graph('user-action') },
   tests: [{ id: 'test-1', title: 'evidence test', behavior: 'opens evidence', status: 'covered', evidenceIds: ['ev-1'], changeGroupIds: ['group-1'] }],
   reviewThreads: [],

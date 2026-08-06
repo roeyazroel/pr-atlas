@@ -122,7 +122,14 @@ export function normalizeDesktopPath(currentPath: string | undefined, platform: 
     return true
   })
   const homePaths = options.homePath ? [join(options.homePath, '.local', 'bin')] : []
-  const additions = [...MACOS_CLI_PATHS, ...homePaths, ...resolvedNvmPaths(options)]
-  const missing = additions.filter((entry, index) => !existing.has(entry) && additions.indexOf(entry) === index)
-  return [...missing, ...preserved].join(':')
+  const primaryAdditions = [...MACOS_CLI_PATHS, ...homePaths]
+  const nvmFallbacks = resolvedNvmPaths(options)
+  const missing = (additions: readonly string[]) => additions.filter(
+    (entry, index) => !existing.has(entry) && additions.indexOf(entry) === index,
+  )
+  const missingPrimary = missing(primaryAdditions)
+  const missingNvmFallbacks = missing(nvmFallbacks)
+  return entries.length
+    ? [...missingPrimary, ...preserved, ...missingNvmFallbacks].join(':')
+    : [...missingPrimary, ...missingNvmFallbacks].join(':')
 }

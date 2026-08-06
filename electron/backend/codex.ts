@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage } from '../../shared/contracts.js';
-import { buildAnalysisPrompt, detectProvider, discoverCodexModels, discoverProviderModels, runProviderProcess, withTemporarySchema, READ_ONLY_CAPABILITIES, type ProviderSpawn } from './agent.js';
+import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage, ProviderAnalysisTask } from '../../shared/contracts.js';
+import { buildAnalysisPrompt, detectProvider, discoverCodexModels, discoverProviderModels, runProviderProcess, schemaForProvider, withTemporarySchema, READ_ONLY_CAPABILITIES, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
 export type CodexSpawn = ProviderSpawn;
@@ -22,7 +22,7 @@ export class CodexAdapter implements AgentAdapter {
   getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
   discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
-  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string): Promise<CodexResponse> {
+  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CodexResponse> {
     return withTemporarySchema(async (schemaPath) => {
       const selectedModel = model?.trim() || request.model?.trim();
       const args = [
@@ -33,10 +33,11 @@ export class CodexAdapter implements AgentAdapter {
         '--ephemeral',
         '--ignore-user-config',
         '--ignore-rules',
+        ...(task ? ['--skip-git-repo-check'] : []),
         '--output-schema', schemaPath,
-        buildAnalysisPrompt(request, inputDirectory),
+        buildAnalysisPrompt(request, inputDirectory, task),
       ];
-      return runProviderProcess(this, this.runner, this.spawn, 'codex', args, request, worktree, signal, progress);
-    });
+      return runProviderProcess(this, this.runner, this.spawn, 'codex', args, request, worktree, signal, progress, task);
+    }, schemaForProvider(task));
   }
 }

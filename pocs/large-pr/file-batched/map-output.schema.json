@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["taskId", "changeGroups", "evidence", "tests", "flows", "limitations"],
+  "properties": {
+    "taskId": { "type": "string" },
+    "changeGroups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "summary", "previousBehavior", "newBehavior", "paths"],
+        "properties": {
+          "title": { "type": "string" },
+          "summary": { "type": "string" },
+          "previousBehavior": { "type": "string" },
+          "newBehavior": { "type": "string" },
+          "paths": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "claim"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "claim": { "type": "string" }
+        }
+      }
+    },
+    "tests": { "type": "array", "items": { "type": "string" } },
+    "flows": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -178,6 +178,7 @@ analysis. The browser-only renderer fixture can also be run with
 | `npm run dev:desktop` | Wait for Vite, build Electron bundles, launch Electron |
 | `npm test -- --run` | Run the Vitest suite once |
 | `npm run test:watch` | Run Vitest in watch mode |
+| `npm run evaluate` | Score the checked-in semantic walkthrough corpus |
 | `npm run typecheck` | Typecheck the renderer/shared TypeScript |
 | `npm run typecheck:electron` | Typecheck Electron/main-process TypeScript |
 | `npm run build` | Electron bundles, both typechecks, and Vite production build |
@@ -220,12 +221,26 @@ storage, release automation, update verification, and branded empty states.
 | Validation slice | Command | What it protects |
 | --- | --- | --- |
 | Full unit/component suite | `npm test -- --run` | Backend, renderer, schema, storage, release workflow, and branded empty-state behavior |
+| Semantic quality corpus | `npm run evaluate` | Intent, change-group coherence, review order, flows, tests, review clustering, thread state, evidence traceability, limitations, and hallucination control |
 | Focused provider/security | `npm test -- --run tests/backend/providers.test.ts tests/backend/agent-security.test.ts` | Adapter boundaries, model discovery, environment and output redaction |
 | Focused update/release | `npm test -- --run tests/backend/update.test.ts tests/release-workflow.test.ts` | URL/asset selection, digest checks, collision-safe downloads, packaging runner |
 | Renderer behavior | `npm test -- --run tests/app.behavior.test.tsx tests/renderer` | Theme controls, live discovery, update UX, graphs, evidence, and empty states |
 | Renderer typecheck | `npm run typecheck` | React/shared TypeScript contracts |
 | Electron typecheck | `npm run typecheck:electron` | Main process, adapters, IPC, storage, and update code |
 | Production build | `npm run build` | Electron bundles, typechecks, and Vite output |
+
+### Semantic quality evaluation
+
+`evaluation/corpus/` contains deterministic, reviewable walkthrough cases rather
+than live provider calls. Each case declares the concepts, ordering, evidence,
+flows, tests, and review states a useful walkthrough must preserve. The evaluator
+prints per-dimension scores and exits nonzero when any case or the aggregate
+corpus falls below its quality gate. Pull requests run this gate alongside tests,
+typechecks, and the production build.
+
+When the walkthrough contract or analysis prompt changes, update or add corpus
+cases deliberately. Do not relax expected concepts merely to make a provider
+output pass; a changed expectation should represent an accepted product decision.
 
 ## Packaging and release assets
 

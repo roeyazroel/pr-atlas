@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "changeGroups", "walkthrough", "evidence", "tests", "flows", "limitations"],
+  "properties": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "behavioralChanges", "architecturalImpact"],
+      "properties": {
+        "intent": { "type": "string" },
+        "behavioralChanges": { "type": "array", "items": { "type": "string" } },
+        "architecturalImpact": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "changeGroups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "summary", "previousBehavior", "newBehavior", "paths"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "summary": { "type": "string" },
+          "previousBehavior": { "type": "string" },
+          "newBehavior": { "type": "string" },
+          "paths": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "walkthrough": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "changeGroupId", "title", "reason", "dependsOn", "evidencePaths", "tests", "flows", "limitations"],
+        "properties": {
+          "id": { "type": "string" },
+          "changeGroupId": { "type": "string" },
+          "title": { "type": "string" },
+          "reason": { "type": "string" },
+          "dependsOn": { "type": "array", "items": { "type": "string" } },
+          "evidencePaths": { "type": "array", "items": { "type": "string" } },
+          "tests": { "type": "array", "items": { "type": "string" } },
+          "flows": { "type": "array", "items": { "type": "string" } },
+          "limitations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "claim", "taskIds"],
+        "properties": {
+          "path": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "claim": { "type": "string" },
+          "taskIds": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "tests": { "type": "array", "items": { "type": "string" } },
+    "flows": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  }
+}

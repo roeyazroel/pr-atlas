@@ -7,18 +7,96 @@ import { SKILL_CONTRACT_VERSION } from '../../electron/backend/agent'
 const capabilities = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: true, authenticationState: false }
 
 function providerDocument() {
+  const graph = (id: string) => ({
+    id,
+    description: `Review ${id}.`,
+    nodes: [{
+      id: `${id}-node`,
+      label: 'Relevant node',
+      explanation: 'A relevant node.',
+      changed: id !== 'system-overview',
+      changeGroupIds: id === 'system-overview' ? [] : ['group-1'],
+      testIds: [],
+      reviewThreadIds: [],
+      reviewInsightIds: [],
+      evidenceIds: id === 'system-overview' ? [] : ['evidence-1'],
+    }],
+    edges: id === 'system-overview' ? [] : [{
+      id: `${id}-edge`,
+      source: `${id}-node`,
+      target: `${id}-node`,
+      label: 'continues',
+      evidenceIds: ['evidence-1'],
+      changeGroupIds: ['group-1'],
+      reviewThreadIds: [],
+    }],
+    guidedTours: [{
+      id: `${id}-tour`,
+      title: 'Review this graph',
+      steps: [{
+        nodeId: `${id}-node`,
+        title: 'Inspect node',
+        explanation: 'Verify exact evidence.',
+      }],
+    }],
+  })
   return {
-    schemaVersion: '1.0.0',
+    schemaVersion: '1.1.0',
     run: { id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented', model: 'provider-document-model', skillVersion: 'provider-skill-version' },
     pullRequest: { host: 'github.com', repository: 'example/backend', number: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40) },
     summary: { intent: 'intent', behavioralChanges: [], architecturalImpact: [], limitations: [] },
-    changeGroups: [], walkthrough: [],
-    graphs: { systemOverview: {}, dataFlow: {}, codeDependency: {}, userAction: {} },
-    tests: [], reviewThreads: [], reviewInsights: [], evidence: [],
+    changeGroups: [{ id: 'group-1', title: 'Trace evidence', summary: 'Connects behavior to code.', motivation: 'Reviewers need exact evidence.', previousBehavior: 'Evidence was implicit.', newBehavior: 'Evidence is linked.', attention: 'medium', evidenceIds: ['evidence-1'] }],
+    walkthrough: [{ id: 'step-1', title: 'Inspect evidence', reason: 'It anchors the review in source evidence.', summary: 'Inspect the changed input.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-1', flowNodeIds: ['data-flow-node'], evidenceIds: ['evidence-1'], testIds: [], reviewInsightIds: [] }],
+    graphs: { systemOverview: graph('system-overview'), dataFlow: graph('data-flow'), codeDependency: graph('code-dependency'), userAction: graph('user-action') },
+    tests: [], reviewThreads: [], reviewInsights: [], evidence: [{ id: 'evidence-1', kind: 'file', title: 'Input diff', path: 'diff.patch', line: null, url: null }],
   }
 }
 
+function legacyProviderDocument() {
+  const document = providerDocument() as Record<string, unknown>
+  document.schemaVersion = '1.0.0'
+  for (const step of document.walkthrough as Array<Record<string, unknown>>) {
+    delete step.reason
+    delete step.summary
+    delete step.limitations
+    delete step.dependsOnStepIds
+    delete step.flowNodeIds
+    delete step.testIds
+    delete step.reviewInsightIds
+  }
+  return document
+}
+
 describe('analysis service reproducibility metadata', () => {
+  it('rejects a provider-returned 1.0 walkthrough for a fresh run', async () => {
+    const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-schema-version-`)
+    try {
+      const legacy = legacyProviderDocument()
+      const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
+      const run = vi.fn(async (file: string, args: string[]) => {
+        if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
+        if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
+        return { stdout: '', stderr: '' }
+      })
+      const adapter = {
+        id: 'claude' as const,
+        displayName: 'Test provider',
+        detect: async () => ({ provider: 'claude' as const, displayName: 'Test provider', executable: 'test', installed: true, capabilities }),
+        getCapabilities: () => capabilities,
+        analyze: async () => ({ status: 'ready' as const, rawOutput: '', logs: [], document: legacy as never }),
+      }
+      const service = new AnalysisService(root, { run }, undefined, undefined, [adapter])
+
+      const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude' })
+
+      expect(result).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+      expect(result.document).toBeUndefined()
+      expect(JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('redacts provider-controlled validation errors before returning or persisting them', async () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-errors-`)
     const originalApiKey = process.env.OPENAI_API_KEY

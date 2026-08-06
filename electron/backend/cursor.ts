@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
-import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage } from '../../shared/contracts.js';
+import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage, ProviderAnalysisTask } from '../../shared/contracts.js';
 import { buildAnalysisPrompt, detectProvider, discoverProviderModels, runProviderProcess, READ_ONLY_CAPABILITIES, schemaForProvider, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
@@ -19,8 +19,8 @@ export class CursorAdapter implements AgentAdapter {
   getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
   discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
-  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string): Promise<CursorResponse> {
-    const prompt = `${buildAnalysisPrompt(request)}\n\nThe exact JSON Schema follows:\n${JSON.stringify(schemaForProvider())}`;
+  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CursorResponse> {
+    const prompt = `${buildAnalysisPrompt(request, inputDirectory, task)}\n\nThe exact JSON Schema follows:\n${JSON.stringify(schemaForProvider(task))}`;
     const selectedModel = model?.trim() || request.model?.trim();
     const args = [
       '-p', prompt,
@@ -32,6 +32,6 @@ export class CursorAdapter implements AgentAdapter {
       '--trust',
       '--add-dir', inputDirectory,
     ];
-    return runProviderProcess(this, this.runner, this.spawn, 'cursor-agent', args, request, worktree, signal, progress);
+    return runProviderProcess(this, this.runner, this.spawn, 'cursor-agent', args, request, worktree, signal, progress, task);
   }
 }

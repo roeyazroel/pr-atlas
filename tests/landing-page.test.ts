@@ -214,7 +214,9 @@ describe('GitHub Pages workflow', () => {
       expect(workflow).toContain(action)
     }
 
-    expect(workflow).toMatch(/permissions:\s*\n(?:\s+[^\n]+\n)*\s+contents:\s*read\b/)
+    expect(workflow).toMatch(
+      /^permissions:[ \t]*\n(?:[ \t]+[^\n]*\n)*[ \t]+contents:[ \t]*read\b/m,
+    )
     expect(workflow).toContain('pages: write')
     expect(workflow).toContain('id-token: write')
     expect(workflow).toMatch(/concurrency:\s*[\s\S]*?group:/)
@@ -231,7 +233,9 @@ describe('GitHub Pages workflow', () => {
   it('uploads the static site artifact and deploys that artifact through Pages', async () => {
     const workflow = await readWorkflow()
 
-    expect(workflow).toMatch(/uses:\s*actions\/upload-pages-artifact@[^\n]+\n(?:\s+[^\n]+\n)*\s+path:\s*['"]?\.?\/?site\/?['"]?/)
+    expect(workflow).toMatch(
+      /uses:[ \t]*actions\/upload-pages-artifact@[^\n]+\n(?:[ \t]+[^\n]*\n)*[ \t]+path:[ \t]*['"]?\.?\/?site\/?['"]?/,
+    )
     expect(workflow).toMatch(/deploy-pages@[\w.-]+/)
     expect(workflow).toMatch(/needs:\s*(?:\n\s+-\s*)?build\b/)
     expect(workflow).toMatch(/environment:\s*\n\s+name:\s*github-pages/)
