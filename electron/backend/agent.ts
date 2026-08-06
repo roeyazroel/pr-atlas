@@ -1030,13 +1030,42 @@ function isWalkthroughLike(value: unknown): value is Record<string, unknown> {
 }
 
 function fencedJsonCandidate(value: string): unknown {
-  const matches = [...value.matchAll(/```json(?:\r?\n|\s)([\s\S]*?)```/gi)];
-  if (matches.length !== 1) return undefined;
-  try {
-    return JSON.parse(matches[0][1].trim());
-  } catch {
-    return undefined;
+  const openings = [...value.matchAll(/```json(?:\r?\n|\s)/gi)];
+  for (const opening of openings) {
+    let start = (opening.index ?? 0) + opening[0].length;
+    while (/\s/.test(value[start] ?? "")) start += 1;
+    if (value[start] !== "{") continue;
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < value.length; index += 1) {
+      const character = value[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') { inString = true; continue; }
+      if (character === "{") stack.push("}");
+      else if (character === "[") stack.push("]");
+      else if (character === "}" || character === "]") {
+        if (stack.pop() !== character) break;
+        if (stack.length !== 0) continue;
+        let closing = index + 1;
+        while (/\s/.test(value[closing] ?? "")) closing += 1;
+        if (value.slice(closing, closing + 3) !== "```") break;
+        const hasOtherFence = openings.some((candidate) => {
+          const position = candidate.index ?? 0;
+          return position < (opening.index ?? 0) || position > index;
+        });
+        if (hasOtherFence) return undefined;
+        try { return JSON.parse(value.slice(start, index + 1)); }
+        catch { return undefined; }
+      }
+    }
   }
+  return undefined;
 }
 
 function modelFromOutput(
@@ -1078,7 +1107,13 @@ function parseMapProviderOutput(raw: string, taskId: string): unknown {
   for (const candidate of candidates) {
     try {
       const value = unwrapOutput(JSON.parse(candidate));
-      if (isMapShaped(value) && value.taskId === taskId) latest = value;
+      const nested = typeof value === "string"
+        ? (() => {
+            try { return unwrapOutput(JSON.parse(value)); }
+            catch { return fencedJsonCandidate(value); }
+          })()
+        : value;
+      if (isMapShaped(nested) && nested.taskId === taskId) latest = nested;
     } catch { /* try the next JSON or JSONL candidate */ }
   }
   return latest ?? raw;
