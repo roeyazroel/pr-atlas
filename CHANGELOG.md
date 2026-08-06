@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0](https://github.com/roeyazroel/pr-atlas/compare/v0.4.1...v0.5.0) (2026-08-06)
+
+
+### Features
+
+* add PR Atlas landing page ([cca258c](https://github.com/roeyazroel/pr-atlas/commit/cca258cd3dc27399a7eec237a130642de44f6ca4))
+* batch large PR analysis ([f474671](https://github.com/roeyazroel/pr-atlas/commit/f474671db6709dc22d3f94819d86defa9140bac5))
+* complete reviewer workflow ([409c6db](https://github.com/roeyazroel/pr-atlas/commit/409c6dbd44ce88dcb7602598f5ff3c56b3093193))
+
+
+### Bug Fixes
+
+* allow isolated Codex batch tasks ([d04c6ee](https://github.com/roeyazroel/pr-atlas/commit/d04c6eed96c6a427d0201ed56f45eb365a9912d8))
+* clarify and stabilize long analyses ([3cf3d05](https://github.com/roeyazroel/pr-atlas/commit/3cf3d0565be87c02fca06047c9bfd35d5429abc3))
+* clarify landing page runtimes and setup ([92e7bc0](https://github.com/roeyazroel/pr-atlas/commit/92e7bc0252e904825cf3fc261ca70414499ac6d0))
+* make validator runtime portable ([8605396](https://github.com/roeyazroel/pr-atlas/commit/8605396ece4272a2955edc92051a79a6874bd513))
+* preflight large PR reducer output ([c294d4b](https://github.com/roeyazroel/pr-atlas/commit/c294d4bfab734434c06a35a4544e28963f571325))
+* validate large PR map outputs ([18c42b7](https://github.com/roeyazroel/pr-atlas/commit/18c42b725ef7c22c9e44e571077142758f4ee91a))
+
+
+### Performance Improvements
+
+* benchmark large PR analysis strategies ([2e3e8fd](https://github.com/roeyazroel/pr-atlas/commit/2e3e8fdab198c45485b7b72b5944b21fce779b59))
+
 ## [0.4.1](https://github.com/roeyazroel/pr-atlas/compare/v0.4.0...v0.4.1) (2026-08-05)
 
 
