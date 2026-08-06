@@ -326,26 +326,31 @@ describe("PR Atlas desktop workflow", () => {
     );
   });
 
-  it("closes settings with an outside click and Escape while preserving inside interaction", async () => {
+  it("opens the settings page from the sidebar and returns to pull requests", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: /open settings/i }));
-    expect(screen.getByText("Workspace settings")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /workspace settings/i }),
+    ).toBeInTheDocument();
     await user.click(screen.getByText("Theme"));
-    expect(screen.getByText("Workspace settings")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /workspace settings/i }),
+    ).toBeInTheDocument();
     await user.click(document.body);
-    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /open settings/i }));
-    await user.click(screen.getByLabelText(/active provider:/i));
-    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /open settings/i }));
-    await user.keyboard("{Escape}");
-    expect(screen.queryByText("Workspace settings")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /workspace settings/i }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /back to pull requests/i }),
+    );
+    expect(
+      screen.queryByRole("heading", { name: /workspace settings/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it("defaults to the system theme and exposes accessible theme controls in settings", async () => {
+  it("defaults to the system theme and exposes accessible controls on the sidebar settings page", async () => {
     const user = userEvent.setup();
     const matchMedia = vi.fn().mockImplementation((query: string) => ({
       matches: query.includes("prefers-color-scheme: dark"),
@@ -359,6 +364,12 @@ describe("PR Atlas desktop workflow", () => {
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     await user.click(screen.getByRole("button", { name: /open settings/i }));
+    expect(
+      screen.getByRole("heading", { name: /workspace settings/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /back to pull requests/i }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: /theme/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^system$/i })).toBeChecked();
     expect(screen.getByRole("radio", { name: /^light$/i })).toBeInTheDocument();
@@ -388,6 +399,16 @@ describe("PR Atlas desktop workflow", () => {
     expect(
       JSON.parse(window.localStorage.getItem("atlas:theme") ?? "null"),
     ).toBe("light");
+  });
+
+  it("ignores malformed persisted effort preferences", async () => {
+    window.localStorage.setItem(
+      "atlas:provider-efforts",
+      JSON.stringify({ claude: "unsupported", codex: 3, cursor: ["high"] }),
+    );
+
+    render(<App />);
+    expect(screen.getByText("PR Atlas", { exact: true })).toBeInTheDocument();
   });
 
   it("tracks operating-system theme changes while System is selected", async () => {
@@ -1086,6 +1107,7 @@ describe("PR Atlas desktop workflow", () => {
     };
     const startAnalysis = vi.fn(async () => runResult);
     const deleteAnalysisRun = vi.fn(async () => true);
+    const setRetentionSettings = vi.fn(async (settings) => settings);
     const api = {
       bootstrap: vi.fn(async () => ({
         account: null,
@@ -1116,6 +1138,11 @@ describe("PR Atlas desktop workflow", () => {
       listAnalysisRuns: vi.fn(async () => []),
       loadAnalysisRun: vi.fn(async () => null),
       deleteAnalysisRun,
+      getRetentionSettings: vi.fn(async () => ({
+        analysisDays: 45,
+        worktreeDays: 21,
+      })),
+      setRetentionSettings,
       openExternal: vi.fn(async () => true),
       subscribeAnalysisProgress: vi.fn(() => () => undefined),
     };
@@ -1133,6 +1160,43 @@ describe("PR Atlas desktop workflow", () => {
       );
       await user.click(screen.getByRole("button", { name: /open settings/i }));
       await user.click(screen.getByRole("radio", { name: /codex cli/i }));
+      await user.click(
+        screen.getByRole("button", { name: /analysis depth/i }),
+      );
+      await user.click(screen.getByRole("option", { name: "Deep" }));
+      await user.click(
+        screen.getByRole("checkbox", { name: /include review comments/i }),
+      );
+      const maxGraphNodes = screen.getByRole("spinbutton", {
+        name: /maximum graph nodes/i,
+      });
+      fireEvent.change(maxGraphNodes, { target: { value: "120" } });
+      const timeoutMinutes = screen.getByRole("spinbutton", {
+        name: /analysis timeout minutes/i,
+      });
+      fireEvent.change(timeoutMinutes, { target: { value: "25" } });
+      const analysisDays = await screen.findByRole("spinbutton", {
+        name: /analysis retention days/i,
+      });
+      expect(analysisDays).toHaveValue(45);
+      fireEvent.change(analysisDays, { target: { value: "60" } });
+      const worktreeDays = screen.getByRole("spinbutton", {
+        name: /worktree retention days/i,
+      });
+      expect(worktreeDays).toHaveValue(21);
+      fireEvent.change(worktreeDays, { target: { value: "30" } });
+      await waitFor(() =>
+        expect(setRetentionSettings).toHaveBeenLastCalledWith({
+          analysisDays: 60,
+          worktreeDays: 30,
+        }),
+      );
+      const effort = screen.getByRole("button", {
+        name: /thinking effort for codex cli/i,
+      });
+      expect(effort).toHaveTextContent("Medium");
+      await user.click(effort);
+      await user.click(screen.getByRole("option", { name: "High" }));
       await user.click(screen.getByRole("button", { name: /open settings/i }));
 
       await user.click(screen.getByRole("button", { name: /^analyze$/i }));
@@ -1141,6 +1205,7 @@ describe("PR Atlas desktop workflow", () => {
           name: /send repository context to codex cli/i,
         }),
       ).toBeInTheDocument();
+      expect(screen.getByText(/thinking effort:/i)).toHaveTextContent("High");
       await user.click(screen.getByRole("button", { name: /continue/i }));
       await act(async () => {
         await Promise.resolve();
@@ -1184,6 +1249,13 @@ describe("PR Atlas desktop workflow", () => {
         expect.objectContaining({
           provider: "codex",
           headSha: pullRequest.headSha,
+          effort: "high",
+          config: {
+            depth: "deep",
+            includeReviewComments: false,
+            maxGraphNodes: 120,
+            timeoutMinutes: 25,
+          },
         }),
       );
     } finally {

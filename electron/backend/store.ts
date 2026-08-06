@@ -679,6 +679,13 @@ export class AnalysisStore {
                 : {}),
             }
           : undefined;
+      const effort =
+        typeof manifest.effort === "string" &&
+        ["low", "medium", "high", "xhigh", "max"].includes(
+          manifest.effort,
+        )
+          ? (manifest.effort as AnalysisManifest["effort"])
+          : undefined;
       const config = validConfig(manifest.config);
       const lastProgress = safeProgressEvent(
         manifest.lastProgress,
@@ -710,6 +717,7 @@ export class AnalysisStore {
         ...(typeof manifest.model === "string"
           ? { model: manifest.model }
           : {}),
+        ...(effort ? { effort } : {}),
         ...(typeof manifest.runtimeVersion === "string"
           ? { runtimeVersion: manifest.runtimeVersion.slice(0, 200) }
           : {}),

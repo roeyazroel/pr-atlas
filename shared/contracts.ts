@@ -58,6 +58,8 @@ export const AGENT_PROVIDER_PRIORITY: readonly AgentProvider[] = [
   "cursor",
   "claude",
 ];
+/** A bounded per-run thinking budget understood by the supported provider adapters. */
+export type AnalysisEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface AgentCapabilities {
   structuredOutput: boolean;
@@ -98,6 +100,8 @@ export interface AnalysisRequest {
   provider: AgentProvider;
   /** Optional provider-reported model id. */
   model?: string;
+  /** Optional bounded thinking level for this analysis run. */
+  effort?: AnalysisEffort;
   /** Supplemental evidence-collection focus; the fixed output contract remains authoritative. */
   customPrompt?: string;
   /** Bounded analysis controls persisted with the run for reproducibility. */
@@ -390,6 +394,7 @@ export interface AnalysisManifest {
   runtimeVersion?: string;
   lastProgress?: AnalysisProgressEvent;
   activity?: AnalysisProgressEvent[];
+  effort?: AnalysisEffort;
   skillContractVersion?: string;
   skillReferenceUrl?: string;
   config?: AnalysisRunConfig;

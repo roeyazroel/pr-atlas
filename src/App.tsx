@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
+  ArrowLeft,
   ArrowDown,
   ArrowUp,
   Bot,
@@ -58,6 +59,7 @@ import {
   DEFAULT_RETENTION_SETTINGS,
   type AgentInstallationStatus,
   type AgentProvider,
+  type AnalysisEffort,
   type AnalysisProgressEvent,
   type AnalysisDiagnostics,
   type AnalysisRunConfig,
@@ -553,6 +555,7 @@ type ResolvedTheme = Exclude<ThemeMode, "system">;
 const THEME_STORAGE_KEY = "atlas:theme";
 const PROVIDER_STORAGE_KEY = "atlas:provider";
 const MODEL_STORAGE_KEY = "atlas:provider-models";
+const EFFORT_STORAGE_KEY = "atlas:provider-efforts";
 const CUSTOM_PROMPT_STORAGE_KEY = "atlas:custom-prompt";
 const ANALYSIS_CONFIG_STORAGE_KEY = "atlas:analysis-config";
 const providerDefaults: Record<AgentProvider, string> = {
@@ -565,6 +568,19 @@ const themeModes: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ];
+const providerEfforts: Record<AgentProvider, readonly AnalysisEffort[]> = {
+  codex: ["low", "medium", "high", "xhigh", "max"],
+  cursor: ["low", "medium", "high", "xhigh", "max"],
+  claude: ["low", "medium", "high", "xhigh", "max"],
+};
+const effortLabels: Record<AnalysisEffort, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra high",
+  max: "Maximum",
+};
+const DEFAULT_ANALYSIS_EFFORT: AnalysisEffort = "medium";
 
 function readThemeMode(): ThemeMode {
   try {
@@ -608,6 +624,25 @@ function readProviderPreference(): AgentProvider | null {
   } catch {
     return null;
   }
+}
+
+function readEffortPreferences(): Partial<
+  Record<AgentProvider, AnalysisEffort>
+> {
+  const raw = readStored<unknown>(EFFORT_STORAGE_KEY, {});
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const stored = raw as Record<string, unknown>;
+  return AGENT_PROVIDER_PRIORITY.reduce<
+    Partial<Record<AgentProvider, AnalysisEffort>>
+  >((preferences, provider) => {
+    const effort = stored[provider];
+    if (
+      typeof effort === "string" &&
+      providerEfforts[provider].includes(effort as AnalysisEffort)
+    )
+      preferences[provider] = effort as AnalysisEffort;
+    return preferences;
+  }, {});
 }
 
 function providerLabel(provider: string | undefined): string {
@@ -1262,6 +1297,9 @@ function App() {
   const [selectedModels, setSelectedModels] = useState<
     Partial<Record<AgentProvider, string>>
   >(() => readStored(MODEL_STORAGE_KEY, {}));
+  const [selectedEfforts, setSelectedEfforts] = useState<
+    Partial<Record<AgentProvider, AnalysisEffort>>
+  >(readEffortPreferences);
   const [customPrompt, setCustomPrompt] = useState(() =>
     readStored(CUSTOM_PROMPT_STORAGE_KEY, ""),
   );
@@ -1276,8 +1314,6 @@ function App() {
   const [evidenceDetail, setEvidenceDetail] = useState<EvidenceDetail | null>(
     null,
   );
-  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
-  const settingsPopoverRef = useRef<HTMLDivElement>(null);
   const evidenceDrawerRef = useRef<HTMLElement>(null);
   const [analysisDiagnostics, setAnalysisDiagnostics] =
     useState<AnalysisDiagnostics | null>(null);
@@ -1319,6 +1355,9 @@ function App() {
     localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(selectedModels));
   }, [selectedModels]);
   useEffect(() => {
+    localStorage.setItem(EFFORT_STORAGE_KEY, JSON.stringify(selectedEfforts));
+  }, [selectedEfforts]);
+  useEffect(() => {
     localStorage.setItem(
       CUSTOM_PROMPT_STORAGE_KEY,
       JSON.stringify(customPrompt),
@@ -1334,14 +1373,6 @@ function App() {
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node)) return;
-      if (
-        settingsOpen &&
-        settingsTriggerRef.current &&
-        !settingsTriggerRef.current.contains(target) &&
-        settingsPopoverRef.current &&
-        !settingsPopoverRef.current.contains(target)
-      )
-        setSettingsOpen(false);
       if (
         evidenceDetail &&
         evidenceDrawerRef.current &&
@@ -1909,6 +1940,7 @@ function App() {
     let result: AnalysisRunResult;
     try {
       const model = selectedModels[provider];
+      const effort = selectedEfforts[provider] ?? DEFAULT_ANALYSIS_EFFORT;
       const supplemental = customPrompt.trim();
       result = await api.startAnalysis({
         repository: selectedPR.repositoryFullName,
@@ -1918,6 +1950,7 @@ function App() {
         provider,
         config: analysisConfig,
         ...(model ? { model } : {}),
+        effort,
         ...(supplemental ? { customPrompt: supplemental } : {}),
       });
     } catch (error) {
@@ -2454,15 +2487,6 @@ function App() {
           >
             <RefreshCw size={16} className={liveLoading ? "spin" : ""} />
           </button>
-          <button
-            className="icon-button"
-            aria-label="Open settings"
-            title="Settings"
-            ref={settingsTriggerRef}
-            onClick={() => setSettingsOpen((open) => !open)}
-          >
-            <Settings size={16} />
-          </button>
           <div
             className={`agent-status ${providerIsActive ? "active" : "unavailable"}`}
             aria-label={providerIndicatorAria}
@@ -2471,273 +2495,6 @@ function App() {
             <Bot size={15} /> {providerIndicatorLabel}
           </div>
           <Avatar initials={account.initials} label={account.avatarLabel} />
-          {settingsOpen && (
-            <div
-              className="popover settings-popover"
-              ref={settingsPopoverRef}
-            >
-              <div className="popover-title">Workspace settings</div>
-              <fieldset className="theme-fieldset">
-                <legend>Theme</legend>
-                <div className="theme-options">
-                  {themeModes.map(({ value, label }) => (
-                    <label className="theme-option" key={value}>
-                      <input
-                        type="radio"
-                        name="theme-mode"
-                        value={value}
-                        checked={themeMode === value}
-                        onChange={() => chooseTheme(value)}
-                      />
-                      <span>{label}</span>
-                    </label>
-                  ))}
-                </div>
-                <p id="theme-description" className="theme-description">
-                  System follows your operating-system appearance.
-                </p>
-              </fieldset>
-              {electronMode ? (
-                <fieldset className="provider-fieldset">
-                  <legend>Analysis provider</legend>
-                  {providersLoading && (
-                    <p className="provider-note">
-                      Detecting Claude Code, Codex CLI, and Cursor Agent…
-                    </p>
-                  )}
-                  {providerError && (
-                    <p className="provider-note provider-error">
-                      {providerError}
-                    </p>
-                  )}
-                  {!providersLoading && !providers.length && !providerError && (
-                    <p className="provider-note">
-                      No provider detection result yet.
-                    </p>
-                  )}
-                  {providers.map((status) => (
-                    <label
-                      className={`provider-option ${status.installed ? "" : "unavailable"}`}
-                      key={status.provider}
-                    >
-                      <input
-                        type="radio"
-                        name="analysis-provider"
-                        value={status.provider}
-                        checked={selectedProvider === status.provider}
-                        disabled={!status.installed}
-                        onChange={() => chooseProvider(status.provider)}
-                      />
-                      <span className="provider-option-main">
-                        <strong>{status.displayName}</strong>
-                        <small>{status.executable}</small>
-                      </span>
-                      <span className="provider-option-status">
-                        {providerStatusLabel(status)}
-                      </span>
-                    </label>
-                  ))}
-                </fieldset>
-              ) : (
-                <p className="provider-note">
-                  Browser demo runtime only; installed provider detection is
-                  available in Electron.
-                </p>
-              )}
-              {electronMode && selectedProviderStatus?.installed && (
-                <label className="model-setting">
-                  <span>Model for {selectedProviderStatus.displayName}</span>
-                  {selectedProviderStatus.models?.length ? (
-                    <SelectMenu
-                      ariaLabel={`Model for ${selectedProviderStatus.displayName}`}
-                      className="model-select-menu"
-                      value={
-                        selectedModels[selectedProvider] ??
-                        selectedProviderStatus.models[0]?.id ??
-                        ""
-                      }
-                      options={selectedProviderStatus.models.map((model) => ({
-                        value: model.id,
-                        label: model.label,
-                      }))}
-                      onChange={(value) =>
-                        setSelectedModels((current) => ({
-                          ...current,
-                          [selectedProvider]: value,
-                        }))
-                      }
-                    />
-                  ) : (
-                    <small>
-                      The installed tool did not report selectable models; its
-                      configured default will be used.
-                    </small>
-                  )}
-                </label>
-              )}
-              <fieldset className="provider-fieldset">
-                <legend>Analysis scope</legend>
-                <label className="model-setting">
-                  <span>Depth</span>
-                  <SelectMenu
-                    ariaLabel="Analysis depth"
-                    value={analysisConfig.depth}
-                    options={[
-                      { value: "quick", label: "Quick" },
-                      { value: "standard", label: "Standard" },
-                      { value: "deep", label: "Deep" },
-                    ]}
-                    onChange={(value) =>
-                      setAnalysisConfig((current) => ({
-                        ...current,
-                        depth: value as AnalysisRunConfig["depth"],
-                      }))
-                    }
-                  />
-                </label>
-                <label className="theme-option">
-                  <input
-                    aria-label="Include review comments"
-                    type="checkbox"
-                    checked={analysisConfig.includeReviewComments}
-                    onChange={(event) =>
-                      setAnalysisConfig((current) => ({
-                        ...current,
-                        includeReviewComments: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>Include review comments</span>
-                </label>
-                <label className="model-setting">
-                  <span>Maximum graph nodes</span>
-                  <input
-                    aria-label="Maximum graph nodes"
-                    type="number"
-                    min="20"
-                    max="200"
-                    value={analysisConfig.maxGraphNodes}
-                    onChange={(event) =>
-                      setAnalysisConfig((current) => ({
-                        ...current,
-                        maxGraphNodes: Math.max(
-                          20,
-                          Math.min(200, Number(event.target.value) || 20),
-                        ),
-                      }))
-                    }
-                  />
-                </label>
-                <label className="model-setting">
-                  <span>Timeout minutes</span>
-                  <input
-                    aria-label="Analysis timeout minutes"
-                    type="number"
-                    min="1"
-                    max="60"
-                    value={analysisConfig.timeoutMinutes}
-                    onChange={(event) =>
-                      setAnalysisConfig((current) => ({
-                        ...current,
-                        timeoutMinutes: Math.max(
-                          1,
-                          Math.min(60, Number(event.target.value) || 1),
-                        ),
-                      }))
-                    }
-                  />
-                </label>
-              </fieldset>
-              <fieldset className="provider-fieldset">
-                <legend>Retention</legend>
-                <label className="model-setting">
-                  <span>Analysis days</span>
-                  <input
-                    aria-label="Analysis retention days"
-                    type="number"
-                    min="1"
-                    max="3650"
-                    value={retentionSettings.analysisDays}
-                    onChange={(event) => {
-                      const next = {
-                        ...retentionSettings,
-                        analysisDays: Math.max(
-                          1,
-                          Math.min(3650, Number(event.target.value) || 1),
-                        ),
-                      };
-                      setRetentionSettings(next);
-                      void api?.setRetentionSettings?.(next);
-                    }}
-                  />
-                </label>
-                <label className="model-setting">
-                  <span>Worktree days</span>
-                  <input
-                    aria-label="Worktree retention days"
-                    type="number"
-                    min="1"
-                    max="3650"
-                    value={retentionSettings.worktreeDays}
-                    onChange={(event) => {
-                      const next = {
-                        ...retentionSettings,
-                        worktreeDays: Math.max(
-                          1,
-                          Math.min(3650, Number(event.target.value) || 1),
-                        ),
-                      };
-                      setRetentionSettings(next);
-                      void api?.setRetentionSettings?.(next);
-                    }}
-                  />
-                </label>
-              </fieldset>
-              <label className="prompt-setting">
-                <span>Supplemental collection guidance</span>
-                <textarea
-                  aria-label="Supplemental collection guidance"
-                  value={customPrompt}
-                  maxLength={4000}
-                  rows={3}
-                  placeholder="Example: collect more migration, rollback, or test evidence"
-                  onChange={(event) => setCustomPrompt(event.target.value)}
-                />
-                <small>
-                  This may guide additional evidence collection, but cannot
-                  change the required walkthrough structure.
-                </small>
-              </label>
-              <div className="settings-row">
-                <span>Data source</span>
-                <strong>
-                  {electronMode
-                    ? account.live
-                      ? "GitHub CLI + local artifacts"
-                      : "GitHub CLI unavailable"
-                    : "Demo fixture (browser)"}
-                </strong>
-              </div>
-              <div className="settings-row">
-                <span>Provider</span>
-                <strong>{activeProviderName}</strong>
-              </div>
-              <div className="settings-row">
-                <span>Unprocessed PRs</span>
-                <strong>Ask to analyze on selection</strong>
-              </div>
-              <div className="settings-note">
-                {selectedProviderStatus?.installed ? (
-                  <>
-                    Repository context stays local except when an analysis run
-                    sends it to {activeProviderName}’s configured model service.
-                  </>
-                ) : (
-                  "Select an installed provider to enable analysis."
-                )}
-              </div>
-            </div>
-          )}
         </div>
       </header>
 
@@ -2774,6 +2531,14 @@ function App() {
                 Model: <code>{selectedModels[selectedProvider]}</code>
               </p>
             )}
+            <p className="confirm-detail">
+              Thinking effort: {" "}
+              <code>
+                {effortLabels[
+                  selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT
+                ]}
+              </code>
+            </p>
             <p className="confirm-detail">
               {analysisConfig.depth} depth ·{" "}
               {analysisConfig.includeReviewComments
@@ -3003,9 +2768,224 @@ function App() {
             <button className="help-button">
               <CircleHelp size={14} /> Keyboard shortcuts
             </button>
+            <button
+              className={`workspace-settings-link ${settingsOpen ? "active" : ""}`}
+              aria-label="Open settings"
+              onClick={() => setSettingsOpen((open) => !open)}
+            >
+              <Settings size={14} /> Workspace settings
+            </button>
           </div>
         </aside>
 
+        {settingsOpen ? <main className="settings-page" aria-labelledby="workspace-settings-title">
+          <header className="settings-page-header"><div><div className="eyebrow">Workspace</div><h1 id="workspace-settings-title">Workspace settings</h1><p>Choose the provider, model, and thinking budget for every analysis run. Changes save locally and apply to the next scan.</p></div><button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button></header>
+          <div className="settings-page-grid">
+            <section className="settings-panel"><div className="settings-panel-heading"><div><div className="eyebrow">Appearance</div><h2>Interface</h2></div></div><fieldset className="theme-fieldset"><legend>Theme</legend><div className="theme-options">{themeModes.map(({ value, label }) => <label className="theme-option" key={value}><input type="radio" name="theme-mode" value={value} checked={themeMode === value} onChange={() => chooseTheme(value)} /><span>{label}</span></label>)}</div><p id="theme-description" className="theme-description">System follows your operating-system appearance.</p></fieldset></section>
+            <section className="settings-panel provider-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Analysis</div><h2>Provider</h2></div><span className={`provider-health ${providerIsActive ? 'ready' : ''}`}>{providerIndicatorLabel}</span></div>{electronMode ? <fieldset className="provider-fieldset"><legend>Choose an installed provider</legend>{providersLoading && <p className="provider-note">Detecting Claude Code, Codex CLI, and Cursor Agent…</p>}{providerError && <p className="provider-note provider-error">{providerError}</p>}{!providersLoading && !providers.length && !providerError && <p className="provider-note">No provider detection result yet.</p>}{providers.map((status) => <label className={`provider-option ${status.installed ? '' : 'unavailable'}`} key={status.provider}><input type="radio" name="analysis-provider" value={status.provider} checked={selectedProvider === status.provider} disabled={!status.installed} onChange={() => chooseProvider(status.provider)} /><span className="provider-option-main"><strong>{status.displayName}</strong><small>{status.executable}</small></span><span className="provider-option-status">{providerStatusLabel(status)}</span></label>)}</fieldset> : <p className="provider-note">Browser demo runtime only; installed provider detection is available in Electron.</p>}</section>
+            <section className="settings-panel run-settings">
+              <div className="settings-panel-heading">
+                <div>
+                  <div className="eyebrow">Next analysis</div>
+                  <h2>
+                    {selectedProviderStatus?.installed
+                      ? selectedProviderStatus.displayName
+                      : "Provider configuration"}
+                  </h2>
+                </div>
+              </div>
+              {electronMode && selectedProviderStatus?.installed ? (
+                <>
+                  <label className="model-setting">
+                    <span>Model</span>
+                    {selectedProviderStatus.models?.length ? (
+                      <SelectMenu
+                        ariaLabel={`Model for ${selectedProviderStatus.displayName}`}
+                        className="model-select-menu"
+                        value={
+                          selectedModels[selectedProvider] ??
+                          selectedProviderStatus.models[0]?.id ??
+                          ""
+                        }
+                        options={selectedProviderStatus.models.map((model) => ({
+                          value: model.id,
+                          label: model.label,
+                        }))}
+                        onChange={(value) =>
+                          setSelectedModels((current) => ({
+                            ...current,
+                            [selectedProvider]: value,
+                          }))
+                        }
+                      />
+                    ) : (
+                      <small>
+                        The installed tool did not report selectable models; its
+                        configured default will be used.
+                      </small>
+                    )}
+                  </label>
+                  <label className="model-setting">
+                    <span>Thinking effort</span>
+                    <SelectMenu
+                      ariaLabel={`Thinking effort for ${selectedProviderStatus.displayName}`}
+                      className="model-select-menu"
+                      value={
+                        selectedEfforts[selectedProvider] ??
+                        DEFAULT_ANALYSIS_EFFORT
+                      }
+                      options={providerEfforts[selectedProvider].map((effort) => ({
+                        value: effort,
+                        label: effortLabels[effort],
+                      }))}
+                      onChange={(value) =>
+                        setSelectedEfforts((current) => ({
+                          ...current,
+                          [selectedProvider]: value as AnalysisEffort,
+                        }))
+                      }
+                    />
+                    <small>
+                      Medium balances coverage and cost. Lower effort is faster
+                      and generally less expensive; higher effort may produce a
+                      more thorough scan.
+                    </small>
+                  </label>
+                </>
+              ) : (
+                <p className="provider-note">
+                  Select an installed provider to configure its model and
+                  thinking budget.
+                </p>
+              )}
+              <fieldset className="provider-fieldset">
+                <legend>Analysis scope</legend>
+                <label className="model-setting">
+                  <span>Depth</span>
+                  <SelectMenu
+                    ariaLabel="Analysis depth"
+                    value={analysisConfig.depth}
+                    options={[
+                      { value: "quick", label: "Quick" },
+                      { value: "standard", label: "Standard" },
+                      { value: "deep", label: "Deep" },
+                    ]}
+                    onChange={(value) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        depth: value as AnalysisRunConfig["depth"],
+                      }))
+                    }
+                  />
+                </label>
+                <label className="theme-option">
+                  <input
+                    aria-label="Include review comments"
+                    type="checkbox"
+                    checked={analysisConfig.includeReviewComments}
+                    onChange={(event) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        includeReviewComments: event.target.checked,
+                      }))
+                    }
+                  />
+                  <span>Include review comments</span>
+                </label>
+                <label className="model-setting">
+                  <span>Maximum graph nodes</span>
+                  <input
+                    aria-label="Maximum graph nodes"
+                    type="number"
+                    min="20"
+                    max="200"
+                    value={analysisConfig.maxGraphNodes}
+                    onChange={(event) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        maxGraphNodes: Math.max(
+                          20,
+                          Math.min(200, Number(event.target.value) || 20),
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <label className="model-setting">
+                  <span>Timeout minutes</span>
+                  <input
+                    aria-label="Analysis timeout minutes"
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={analysisConfig.timeoutMinutes}
+                    onChange={(event) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        timeoutMinutes: Math.max(
+                          1,
+                          Math.min(60, Number(event.target.value) || 1),
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+              </fieldset>
+            </section>
+            <section className="settings-panel retention-settings">
+              <div className="settings-panel-heading">
+                <div>
+                  <div className="eyebrow">Storage</div>
+                  <h2>Retention</h2>
+                </div>
+              </div>
+              <label className="model-setting">
+                <span>Analysis days</span>
+                <input
+                  aria-label="Analysis retention days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  value={retentionSettings.analysisDays}
+                  onChange={(event) => {
+                    const next = {
+                      ...retentionSettings,
+                      analysisDays: Math.max(
+                        1,
+                        Math.min(3650, Number(event.target.value) || 1),
+                      ),
+                    };
+                    setRetentionSettings(next);
+                    void api?.setRetentionSettings?.(next);
+                  }}
+                />
+              </label>
+              <label className="model-setting">
+                <span>Worktree days</span>
+                <input
+                  aria-label="Worktree retention days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  value={retentionSettings.worktreeDays}
+                  onChange={(event) => {
+                    const next = {
+                      ...retentionSettings,
+                      worktreeDays: Math.max(
+                        1,
+                        Math.min(3650, Number(event.target.value) || 1),
+                      ),
+                    };
+                    setRetentionSettings(next);
+                    void api?.setRetentionSettings?.(next);
+                  }}
+                />
+              </label>
+            </section>
+            <section className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
+          </div>
+          <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
+        </main> : <>
         <section className="pr-list-pane" aria-label="Pull request list">
           <div className="pane-header">
             <div>
@@ -3442,6 +3422,7 @@ function App() {
             </section>
           )}
         </main>
+        </>}
       </div>
     </div>
   );

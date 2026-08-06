@@ -1,5 +1,6 @@
 import {
   DEFAULT_ANALYSIS_RUN_CONFIG,
+  type AnalysisEffort,
   type AnalysisRequest,
   type AnalysisRunConfig,
   type SafeDiagnostic,
@@ -8,6 +9,7 @@ import {
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const shaPattern = /^[a-fA-F0-9]{7,64}$/;
 const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:/\[\]=,+-]{0,199}$/;
+const analysisEfforts: readonly AnalysisEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function validateRepository(value: unknown): value is string {
   return (
@@ -124,6 +126,17 @@ export function validateAnalysisRequest(
       error: safeError(
         "INVALID_MODEL",
         "Selected model must be a provider-reported model id.",
+      ),
+    };
+  if (
+    request.effort !== undefined &&
+    !analysisEfforts.includes(request.effort)
+  )
+    return {
+      valid: false,
+      error: safeError(
+        "INVALID_EFFORT",
+        "Thinking effort must be a supported level.",
       ),
     };
   if (

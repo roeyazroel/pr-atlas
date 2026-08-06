@@ -22,9 +22,10 @@ export class CursorAdapter implements AgentAdapter {
   async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CursorResponse> {
     const prompt = `${buildAnalysisPrompt(request, inputDirectory, task)}\n\nThe exact JSON Schema follows:\n${JSON.stringify(schemaForProvider(task))}`;
     const selectedModel = model?.trim() || request.model?.trim();
+    const modelWithEffort = request.effort ? `${selectedModel ?? 'auto'}[effort=${request.effort}]` : selectedModel;
     const args = [
       '-p', prompt,
-      ...(selectedModel ? ['--model', selectedModel] : []),
+      ...(modelWithEffort ? ['--model', modelWithEffort] : []),
       '--output-format', 'json',
       '--mode', 'ask',
       '--sandbox', 'enabled',

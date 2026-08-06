@@ -25,8 +25,10 @@ export class CodexAdapter implements AgentAdapter {
   async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CodexResponse> {
     return withTemporarySchema(async (schemaPath) => {
       const selectedModel = model?.trim() || request.model?.trim();
+      const effort = request.effort;
       const args = [
         'exec',
+        ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : []),
         ...(selectedModel ? ['--model', selectedModel] : []),
         '--json',
         '--sandbox', 'read-only',

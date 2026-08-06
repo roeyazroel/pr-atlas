@@ -22,7 +22,7 @@ export class ClaudeAdapter implements AgentAdapter {
   discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
   async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<ClaudeResponse> {
-    const args = ['-p', buildAnalysisPrompt(request, inputDirectory, task)];
+    const args = ['-p', buildAnalysisPrompt(request, inputDirectory, task), ...(request.effort ? ['--effort', request.effort] : [])];
     const selectedModel = model?.trim() || request.model?.trim();
     if (selectedModel) args.push('--model', selectedModel);
     const validatorTool = task?.kind === 'map'

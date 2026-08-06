@@ -67,12 +67,14 @@ describe("analysis request validation", () => {
     const result = validateAnalysisRequest({
       ...validRequest(),
       model: "claude-sonnet-4-6",
+      effort: "medium",
       customPrompt:
         "Collect more evidence about migrations and rollback behavior.",
     });
     expect(result.valid).toBe(true);
     if (result.valid) {
       expect(result.value.model).toBe("claude-sonnet-4-6");
+      expect(result.value.effort).toBe("medium");
       expect(result.value.customPrompt).toMatch(/rollback behavior/);
     }
   });
@@ -83,6 +85,9 @@ describe("analysis request validation", () => {
         ...validRequest(),
         model: "--dangerously-skip-permissions",
       }).valid,
+    ).toBe(false);
+    expect(
+      validateAnalysisRequest({ ...validRequest(), effort: "unbounded" }).valid,
     ).toBe(false);
     expect(
       validateAnalysisRequest({

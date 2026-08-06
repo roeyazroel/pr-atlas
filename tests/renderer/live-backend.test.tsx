@@ -310,7 +310,7 @@ describe('live Electron renderer contract', () => {
     expect(screen.queryByLabelText(/new version available.*9\.4\.0/i)).not.toBeInTheDocument()
   })
 
-  it('uses tool-reported models, persists supplemental guidance, and auto-starts consent for an unprocessed PR', async () => {
+  it('uses tool-reported models, persists provider effort and supplemental guidance, and auto-starts consent for an unprocessed PR', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
     vi.mocked(api.listAnalysisRuns).mockResolvedValue([])
@@ -332,6 +332,10 @@ describe('live Electron renderer contract', () => {
     await user.click(model)
     expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['GPT-5.6', 'GPT-5.6 mini'])
     await user.click(screen.getByRole('option', { name: 'GPT-5.6 mini' }))
+    const effort = screen.getByRole('button', { name: /thinking effort for codex cli/i })
+    await user.click(effort)
+    await user.click(screen.getByRole('option', { name: 'High' }))
+    expect(JSON.parse(window.localStorage.getItem('atlas:provider-efforts') ?? 'null')).toMatchObject({ codex: 'high' })
     await user.type(screen.getByRole('textbox', { name: /supplemental collection guidance/i }), 'Collect more migration and rollback evidence.')
     expect(screen.getByLabelText(/active provider: codex cli/i)).toBeInTheDocument()
 
@@ -344,8 +348,20 @@ describe('live Electron renderer contract', () => {
     await waitFor(() => expect(api.startAnalysis).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'codex',
       model: 'gpt-5.6-mini',
+      effort: 'high',
       customPrompt: 'Collect more migration and rollback evidence.',
     })))
+  })
+
+  it('falls back to the safe default when persisted thinking effort is malformed', async () => {
+    const user = userEvent.setup()
+    window.localStorage.setItem('atlas:provider-efforts', JSON.stringify({ codex: 'unbounded', claude: 'max' }))
+    installLiveApi()
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /open settings/i }))
+    expect(screen.getByRole('button', { name: /thinking effort for codex cli/i })).toHaveTextContent('Medium')
   })
 
   it('does not leak demo pull request content into an empty live repository', async () => {
