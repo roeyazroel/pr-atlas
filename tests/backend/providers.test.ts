@@ -959,6 +959,100 @@ describe("provider-neutral agent adapters", () => {
     expect(response.mapOutput).toEqual(output);
   });
 
+  it("extracts a canonical fenced map from a Cursor result envelope", async () => {
+    const output = {
+      taskId: "map-001",
+      observations: [
+        {
+          path: "src/a.ts",
+          segment: 0,
+          summary: "Documents a literal ```json marker without ending the outer fence.",
+          evidence: [{ path: "src/a.ts", line: 1 }],
+          changeGroups: ["group"],
+          tests: ["test"],
+          flows: ["flow"],
+          limitations: ["limit"],
+        },
+      ],
+    };
+    const raw = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: `I validated the assigned map.\n\n\`\`\`json\n${JSON.stringify(output)}\n\`\`\``,
+    });
+    const calls: SpawnCall[] = [];
+    const adapter = new CursorAdapter(
+      { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) },
+      fakeSpawn(raw, calls),
+    );
+
+    const response = await adapter.analyze(
+      requestFor("cursor"),
+      "/worktree",
+      "/input",
+      undefined,
+      progress,
+      undefined,
+      {
+        kind: "map",
+        id: "map-001",
+        total: 1,
+        assignedPaths: ["src/a.ts"],
+      },
+    );
+
+    expect(response.status).toBe("ready");
+    expect(response.mapOutput).toEqual(output);
+  });
+
+  it.each(["unterminated", "multiple"] as const)(
+    "rejects %s fenced map output from a Cursor result envelope",
+    async (shape) => {
+      const output = {
+        taskId: "map-001",
+        observations: [
+          {
+            path: "src/a.ts",
+            segment: 0,
+            summary: "Changed.",
+            evidence: [{ path: "src/a.ts", line: 1 }],
+            changeGroups: ["group"],
+            tests: ["test"],
+            flows: ["flow"],
+            limitations: ["limit"],
+          },
+        ],
+      };
+      const fenced = `\`\`\`json\n${JSON.stringify(output)}\n\`\`\``;
+      const result = shape === "unterminated"
+        ? fenced.slice(0, -3)
+        : `\`\`\`json\n{"note":"decoy"}\n\`\`\`\n${fenced}`;
+      const adapter = new CursorAdapter(
+        { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) },
+        fakeSpawn(JSON.stringify({ type: "result", result }), []),
+      );
+
+      const response = await adapter.analyze(
+        requestFor("cursor"),
+        "/worktree",
+        "/input",
+        undefined,
+        progress,
+        undefined,
+        {
+          kind: "map",
+          id: "map-001",
+          total: 1,
+          assignedPaths: ["src/a.ts"],
+        },
+      );
+
+      expect(response.status).toBe("invalid");
+      expect(response.mapOutput).toBeUndefined();
+    },
+  );
+
   it("redacts and revalidates accepted map output before returning it", async () => {
     const secret = "provider-map-secret-123"; const previous = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = secret;
     const output = { taskId: "map-001", observations: [{ path: "src/a.ts", segment: 0, summary: `Changed ${secret}.`, evidence: [{ path: "src/a.ts", line: 1 }], changeGroups: ["group"], tests: [secret], flows: [`flow ${secret}`], limitations: [`limit ${secret}`] }] };
