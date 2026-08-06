@@ -197,6 +197,7 @@ export class AnalysisService {
         timestamp: new Date().toISOString(),
       };
       manifest.lastProgress = event;
+      manifest.activity = [...(manifest.activity ?? []), event].slice(-100);
       this.emit(event);
     };
     try {
@@ -327,11 +328,11 @@ export class AnalysisService {
             ? response.errors.slice(0, 20)
             : undefined,
         );
+      if (response.status === "ready")
+        progress("complete", "Walkthrough is ready.");
       await this.store.writeManifest(directory, manifest);
       if (response.document)
         await this.store.writeWalkthrough(directory, response.document);
-      if (response.status === "ready")
-        progress("complete", "Walkthrough is ready.");
       return {
         runId,
         status: response.status,
@@ -527,6 +528,8 @@ export class AnalysisService {
       while (!execution.signal.aborted && !stop) {
         const task = plan.chunks[cursor++];
         if (!task) return;
+        const taskNumber = plan.chunks.indexOf(task) + 1;
+        progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} started · ${task.files.length} source units.`);
         const scope = resolve(directory, "batches", task.id);
         await mkdir(scope, { recursive: true });
         await writeFile(resolve(scope, "files.json"), JSON.stringify(task.files), "utf8");
@@ -540,9 +543,13 @@ export class AnalysisService {
           : undefined;
         const accepted = validated?.valid ? validated.output : undefined;
         responses.push(accepted ? response : response.status === "ready" ? { ...response, status: "invalid", errors: validated?.errors ?? ["Map output was missing."] } : response);
-        if (!accepted) { stop = true; execution.abort(); return; }
+        if (!accepted) {
+          progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} failed validation.`);
+          stop = true; execution.abort(); return;
+        }
         outputs.push(accepted);
         await writeBatchJson(directory, `${task.id}.output.json`, accepted);
+        progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} completed · ${accepted.observations.length} observations validated.`);
       }
     };
     await Promise.all(Array.from({ length: Math.min(MAX_BATCH_CONCURRENCY, plan.chunks.length) }, worker));
@@ -564,8 +571,9 @@ export class AnalysisService {
     if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
-    progress("validating", `Validating ${ordered.length}/${plan.chunks.length} map batches and generating the reducer.`);
+    progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
+    progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
     const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };
     return timedOut
       ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }

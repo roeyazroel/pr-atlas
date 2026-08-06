@@ -9,6 +9,7 @@ import {
   CircleHelp,
   Clock3,
   Code2,
+  Download,
   ExternalLink,
   FileCode2,
   Files,
@@ -854,6 +855,7 @@ function App() {
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    activity: AnalysisProgressEvent[];
   } | null>(null);
   const [analysisDone, setAnalysisDone] = useState<Record<string, boolean>>({});
   const [account, setAccount] = useState<AccountState>({
@@ -915,6 +917,7 @@ function App() {
   );
   const [analysisDiagnostics, setAnalysisDiagnostics] =
     useState<AnalysisDiagnostics | null>(null);
+  const [diagnosticExportMessage, setDiagnosticExportMessage] = useState("");
   const selectedProviderStatus = providers.find(
     (status) => status.provider === selectedProvider,
   );
@@ -1155,6 +1158,13 @@ function App() {
                       ].indexOf(event.stage),
                     ),
               message: event.message,
+              activity: current.activity.some(
+                (item) =>
+                  item.timestamp === event.timestamp &&
+                  item.message === event.message,
+              )
+                ? current.activity
+                : [...current.activity, event].slice(-30),
             }
           : current,
       );
@@ -1443,7 +1453,10 @@ function App() {
         failedRun.runId,
       )
       .then((diagnostics) => {
-        if (!cancelled) setAnalysisDiagnostics(diagnostics);
+        if (!cancelled) {
+          setAnalysisDiagnostics(diagnostics);
+          setDiagnosticExportMessage("");
+        }
       })
       .catch(() => {
         if (!cancelled) setAnalysisDiagnostics(null);
@@ -1495,6 +1508,7 @@ function App() {
       startedAt: Date.now(),
       live: true,
       provider,
+      activity: [],
     });
     let result: AnalysisRunResult;
     try {
@@ -1653,6 +1667,7 @@ function App() {
       running: true,
       live: false,
       startedAt: Date.now(),
+      activity: [],
     });
   };
 
@@ -1886,6 +1901,24 @@ function App() {
   const retryAnalysisWithProvider = (provider: AgentProvider) => {
     setSelectedProvider(provider);
     setConfirmLiveAnalysis(true);
+  };
+  const exportAnalysisDiagnostics = async () => {
+    if (
+      !api?.exportAnalysisDiagnostics ||
+      !selectedPR?.repositoryFullName ||
+      !analysisDiagnostics
+    )
+      return;
+    const result = await api.exportAnalysisDiagnostics(
+      selectedPR.repositoryFullName,
+      selectedPR.number,
+      analysisDiagnostics.manifest.runId,
+    );
+    setDiagnosticExportMessage(
+      result.saved
+        ? "Diagnostic report saved and revealed in your file manager."
+        : (result.error ?? ""),
+    );
   };
 
   const openSelectedPr = () => {
@@ -2837,6 +2870,9 @@ function App() {
                   onPreferRun={(runId) => void preferHistoricalRun(runId)}
                   onRegenerateRun={regenerateHistoricalRun}
                   diagnostics={analysisDiagnostics}
+                  diagnosticExportMessage={diagnosticExportMessage}
+                  onExportDiagnostics={() => void exportAnalysisDiagnostics()}
+                  openAnalysisDetails={() => setView("details")}
                   retryProviders={providers.filter(
                     (provider) => provider.installed,
                   )}
@@ -3056,6 +3092,9 @@ function ViewContent({
   onPreferRun,
   onRegenerateRun,
   diagnostics,
+  diagnosticExportMessage,
+  onExportDiagnostics,
+  openAnalysisDetails,
   retryProviders,
   onRetryWithProvider,
   openFlow,
@@ -3072,6 +3111,7 @@ function ViewContent({
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    activity: AnalysisProgressEvent[];
   } | null;
   providerName: string;
   analysisMessage?: string;
@@ -3091,6 +3131,9 @@ function ViewContent({
   onPreferRun: (runId: string) => void;
   onRegenerateRun: (runId: string) => void;
   diagnostics: AnalysisDiagnostics | null;
+  diagnosticExportMessage: string;
+  onExportDiagnostics: () => void;
+  openAnalysisDetails: () => void;
   retryProviders: AgentInstallationStatus[];
   onRetryWithProvider: (provider: AgentProvider) => void;
   openFlow: (type: Flow["type"], nodeId: string) => void;
@@ -3106,6 +3149,27 @@ function ViewContent({
         providerName={providerName}
         message={analysisMessage}
         onCancel={cancelAnalysis}
+      />
+    );
+  if (
+    view === "walkthrough" &&
+    (pr.status === "failed" || pr.status === "cancelled")
+  )
+    return (
+      <AnalysisFailure
+        pr={pr}
+        diagnostics={diagnostics}
+        exportMessage={diagnosticExportMessage}
+        onExport={onExportDiagnostics}
+        onOpenDetails={openAnalysisDetails}
+        onRetry={
+          diagnostics &&
+          retryProviders.some(
+            (provider) => provider.provider === diagnostics.manifest.provider,
+          )
+            ? () => onRetryWithProvider(diagnostics.manifest.provider)
+            : undefined
+        }
       />
     );
   if (view === "overview") return <OverviewFull pr={pr} />;
@@ -3163,6 +3227,8 @@ function ViewContent({
       onPreferRun={onPreferRun}
       onRegenerateRun={onRegenerateRun}
       diagnostics={diagnostics}
+      diagnosticExportMessage={diagnosticExportMessage}
+      onExportDiagnostics={onExportDiagnostics}
       retryProviders={retryProviders}
       onRetryWithProvider={onRetryWithProvider}
     />
@@ -3291,6 +3357,81 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
   );
 }
 
+function AnalysisFailure({
+  pr,
+  diagnostics,
+  exportMessage,
+  onExport,
+  onOpenDetails,
+  onRetry,
+}: {
+  pr: PullRequest;
+  diagnostics: AnalysisDiagnostics | null;
+  exportMessage: string;
+  onExport: () => void;
+  onOpenDetails: () => void;
+  onRetry?: () => void;
+}) {
+  const cancelled = pr.status === "cancelled";
+  const error = diagnostics?.error;
+  const lastProgress = diagnostics?.manifest.lastProgress;
+  return (
+    <section className="analysis-failure" aria-label="Analysis failure">
+      <div className="failure-icon" aria-hidden="true">
+        <AlertCircle size={20} />
+      </div>
+      <div className="failure-copy">
+        <span className="failure-kicker">
+          {error?.code ?? diagnostics?.manifest.status ?? pr.status}
+        </span>
+        <h3>{cancelled ? "Analysis cancelled" : "Analysis failed"}</h3>
+        <p>
+          {error?.message ??
+            pr.analysisDiagnostic ??
+            "The run ended before PR Atlas could produce a validated walkthrough."}
+        </p>
+        {lastProgress && (
+          <div className="failure-progress">
+            <strong>Last completed activity</strong>
+            <span>{lastProgress.message}</span>
+          </div>
+        )}
+        {error?.details?.length ? (
+          <ul className="failure-details">
+            {error.details.slice(0, 3).map((detail) => (
+              <li key={detail}>{detail}</li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="failure-actions">
+          {onRetry && (
+            <button className="primary-button" onClick={onRetry}>
+              <RefreshCw size={13} /> Retry analysis
+            </button>
+          )}
+          {diagnostics && (
+            <button className="secondary-button" onClick={onExport}>
+              <Download size={13} /> Save diagnostic report
+            </button>
+          )}
+          <button className="secondary-button" onClick={onOpenDetails}>
+            <Code2 size={13} /> View analysis details
+          </button>
+        </div>
+        <small className="failure-sharing-note">
+          Diagnostic reports include bounded logs and provider output. Review
+          the report before sharing it.
+        </small>
+        {exportMessage && (
+          <p className="diagnostic-export-status" role="status">
+            {exportMessage}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function AnalysisProgress({
   pr,
   analysis,
@@ -3304,6 +3445,7 @@ function AnalysisProgress({
     running: boolean;
     live?: boolean;
     startedAt: number;
+    activity: AnalysisProgressEvent[];
   };
   providerName: string;
   onCancel: () => void;
@@ -3344,6 +3486,47 @@ function AnalysisProgress({
         <div className="analysis-message" role="status">
           {message}
         </div>
+      )}
+      {live && (
+        <section className="agent-activity">
+          <div className="agent-activity-head">
+            <div>
+              <strong>Agent activity</strong>
+              <span>Operational events from the local scan</span>
+            </div>
+            <Activity size={14} />
+          </div>
+          <div
+            className="agent-activity-log"
+            role="log"
+            aria-label="Agent activity"
+            aria-live="polite"
+          >
+            {analysis.activity.length ? (
+              analysis.activity.map((event) => (
+                <div
+                  className="agent-activity-row"
+                  key={`${event.timestamp}:${event.message}`}
+                >
+                  <time dateTime={event.timestamp}>
+                    {new Date(event.timestamp).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })}
+                  </time>
+                  <span>{event.message}</span>
+                </div>
+              ))
+            ) : (
+              <p>Waiting for the first activity event…</p>
+            )}
+          </div>
+          <small>
+            Shows scan operations and validation milestones, not private model
+            reasoning.
+          </small>
+        </section>
       )}
       <div className="stage-list">
         {analysisStages.map((stage: AnalysisStage, index) => (
@@ -4452,6 +4635,8 @@ function DetailsView({
   onPreferRun,
   onRegenerateRun,
   diagnostics,
+  diagnosticExportMessage,
+  onExportDiagnostics,
   retryProviders,
   onRetryWithProvider,
 }: {
@@ -4464,6 +4649,8 @@ function DetailsView({
   onPreferRun: (runId: string) => void;
   onRegenerateRun: (runId: string) => void;
   diagnostics: AnalysisDiagnostics | null;
+  diagnosticExportMessage: string;
+  onExportDiagnostics: () => void;
   retryProviders: AgentInstallationStatus[];
   onRetryWithProvider: (provider: AgentProvider) => void;
 }) {
@@ -4573,6 +4760,18 @@ function DetailsView({
               </ul>
             </details>
           ) : null}
+          {diagnostics.manifest.activity?.length ? (
+            <details>
+              <summary>Recent agent activity</summary>
+              <ol className="diagnostics-activity">
+                {diagnostics.manifest.activity.slice(-20).map((event) => (
+                  <li key={`${event.timestamp}:${event.message}`}>
+                    {event.message}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          ) : null}
           {diagnostics.logExcerpt.length ? (
             <details>
               <summary>Bounded log excerpt</summary>
@@ -4580,6 +4779,9 @@ function DetailsView({
             </details>
           ) : null}
           <div className="diagnostics-actions">
+            <button type="button" onClick={onExportDiagnostics}>
+              Save diagnostic report
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -4615,6 +4817,15 @@ function DetailsView({
                 </button>
               ))}
           </div>
+          <small className="failure-sharing-note">
+            Saved reports include bounded logs and provider output. Review
+            before sharing.
+          </small>
+          {diagnosticExportMessage && (
+            <p className="diagnostic-export-status" role="status">
+              {diagnosticExportMessage}
+            </p>
+          )}
         </section>
       )}
       <div className="run-history">

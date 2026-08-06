@@ -2161,6 +2161,159 @@ button:disabled {
   color: #3f6e68;
   font-size: 10px;
 }
+.agent-activity {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-subtle);
+}
+.agent-activity-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--teal);
+}
+.agent-activity-head > div {
+  display: grid;
+  gap: 2px;
+}
+.agent-activity-head strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+.agent-activity-head span,
+.agent-activity small {
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.4;
+}
+.agent-activity-log {
+  display: grid;
+  max-height: 148px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.agent-activity-log > p {
+  margin: 0;
+  padding: 10px 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+.agent-activity-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 9px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.agent-activity-row:last-child {
+  border-bottom: 0;
+}
+.agent-activity-row time {
+  color: var(--faint);
+  font:
+    9px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-failure {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 14px;
+  width: min(640px, calc(100% - 40px));
+  margin: 58px auto;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--rose) 42%, var(--line));
+  border-radius: 6px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+.failure-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+.failure-copy {
+  min-width: 0;
+}
+.failure-kicker {
+  color: var(--rose);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.failure-copy h3 {
+  margin: 7px 0 5px;
+  font-size: 18px;
+}
+.failure-copy > p:not(.diagnostic-export-status) {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.failure-progress {
+  display: grid;
+  gap: 3px;
+  margin-top: 15px;
+  padding: 9px 10px;
+  border-left: 3px solid var(--rose);
+  background: var(--rose-soft);
+  font-size: 10px;
+}
+.failure-progress span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+.failure-details {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.failure-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 17px;
+}
+.failure-sharing-note {
+  display: block;
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.45;
+}
+.diagnostic-export-status {
+  margin: 8px 0 0;
+  color: var(--teal);
+  font-size: 10px;
+}
+.diagnostics-activity {
+  display: grid;
+  gap: 5px;
+  margin: 7px 0 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.45;
+}
 
 /* Theme tokens keep the same layout and component markup legible in either mode. */
 :root {

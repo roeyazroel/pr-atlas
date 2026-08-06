@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentAdapter, AgentAnalysisResult, AnalysisRequest, ProviderAnalysisTask } from "../../shared/contracts";
+import type { AgentAdapter, AgentAnalysisResult, AnalysisProgressEvent, AnalysisRequest, ProviderAnalysisTask } from "../../shared/contracts";
 import { AnalysisService } from "../../electron/backend/service";
 
 const request: AnalysisRequest = { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40), provider: "codex" };
@@ -19,7 +19,7 @@ function runner(files: number, bytes: number) {
     return { stdout: "", stderr: "" };
   }) };
 }
-async function setup(files: number, bytes: number, analyze: AgentAdapter["analyze"], emit: (event: { runId: string }) => void = () => {}) {
+async function setup(files: number, bytes: number, analyze: AgentAdapter["analyze"], emit: (event: AnalysisProgressEvent) => void = () => {}) {
   const root = await mkdirTemp(); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
   await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(worktree, { recursive: true });
   const adapter: AgentAdapter = { id: "codex", displayName: "Test", detect: async () => ({ provider: "codex", displayName: "Test", executable: "test", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze };
@@ -67,6 +67,37 @@ describe("batched service orchestration", () => {
     const analyze = vi.fn(async () => ({ status: "failed" as const, rawOutput: "", logs: [], errors: ["expected"] })); const env = await setup(1, 10, analyze);
     try { await env.service.startAnalysis(request); expect(analyze).toHaveBeenCalledTimes(1); expect((analyze.mock.calls[0] as unknown[])[6]).toBeUndefined(); }
     finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
+  it("streams and persists bounded map and reducer activity", async () => {
+    const events: AnalysisProgressEvent[] = [];
+    const env = await setup(
+      20,
+      50_000,
+      async (_request, _worktree, _input, _signal, _progress, _model, task) =>
+        task?.kind === "map"
+          ? { status: "ready", rawOutput: "{}", logs: [], mapOutput: completeMap(task) }
+          : { status: "ready", rawOutput: "{}", logs: [], document: reducerDocument() as never },
+      (event) => events.push(event),
+    );
+    try {
+      await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true });
+      await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n");
+
+      const result = await env.service.startAnalysis(request);
+      const messages = events.map((event) => event.message);
+      expect(messages).toEqual(expect.arrayContaining([
+        expect.stringMatching(/map batch 1\/\d+ started/i),
+        expect.stringMatching(/map batch 1\/\d+ completed/i),
+        expect.stringMatching(/reducer started/i),
+        expect.stringMatching(/reducer completed/i),
+      ]));
+      expect(result.manifest.activity).toEqual(events.slice(-100));
+      const persisted = JSON.parse(await readFile(resolve(result.artifactDirectory, "manifest.json"), "utf8"));
+      expect(persisted.activity).toEqual(events.slice(-100));
+    } finally {
+      await rm(env.root, { recursive: true, force: true });
+    }
   });
 
   it("does not invoke the reducer after a partial map failure", async () => {

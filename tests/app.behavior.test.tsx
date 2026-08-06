@@ -523,6 +523,14 @@ describe("PR Atlas desktop workflow", () => {
       reviewRequested: false,
     };
     const startAnalysis = vi.fn(() => new Promise<never>(() => undefined));
+    let progressListener:
+      | ((event: {
+          runId: string;
+          stage: "generating" | "validating";
+          message: string;
+          timestamp: string;
+        }) => void)
+      | undefined;
     const api = {
       bootstrap: vi.fn(async () => ({
         account: null,
@@ -545,7 +553,10 @@ describe("PR Atlas desktop workflow", () => {
       listAnalysisRuns: vi.fn(async () => []),
       loadAnalysisRun: vi.fn(async () => null),
       openExternal: vi.fn(async () => true),
-      subscribeAnalysisProgress: vi.fn(() => () => undefined),
+      subscribeAnalysisProgress: vi.fn((listener) => {
+        progressListener = listener;
+        return () => undefined;
+      }),
     };
     Object.defineProperty(window, "prAtlas", {
       configurable: true,
@@ -580,6 +591,21 @@ describe("PR Atlas desktop workflow", () => {
       fireEvent.click(screen.getByRole("button", { name: /continue/i }));
       expect(startAnalysis).toHaveBeenCalledTimes(1);
 
+      act(() => {
+        progressListener?.({
+          runId: "run-live",
+          stage: "generating",
+          message: "Map batch 1/2 started · 10 source units.",
+          timestamp: "2026-08-06T06:28:00.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
+          stage: "validating",
+          message: "Reducer started · combining 2 validated map batches.",
+          timestamp: "2026-08-06T06:29:00.000Z",
+        });
+      });
+
       await act(async () => {
         vi.advanceTimersByTime(5000);
         await Promise.resolve();
@@ -588,7 +614,13 @@ describe("PR Atlas desktop workflow", () => {
       expect(
         screen.getByText(/building your walkthrough/i),
       ).toBeInTheDocument();
-      expect(screen.getByText(/stage 1 of 6/i)).toBeInTheDocument();
+      expect(screen.getByText(/stage 5 of 6/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("log", { name: /agent activity/i }),
+      ).toHaveTextContent("Map batch 1/2 started");
+      expect(
+        screen.getByRole("log", { name: /agent activity/i }),
+      ).toHaveTextContent("Reducer started");
       expect(
         screen.getByText(
           /large pr: 30 files and 1,350 changed lines\. analysis may take several minutes\./i,
@@ -895,6 +927,11 @@ describe("PR Atlas desktop workflow", () => {
       manifest: terminal,
       error: terminal.error,
       logExcerpt: ["stderr: malformed response"],
+      rawOutputExcerpt: "provider result envelope",
+    }));
+    const exportAnalysisDiagnostics = vi.fn(async () => ({
+      saved: true,
+      filePath: "/tmp/pr-atlas-diagnostics.json",
     }));
     const startAnalysis = vi.fn(async () => ({
       runId: terminal.runId,
@@ -939,6 +976,7 @@ describe("PR Atlas desktop workflow", () => {
       listAnalysisRuns: vi.fn(async () => []),
       loadAnalysisRun: vi.fn(async () => null),
       loadAnalysisDiagnostics,
+      exportAnalysisDiagnostics,
       openExternal: vi.fn(async () => true),
       subscribeAnalysisProgress: vi.fn(() => () => undefined),
     };
@@ -962,8 +1000,28 @@ describe("PR Atlas desktop workflow", () => {
       });
       expect(startAnalysis).toHaveBeenCalledTimes(1);
       expect(api.listAnalysisRuns).toHaveBeenCalledTimes(1);
+      const failure = await screen.findByRole("region", {
+        name: /analysis failure/i,
+      });
+      expect(failure).toHaveTextContent(
+        status === "cancelled" ? "Analysis cancelled" : "Analysis failed",
+      );
+      expect(failure).toHaveTextContent(errorCode);
+      expect(failure).toHaveTextContent("Validating output");
       await user.click(
-        screen.getByRole("button", { name: /analysis details/i }),
+        within(failure).getByRole("button", {
+          name: /save diagnostic report/i,
+        }),
+      );
+      expect(exportAnalysisDiagnostics).toHaveBeenCalledWith(
+        repository.fullName,
+        pullRequest.number,
+        terminal.runId,
+      );
+      await user.click(
+        within(failure).getByRole("button", {
+          name: /view analysis details/i,
+        }),
       );
       const diagnostics = await screen.findByRole("region", {
         name: /analysis diagnostics/i,

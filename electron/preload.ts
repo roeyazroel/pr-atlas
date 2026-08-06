@@ -25,7 +25,18 @@ const api: PrAtlasApi = {
     }),
   loadAnalysisRun: (repository, pullNumber, runId) =>
     ipcRenderer.invoke("pr-atlas:load-run", { repository, pullNumber, runId }),
-  loadAnalysisDiagnostics: (repository, pullNumber, runId) => ipcRenderer.invoke("pr-atlas:load-diagnostics", { repository, pullNumber, runId }),
+  loadAnalysisDiagnostics: (repository, pullNumber, runId) =>
+    ipcRenderer.invoke("pr-atlas:load-diagnostics", {
+      repository,
+      pullNumber,
+      runId,
+    }),
+  exportAnalysisDiagnostics: (repository, pullNumber, runId) =>
+    ipcRenderer.invoke("pr-atlas:export-diagnostics", {
+      repository,
+      pullNumber,
+      runId,
+    }),
   getReviewProgress: (repository, pullNumber, runId) =>
     ipcRenderer.invoke("pr-atlas:get-review-progress", {
       repository,

@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { spawn as nodeSpawn } from "node:child_process";
 import { readdirSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { AnalysisService } from "./backend/service.js";
@@ -15,6 +16,10 @@ import {
 } from "./backend/validation.js";
 import { readEvidenceDetail, resolveEvidencePath } from "./backend/evidence.js";
 import { checkForUpdate } from "./backend/update.js";
+import {
+  diagnosticReportFilename,
+  serializeDiagnosticReport,
+} from "./backend/diagnostics.js";
 import {
   downloadUpdateArtifact,
   openDownloadedArtifact,
@@ -206,7 +211,75 @@ function registerIpc(): void {
       input.runId,
     );
   });
-  ipcMain.handle("pr-atlas:load-diagnostics", (_event, payload: unknown) => { const input = payload as { repository?: unknown; pullNumber?: unknown; runId?: unknown }; return validateRepository(input?.repository) && validatePullNumber(input?.pullNumber) && typeof input.runId === "string" && /^[A-Za-z0-9-]{1,80}$/.test(input.runId) ? analysis.loadAnalysisDiagnostics(input.repository, input.pullNumber, input.runId) : null; });
+  ipcMain.handle("pr-atlas:load-diagnostics", (_event, payload: unknown) => {
+    const input = payload as {
+      repository?: unknown;
+      pullNumber?: unknown;
+      runId?: unknown;
+    };
+    return validateRepository(input?.repository) &&
+      validatePullNumber(input?.pullNumber) &&
+      typeof input.runId === "string" &&
+      /^[A-Za-z0-9-]{1,80}$/.test(input.runId)
+      ? analysis.loadAnalysisDiagnostics(
+          input.repository,
+          input.pullNumber,
+          input.runId,
+        )
+      : null;
+  });
+  ipcMain.handle(
+    "pr-atlas:export-diagnostics",
+    async (_event, payload: unknown) => {
+      const input = payload as {
+        repository?: unknown;
+        pullNumber?: unknown;
+        runId?: unknown;
+      };
+      if (
+        !validateRepository(input?.repository) ||
+        !validatePullNumber(input?.pullNumber) ||
+        typeof input.runId !== "string" ||
+        !/^[A-Za-z0-9-]{1,80}$/.test(input.runId)
+      )
+        return { saved: false, error: "Diagnostics are unavailable." };
+      const diagnostics = await analysis.loadAnalysisDiagnostics(
+        input.repository,
+        input.pullNumber,
+        input.runId,
+      );
+      if (!diagnostics)
+        return { saved: false, error: "Diagnostics are unavailable." };
+      const selected = await dialog.showSaveDialog({
+        title: "Save PR Atlas diagnostic report",
+        defaultPath: join(
+          app.getPath("downloads"),
+          diagnosticReportFilename(
+            input.repository,
+            input.pullNumber,
+            input.runId,
+          ),
+        ),
+        filters: [{ name: "JSON diagnostic report", extensions: ["json"] }],
+      });
+      if (selected.canceled || !selected.filePath) return { saved: false };
+      try {
+        await writeFile(
+          selected.filePath,
+          serializeDiagnosticReport(diagnostics, {
+            appVersion: app.getVersion(),
+            platform: process.platform,
+            arch: process.arch,
+          }),
+          { encoding: "utf8", mode: 0o600 },
+        );
+        shell.showItemInFolder(selected.filePath);
+        return { saved: true, filePath: selected.filePath };
+      } catch {
+        return { saved: false, error: "Could not save the diagnostic report." };
+      }
+    },
+  );
   ipcMain.handle("pr-atlas:get-review-progress", (_event, payload: unknown) => {
     const input = payload as {
       repository?: unknown;

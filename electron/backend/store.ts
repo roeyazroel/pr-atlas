@@ -12,6 +12,7 @@ import {
   DEFAULT_ANALYSIS_RUN_CONFIG,
   DEFAULT_RETENTION_SETTINGS,
   type AgentProvider,
+  type AnalysisProgressEvent,
   type AnalysisManifest,
   type AnalysisRunConfig,
   type AnalysisRunResult,
@@ -38,6 +39,38 @@ function isInside(root: string, target: string): boolean {
       relation !== ".." &&
       !relation.includes(`${sep}..${sep}`))
   );
+}
+const analysisStageSet = new Set<AnalysisProgressEvent["stage"]>([
+  "preparing",
+  "collecting",
+  "inspecting",
+  "generating",
+  "validating",
+  "complete",
+]);
+function safeProgressEvent(
+  value: unknown,
+  runId: string,
+): AnalysisProgressEvent | null {
+  if (!value || typeof value !== "object") return null;
+  const event = value as Record<string, unknown>;
+  if (
+    !analysisStageSet.has(event.stage as AnalysisProgressEvent["stage"]) ||
+    typeof event.message !== "string" ||
+    typeof event.timestamp !== "string"
+  )
+    return null;
+  return {
+    runId,
+    stage: event.stage as AnalysisProgressEvent["stage"],
+    message: event.message.slice(0, 1_000),
+    timestamp: event.timestamp,
+  };
+}
+function boundedTextExcerpt(value: string, maximum = 128 * 1024): string {
+  if (value.length <= maximum) return value;
+  const half = Math.floor((maximum - 64) / 2);
+  return `${value.slice(0, half)}\n\n[... provider output truncated ...]\n\n${value.slice(-half)}`;
 }
 export class AnalysisStore {
   readonly root: string;
@@ -264,10 +297,19 @@ export class AnalysisStore {
     } catch {
       /* preserved manifest error is enough */
     }
+    let rawOutputExcerpt = "";
+    try {
+      rawOutputExcerpt = boundedTextExcerpt(
+        await readFile(resolve(directory, "raw-output.txt"), "utf8"),
+      );
+    } catch {
+      /* provider output is optional for preparation failures */
+    }
     return {
       manifest,
       ...(manifest.error ? { error: manifest.error } : {}),
       logExcerpt,
+      rawOutputExcerpt,
     };
   }
   async getReviewProgress(
@@ -638,41 +680,18 @@ export class AnalysisStore {
             }
           : undefined;
       const config = validConfig(manifest.config);
-      const lastProgress =
-        manifest.lastProgress &&
-        typeof manifest.lastProgress === "object" &&
-        [
-          "preparing",
-          "collecting",
-          "inspecting",
-          "generating",
-          "validating",
-          "complete",
-        ].includes(
-          (manifest.lastProgress as { stage?: unknown }).stage as string,
-        ) &&
-        typeof (manifest.lastProgress as { message?: unknown }).message ===
-          "string" &&
-        typeof (manifest.lastProgress as { timestamp?: unknown }).timestamp ===
-          "string"
-          ? {
-              runId: manifest.runId,
-              stage: (
-                manifest.lastProgress as {
-                  stage: AnalysisManifest["lastProgress"] extends infer P
-                    ? P extends { stage: infer S }
-                      ? S
-                      : never
-                    : never;
-                }
-              ).stage,
-              message: (
-                manifest.lastProgress as { message: string }
-              ).message.slice(0, 1_000),
-              timestamp: (manifest.lastProgress as { timestamp: string })
-                .timestamp,
-            }
-          : undefined;
+      const lastProgress = safeProgressEvent(
+        manifest.lastProgress,
+        manifest.runId,
+      );
+      const activity = Array.isArray(manifest.activity)
+        ? manifest.activity
+            .flatMap((event) => {
+              const safe = safeProgressEvent(event, manifest.runId as string);
+              return safe ? [safe] : [];
+            })
+            .slice(-100)
+        : [];
       return {
         runId: manifest.runId,
         repository,
@@ -695,6 +714,7 @@ export class AnalysisStore {
           ? { runtimeVersion: manifest.runtimeVersion.slice(0, 200) }
           : {}),
         ...(lastProgress ? { lastProgress } : {}),
+        ...(activity.length ? { activity } : {}),
         ...(config ? { config } : {}),
         ...(typeof manifest.skillContractVersion === "string"
           ? { skillContractVersion: manifest.skillContractVersion }
