@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/roeyazroel/pr-atlas/compare/v0.6.1...v0.7.0) (2026-08-06)
+
+
+### Features
+
+* configure provider thinking effort ([8d60ecb](https://github.com/roeyazroel/pr-atlas/commit/8d60ecbe556b4424737a9b8b57617465509407b2))
+
 ## [0.6.1](https://github.com/roeyazroel/pr-atlas/compare/v0.6.0...v0.6.1) (2026-08-06)
 
 
