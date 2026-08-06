@@ -174,6 +174,7 @@ describe("analysis store", () => {
     await store.writeManifest(firstDirectory, {
       ...run("run-1"),
       model: "selected-model",
+      effort: "low",
     });
     await store.writeManifest(secondDirectory, run("run-2", "c".repeat(40)));
 
@@ -182,6 +183,7 @@ describe("analysis store", () => {
         runId: "run-1",
         headSha: "b".repeat(40),
         model: "selected-model",
+        effort: "low",
       }),
       expect.objectContaining({ runId: "run-2", headSha: "c".repeat(40) }),
     ]);

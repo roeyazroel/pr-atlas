@@ -179,6 +179,7 @@ export class AnalysisService {
       status: "failed",
       createdAt: new Date().toISOString(),
       ...(request.model ? { model: request.model } : {}),
+      ...(request.effort ? { effort: request.effort } : {}),
       ...(installation?.version
         ? { runtimeVersion: installation.version }
         : {}),

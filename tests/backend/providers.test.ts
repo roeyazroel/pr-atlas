@@ -1268,4 +1268,19 @@ describe("provider-neutral agent adapters", () => {
       /(?:--force|--yolo|--sandbox disabled)/i,
     );
   });
+
+  it.each([
+    ['codex', CodexAdapter, 'codex', 'high', ['exec', '-c', 'model_reasoning_effort="high"']],
+    ['claude', ClaudeAdapter, 'claude', 'xhigh', ['-p', expect.any(String), '--effort', 'xhigh']],
+    ['cursor', CursorAdapter, 'cursor-agent', 'medium', ['-p', expect.any(String), '--model', 'auto[effort=medium]']],
+  ] as const)('applies the selected effort to %s using its documented CLI surface', async (provider, Adapter, executable, effort, expectedPrefix) => {
+    const calls: SpawnCall[] = []
+    const runner = { run: vi.fn(async () => ({ stdout: `${executable} 1.2.3` })) }
+    const adapter = new Adapter(runner, fakeSpawn('{"not":"a walkthrough"}', calls))
+
+    await adapter.analyze({ ...requestFor(provider), effort }, '/worktree', '/input', undefined, progress)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].args.slice(0, expectedPrefix.length)).toEqual(expectedPrefix)
+  });
 });
