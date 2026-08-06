@@ -1006,7 +1006,108 @@ describe("provider-neutral agent adapters", () => {
     expect(response.mapOutput).toEqual(output);
   });
 
-  it.each(["unterminated", "multiple"] as const)(
+  it("extracts one trailing bare map after Cursor result prose", async () => {
+    const output = {
+      taskId: "map-001",
+      observations: [
+        {
+          path: "src/a.ts",
+          segment: 0,
+          summary: 'Changed with a } brace and an escaped "quote".',
+          evidence: [{ path: "src/a.ts", line: 1 }],
+          changeGroups: ["group"],
+          tests: ["test"],
+          flows: ["flow"],
+          limitations: ["limit"],
+        },
+      ],
+    };
+    const raw = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result:
+        "[MODE: FAST]\nI validated the payload against the local rules by hand and am returning only that JSON." +
+        JSON.stringify(output),
+    });
+    const adapter = new CursorAdapter(
+      { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) },
+      fakeSpawn(raw, []),
+    );
+
+    const response = await adapter.analyze(
+      requestFor("cursor"),
+      "/worktree",
+      "/input",
+      undefined,
+      progress,
+      undefined,
+      {
+        kind: "map",
+        id: "map-001",
+        total: 1,
+        assignedPaths: ["src/a.ts"],
+      },
+    );
+
+    expect(response.status).toBe("ready");
+    expect(response.mapOutput).toEqual(output);
+  });
+
+  it.each(["trailing prose", "trailing decoy"] as const)(
+    "rejects a bare Cursor map with %s",
+    async (shape) => {
+      const output = {
+        taskId: "map-001",
+        observations: [
+          {
+            path: "src/a.ts",
+            segment: 0,
+            summary: "Changed.",
+            evidence: [{ path: "src/a.ts", line: 1 }],
+            changeGroups: ["group"],
+            tests: ["test"],
+            flows: ["flow"],
+            limitations: ["limit"],
+          },
+        ],
+      };
+      const suffix =
+        shape === "trailing prose"
+          ? "\nI added a final note."
+          : `\n${JSON.stringify({ note: "decoy" })}`;
+      const adapter = new CursorAdapter(
+        { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) },
+        fakeSpawn(
+          JSON.stringify({
+            type: "result",
+            result: `Validated.\n${JSON.stringify(output)}${suffix}`,
+          }),
+          [],
+        ),
+      );
+
+      const response = await adapter.analyze(
+        requestFor("cursor"),
+        "/worktree",
+        "/input",
+        undefined,
+        progress,
+        undefined,
+        {
+          kind: "map",
+          id: "map-001",
+          total: 1,
+          assignedPaths: ["src/a.ts"],
+        },
+      );
+
+      expect(response.status).toBe("invalid");
+      expect(response.mapOutput).toBeUndefined();
+    },
+  );
+
+  it.each(["unterminated", "generic unterminated", "multiple"] as const)(
     "rejects %s fenced map output from a Cursor result envelope",
     async (shape) => {
       const output = {
@@ -1025,9 +1126,12 @@ describe("provider-neutral agent adapters", () => {
         ],
       };
       const fenced = `\`\`\`json\n${JSON.stringify(output)}\n\`\`\``;
-      const result = shape === "unterminated"
-        ? fenced.slice(0, -3)
-        : `\`\`\`json\n{"note":"decoy"}\n\`\`\`\n${fenced}`;
+      const result =
+        shape === "unterminated"
+          ? fenced.slice(0, -3)
+          : shape === "generic unterminated"
+            ? `\`\`\`\n${JSON.stringify(output)}`
+            : `\`\`\`json\n{"note":"decoy"}\n\`\`\`\n${fenced}`;
       const adapter = new CursorAdapter(
         { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) },
         fakeSpawn(JSON.stringify({ type: "result", result }), []),

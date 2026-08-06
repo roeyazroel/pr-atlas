@@ -1068,6 +1068,44 @@ function fencedJsonCandidate(value: string): unknown {
   return undefined;
 }
 
+function trailingJsonCandidate(value: string): unknown {
+  let end = value.length - 1;
+  while (/\s/.test(value[end] ?? "")) end -= 1;
+  if (value[end] !== "}") return undefined;
+  const stack: string[] = [];
+  let inString = false;
+  for (let index = end; index >= 0; index -= 1) {
+    const character = value[index];
+    if (character === '"') {
+      let backslashes = 0;
+      for (
+        let cursor = index - 1;
+        cursor >= 0 && value[cursor] === "\\";
+        cursor -= 1
+      )
+        backslashes += 1;
+      if (backslashes % 2 === 0) inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (character === "}") stack.push("{");
+    else if (character === "]") stack.push("[");
+    else if (character === "{" || character === "[") {
+      if (stack.pop() !== character) return undefined;
+      if (stack.length !== 0) continue;
+      if (character !== "{") return undefined;
+      const precedingFenceCount = value.slice(0, index).match(/```/g)?.length ?? 0;
+      if (precedingFenceCount % 2 !== 0) return undefined;
+      try {
+        return JSON.parse(value.slice(index, end + 1));
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 function modelFromOutput(
   raw: string,
   source: NodeJS.ProcessEnv = process.env,
@@ -1110,7 +1148,9 @@ function parseMapProviderOutput(raw: string, taskId: string): unknown {
       const nested = typeof value === "string"
         ? (() => {
             try { return unwrapOutput(JSON.parse(value)); }
-            catch { return fencedJsonCandidate(value); }
+            catch {
+              return fencedJsonCandidate(value) ?? trailingJsonCandidate(value);
+            }
           })()
         : value;
       if (isMapShaped(nested) && nested.taskId === taskId) latest = nested;
