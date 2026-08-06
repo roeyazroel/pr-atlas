@@ -530,6 +530,20 @@ describe("analysis store", () => {
         message: "Validating output",
         timestamp: "2026-08-04T19:01:00.000Z",
       },
+      activity: [
+        {
+          runId: "run-failed",
+          stage: "generating",
+          message: "Map batch 1/2 started · 10 source units.",
+          timestamp: "2026-08-04T19:00:30.000Z",
+        },
+        {
+          runId: "run-failed",
+          stage: "validating",
+          message: "Validating output",
+          timestamp: "2026-08-04T19:01:00.000Z",
+        },
+      ],
       error: {
         code: "CLAUDE_FAILED",
         message: "Provider failed.",
@@ -541,6 +555,11 @@ describe("analysis store", () => {
       "logs.jsonl",
       `${JSON.stringify({ message: "first line" })}\n${JSON.stringify({ message: "second line" })}`,
     );
+    await store.writeText(
+      directory,
+      "raw-output.txt",
+      "Cursor result envelope with a fenced provider response",
+    );
 
     await expect(
       store.loadDiagnostics("example/backend", 481, "run-failed"),
@@ -548,9 +567,14 @@ describe("analysis store", () => {
       manifest: {
         runtimeVersion: "1.2.3",
         lastProgress: { stage: "validating", message: "Validating output" },
+        activity: [
+          expect.objectContaining({ message: "Map batch 1/2 started · 10 source units." }),
+          expect.objectContaining({ message: "Validating output" }),
+        ],
       },
       error: { code: "CLAUDE_FAILED", details: ["exit code 1"] },
       logExcerpt: ["first line", "second line"],
+      rawOutputExcerpt: "Cursor result envelope with a fenced provider response",
     });
   });
 

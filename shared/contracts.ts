@@ -389,6 +389,7 @@ export interface AnalysisManifest {
   model?: string;
   runtimeVersion?: string;
   lastProgress?: AnalysisProgressEvent;
+  activity?: AnalysisProgressEvent[];
   skillContractVersion?: string;
   skillReferenceUrl?: string;
   config?: AnalysisRunConfig;
@@ -419,6 +420,12 @@ export interface AnalysisDiagnostics {
   manifest: AnalysisManifest;
   error?: SafeDiagnostic;
   logExcerpt: string[];
+  rawOutputExcerpt: string;
+}
+export interface DiagnosticExportResult {
+  saved: boolean;
+  filePath?: string;
+  error?: string;
 }
 
 export type ReviewProgressStatus =
@@ -477,6 +484,11 @@ export interface PrAtlasApi {
     pullNumber: number,
     runId: string,
   ) => Promise<AnalysisDiagnostics | null>;
+  exportAnalysisDiagnostics?: (
+    repository: string,
+    pullNumber: number,
+    runId: string,
+  ) => Promise<DiagnosticExportResult>;
   getReviewProgress?: (
     repository: string,
     pullNumber: number,
