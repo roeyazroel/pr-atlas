@@ -150,6 +150,11 @@ export type AnalysisStage =
   | "collecting"
   | "inspecting"
   | "generating"
+  | "anchoring"
+  | "walkthrough"
+  | "tests-risks"
+  | "flows"
+  | "assembling"
   | "validating"
   | "complete";
 
@@ -167,20 +172,38 @@ export interface AgentAnalysisResult {
   logs: string[];
   model?: string;
   errors?: string[];
-  /** Validated, provider-neutral intermediate result for a batched map task. */
-  mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
+  /** Validated, provider-neutral intermediate result for anchored large-PR work. */
+  taskOutput?: AnchoredTaskOutput;
 }
 
+export type AnchoredTaskKind = "anchor" | "walkthrough" | "tests-risks" | "flows";
+export type AnchorDomainId = "production-path" | "experimental-pocs" | "migration-rollback" | "updater-installer" | "runtime-packaging" | "reviewer-workflow";
+export type AnchorDomainStatus = "changed" | "unchanged-relevant" | "not-evidenced";
+export interface ProviderEvidenceReference { path: string; line: number | null; }
+export interface SemanticAnchorGroup {
+  id: string; title: string; summary: string; motivation: string;
+  previousBehavior: string; newBehavior: string; attention: "low" | "medium" | "high";
+  evidence: ProviderEvidenceReference[];
+}
+export interface SemanticAnchorDomain {
+  id: AnchorDomainId; status: AnchorDomainStatus; rationale: string;
+  evidence: ProviderEvidenceReference[]; changeGroupIds: string[];
+}
+export interface SemanticAnchor { taskId: string; domains: SemanticAnchorDomain[]; changeGroups: SemanticAnchorGroup[]; }
+export interface SpecialistCoverage { domainId: AnchorDomainId; status: "covered" | "not-applicable"; rationale: string; }
+export interface AnchoredSpecialistOutput {
+  taskId: string; coverage: SpecialistCoverage[];
+  /** Task-specific payload. It is deliberately not a WalkthroughDocument. */
+  content: Record<string, unknown>;
+}
+export type AnchoredTaskOutput = SemanticAnchor | AnchoredSpecialistOutput;
+
 export interface ProviderAnalysisTask {
-  kind: "map" | "reduce";
+  kind: AnchoredTaskKind;
   id: string;
   total: number;
-  /** Trusted, platform-specific command for the bundled Electron Node runtime. */
-  validatorCommand?: string;
-  /** Trusted bundled Electron executable injected only into the provider child environment. */
-  validatorRuntime?: string;
-  assignedPaths?: string[];
-  assignedUnits?: Array<{ path: string; segment: number }>;
+  /** The accepted semantic source of truth supplied verbatim to every specialist. */
+  anchor?: SemanticAnchor;
 }
 
 /** Provider-neutral process boundary used by the main-process orchestration. */

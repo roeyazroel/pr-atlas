@@ -45,6 +45,11 @@ const analysisStageSet = new Set<AnalysisProgressEvent["stage"]>([
   "collecting",
   "inspecting",
   "generating",
+  "anchoring",
+  "walkthrough",
+  "tests-risks",
+  "flows",
+  "assembling",
   "validating",
   "complete",
 ]);

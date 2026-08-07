@@ -38,8 +38,8 @@ import {
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
-import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
-import { buildBundledValidatorCommand, buildWindowsValidatorLauncher, validatorLauncherName } from "./validator-command.js";
+import { assembleAnchoredDocument, parseGitDiffSections, shouldUseAnchoredAnalysis, taskOutputFrom, validateAnchoredTaskOutput } from "./anchored-analysis.js";
+import type { AnchoredSpecialistOutput, SemanticAnchor } from "../../shared/contracts.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -58,6 +58,7 @@ function flattenFilePages(value: unknown): Array<{ filename: string; patch?: str
     ? [value as { filename: string; patch?: string; additions?: number; deletions?: number }]
     : [];
 }
+type ChangedDiff = { path: string; diff: string; additions?: number; deletions?: number };
 async function readChangedDiffs(inputDirectory: string): Promise<ChangedDiff[]> {
   const [raw, diff] = await Promise.all([readFile(resolve(inputDirectory, "files.json"), "utf8"), readFile(resolve(inputDirectory, "diff.patch"), "utf8")]);
   const sections = parseGitDiffSections(diff);
@@ -69,10 +70,10 @@ async function readChangedDiffs(inputDirectory: string): Promise<ChangedDiff[]> 
   }
   return [...unique.values()];
 }
-async function writeBatchJson(directory: string, name: string, value: unknown): Promise<void> {
-  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unsafe batch artifact name.");
-  const target = resolve(directory, "batches", name);
-  if (!inside(directory, target)) throw new Error("Unsafe batch artifact path.");
+async function writeAnchoredJson(directory: string, name: string, value: unknown): Promise<void> {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unsafe anchored artifact name.");
+  const target = resolve(directory, "anchored", name);
+  if (!inside(directory, target)) throw new Error("Unsafe anchored artifact path.");
   await mkdir(resolve(target, ".."), { recursive: true });
   await writeFile(target, JSON.stringify(value, null, 2), "utf8");
 }
@@ -513,79 +514,41 @@ export class AnalysisService {
   ): Promise<AgentAnalysisResult> {
     const files = await readChangedDiffs(inputDirectory);
     const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
-    if (!shouldBatchAnalysis({ files: files.length, changes }))
+    if (!shouldUseAnchoredAnalysis({ files: files.length, changes }))
       return adapter.analyze(request, worktree, inputDirectory, signal, progress);
-    const plan = buildBatchPlan(files);
-    if (!plan.coverage.complete)
-      return { status: "invalid", rawOutput: "", logs: [], errors: ["Batch planner did not cover every changed file."] };
-    const planManifest = {
-      coverage: plan.coverage,
-      sourceFiles: plan.sourceFiles,
-      chunks: plan.chunks.map((task) => ({ id: task.id, bytes: task.bytes, subsystems: task.subsystems, units: task.files.map(({ path, segment, bytes }) => ({ path, segment, bytes })) })),
-    };
-    await writeBatchJson(directory, "plan.json", planManifest);
     const execution = new AbortController(); let timedOut = false;
     const abort = () => execution.abort(); signal.addEventListener("abort", abort, { once: true });
     const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
     try {
-    progress("generating", `Generating ${plan.chunks.length} map batches (maximum ${MAX_BATCH_CONCURRENCY} concurrent).`);
-    const outputs: NonNullable<AgentAnalysisResult["mapOutput"]>[] = [];
-    const responses: AgentAnalysisResult[] = [];
-    let cursor = 0; let stop = false;
-    const worker = async () => {
-      while (!execution.signal.aborted && !stop) {
-        const task = plan.chunks[cursor++];
-        if (!task) return;
-        const taskNumber = plan.chunks.indexOf(task) + 1;
-        progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} started · ${task.files.length} source units.`);
-        const scope = resolve(directory, "batches", task.id);
-        await mkdir(scope, { recursive: true });
-        await writeFile(resolve(scope, "files.json"), JSON.stringify(task.files), "utf8");
-        await writeFile(resolve(scope, "diff.patch"), task.files.map((file) => file.diff).join("\n"), "utf8");
-        const validatorFile = "validate-map-output.mjs"; const launcherFile = validatorLauncherName("map");
-        await writeFile(resolve(scope, validatorFile), buildBatchMapValidatorScript(task), "utf8");
-        if (process.platform === "win32") await writeFile(resolve(scope, launcherFile), buildWindowsValidatorLauncher(validatorFile), "utf8");
-        const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(validatorFile, process.platform, launcherFile), assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
-        const validated = response.status === "ready" && response.mapOutput
-          ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)
-          : undefined;
-        const accepted = validated?.valid ? validated.output : undefined;
-        responses.push(accepted ? response : response.status === "ready" ? { ...response, status: "invalid", errors: validated?.errors ?? ["Map output was missing."] } : response);
-        if (!accepted) {
-          progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} failed validation.`);
-          stop = true; execution.abort(); return;
-        }
-        outputs.push(accepted);
-        await writeBatchJson(directory, `${task.id}.output.json`, accepted);
-        progress("generating", `Map batch ${taskNumber}/${plan.chunks.length} completed · ${accepted.observations.length} observations validated.`);
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(MAX_BATCH_CONCURRENCY, plan.chunks.length) }, worker));
-    const failed = responses.find((response) => response.status !== "ready" || !response.mapOutput);
-    if (signal.aborted || failed || outputs.length !== plan.chunks.length)
-      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
-    const ordered = plan.chunks.map((task) => outputs.find((output) => output.taskId === task.id)!);
-    const expectedUnits = plan.chunks.flatMap((task) => task.files.map((file) => `${file.path}:${file.segment}`)).sort();
-    const actualUnits = ordered.flatMap((output) => output.observations.map((item) => `${item.path}:${item.segment}`)).sort();
-    if (expectedUnits.length !== actualUnits.length || expectedUnits.some((unit, index) => unit !== actualUnits[index]))
-      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: ["Validated maps did not cover planned evidence units exactly once."] };
-    await writeBatchJson(directory, "map-results.json", ordered);
-    const reduceScope = resolve(directory, "batches", "reduce");
-    await mkdir(reduceScope, { recursive: true });
-    await writeFile(resolve(reduceScope, "map-results.json"), JSON.stringify(ordered), "utf8");
-    await writeFile(resolve(reduceScope, "plan.json"), JSON.stringify(planManifest), "utf8");
-    const reduceValidatorFile = "validate-reduce-output.mjs"; const reduceLauncherFile = validatorLauncherName("reduce");
-    await writeFile(resolve(reduceScope, reduceValidatorFile), buildBatchReducerValidatorScript(), "utf8");
-    if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
-    await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
-    await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
-    progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
-    const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
-    progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
-    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };
-    return timedOut
-      ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }
-      : combined;
+    progress("anchoring", "Semantic anchor started · classifying the PR once.");
+    const anchorTask = { kind: "anchor", id: "anchor", total: 1 } as const;
+    const anchorResponse = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, anchorTask);
+    const anchorValidation = anchorResponse.status === "ready" && taskOutputFrom(anchorResponse)
+      ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(anchorResponse)), anchorTask) : undefined;
+    const anchor = anchorValidation?.valid ? anchorValidation.output as SemanticAnchor : undefined;
+    if (!anchor) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (anchorResponse.status === "ready" ? "invalid" : anchorResponse.status), rawOutput: anchorResponse.rawOutput, logs: anchorResponse.logs, errors: timedOut ? ["Analysis timed out before semantic anchor completed."] : anchorResponse.errors ?? anchorValidation?.errors ?? ["Semantic anchor was missing."] };
+    await writeAnchoredJson(directory, "anchor.output.json", anchor);
+    progress("anchoring", "Semantic anchor completed and validated.");
+    const tasks = ["walkthrough", "tests-risks", "flows"] as const;
+    const stage = { walkthrough: "walkthrough", "tests-risks": "tests-risks", flows: "flows" } as const;
+    progress("walkthrough", "Walkthrough and reviews specialist started."); progress("tests-risks", "Tests and risks specialist started."); progress("flows", "Flows specialist started.");
+    const responses = await Promise.all(tasks.map(async (kind) => {
+      const task = { kind, id: kind, total: 3, anchor } as const;
+      const response = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, task);
+      const checked = response.status === "ready" && taskOutputFrom(response) ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(response)), task) : undefined;
+      const output = checked?.valid ? checked.output as AnchoredSpecialistOutput : undefined;
+      if (output) await writeAnchoredJson(directory, `${kind}.output.json`, output);
+      progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation.`);
+      return { kind, response, output, errors: checked?.errors };
+    }));
+    const failed = responses.find((item) => !item.output);
+    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: [anchorResponse, ...responses.map((item) => item.response)].map((item) => item.rawOutput).join("\n"), logs: [anchorResponse, ...responses.map((item) => item.response)].flatMap((item) => item.logs), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
+    progress("assembling", "Deterministically assembling anchored specialist output.");
+    const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"walkthrough" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
+    const assembled = assembleAnchoredDocument(request, anchor, specialistMap);
+    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: [anchorResponse, ...responses.map((item) => item.response)].map((item) => item.rawOutput).join("\n"), logs: [anchorResponse, ...responses.map((item) => item.response)].flatMap((item) => item.logs), errors: assembled.errors };
+    progress("validating", "Validating deterministic anchored walkthrough assembly.");
+    return { status: "ready", document: assembled.document, rawOutput: [anchorResponse, ...responses.map((item) => item.response)].map((item) => item.rawOutput).join("\n"), logs: [anchorResponse, ...responses.map((item) => item.response)].flatMap((item) => item.logs) };
     } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); }
   }
   private async collectInputs(

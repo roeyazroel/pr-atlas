@@ -1604,6 +1604,10 @@ function App() {
               stage:
                 event.stage === "complete"
                   ? analysisStages.length - 1
+                  : ["anchoring", "walkthrough", "tests-risks", "flows"].includes(event.stage)
+                    ? 3
+                    : event.stage === "assembling"
+                      ? 4
                   : Math.max(
                       0,
                       [
