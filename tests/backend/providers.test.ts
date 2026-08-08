@@ -391,6 +391,7 @@ describe("coordinator provider bootstrap", () => {
     const claudeTools = claudeCalls[0].args[claudeCalls[0].args.indexOf("--allowedTools") + 1];
     expect(claudeTools).toContain("Read,Grep,Glob,Bash");
     expect(claudeTools).toContain("mcp__atlas__get_pr_context");
+    expect(claudeTools).toContain("mcp__atlas__preflight_result");
     expect(claudeTools).toContain("mcp__atlas__submit_result");
     expect(claudeCalls[0].options.env).toMatchObject({ ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, ELECTRON_RUN_AS_NODE: "1" });
     expect(claudeCalls[0].args[claudeCalls[0].args.indexOf("--mcp-config") + 1]).toBe(claudeCalls[0].args[claudeCalls[0].args.indexOf("--settings") + 1]);
