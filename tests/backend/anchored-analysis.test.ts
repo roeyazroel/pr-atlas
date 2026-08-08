@@ -147,6 +147,8 @@ describe("anchored provider contracts", () => {
       expect(prompt).toMatch(/Never return a complete walkthrough/i);
       expect(prompt).toMatch(/executing through a live provider process/i);
       expect(prompt).toMatch(/task authentication/i);
+      const coordinatorPrompt = buildAnalysisPrompt(request, "/input", { ...task, coordinator: { url: "http://127.0.0.1:1", token: "task-token", shimPath: "/atlas/coordinator-mcp.cjs", submitted: () => null } } as ProviderAnalysisTask);
+      expect(coordinatorPrompt).toMatch(/preflight_result.*before.*submit/i);
       if (kind === "flows") {
         expect(prompt).toMatch(/directly required by the changed runtime path/i);
         expect(prompt).toMatch(/exclude unrelated unchanged concepts/i);

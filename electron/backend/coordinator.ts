@@ -12,6 +12,7 @@ import { anchoredSchemaForProvider, validateAnchoredTaskOutput } from "./anchore
 
 const TASKS: readonly AnchoredTaskKind[] = ["anchor", "walkthrough", "tests-risks", "flows"];
 const MAX_ATOMIC_SUBMISSIONS = 2;
+const MAX_PREFLIGHT_CHECKS = 3;
 const MAX_COORDINATOR_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_PROGRESS_UPDATES = 20;
 const MAX_PROGRESS_DETAIL_CHARS = 1_000;
@@ -19,6 +20,7 @@ type Identity = { repository: string; pullNumber: number; baseSha: string; headS
 type TaskRecord = { kind: AnchoredTaskKind; id: string; token: string };
 type EvidenceValidation = (reference: { path: string; line: number; role: "changed" | "unchanged-context" }) => Promise<{ valid: boolean; errors: string[] }>;
 type Submission = { digest: string; response?: CoordinatorSubmitResponse; errors?: string[] };
+type CandidateValidation = { valid: true; output: AnchoredTaskOutput } | { valid: false; errors: string[] };
 export type CoordinatorSubmitResponse = { accepted: true; taskId: string; snapshotVersion: number; idempotent?: true };
 type PrContext = { pullRequest: unknown; reviewThreads: unknown[]; reviews: unknown[]; issueComments: unknown[]; reviewComments: unknown[] };
 
@@ -70,6 +72,7 @@ export class AtlasApiCoordinator {
   private readonly byToken = new Map<string, TaskRecord>();
   private readonly results = new Map<string, AnchoredTaskOutput>();
   private readonly attempts = new Map<string, number>();
+  private readonly preflightChecks = new Map<string, number>();
   private readonly progressUpdates = new Map<string, number>();
   private readonly submissions = new Map<string, Submission>();
   private readonly inflight = new Map<string, Promise<CoordinatorSubmitResponse>>();
@@ -87,7 +90,7 @@ export class AtlasApiCoordinator {
       const task = { kind, id: kind, token: randomBytes(32).toString("base64url") };
       this.tasks.set(task.id, task); this.byToken.set(task.token, task);
       this.redactionSecrets.add(task.token);
-      this.attempts.set(task.id, 0); this.progressUpdates.set(task.id, 0); this.progress.set(task.id, { state: "pending", updatedAt: new Date().toISOString() });
+      this.attempts.set(task.id, 0); this.preflightChecks.set(task.id, 0); this.progressUpdates.set(task.id, 0); this.progress.set(task.id, { state: "pending", updatedAt: new Date().toISOString() });
     }
   }
 
@@ -113,6 +116,7 @@ export class AtlasApiCoordinator {
       identity: clone(this.identity),
       snapshotVersion: this.snapshotVersion,
       atomicSubmission: this.submissionStats(record.kind),
+      preflight: { checks: this.preflightChecks.get(record.id) ?? 0, remainingChecks: MAX_PREFLIGHT_CHECKS - (this.preflightChecks.get(record.id) ?? 0) },
       prompt: "Use only read-only exact-head repository tools. Discover the repository yourself. Do not request raw diffs, changed-path lists, saved baselines, result paths, or command allowlists. Submit only the strict task result.",
       ...(this.validationFailures.has(record.id) ? { lastValidationFailure: clone(this.validationFailures.get(record.id)!) } : {}),
     };
@@ -141,6 +145,16 @@ export class AtlasApiCoordinator {
     const captured = reference?.role !== "changed" || this.evidencePaths.size === 0 || this.evidencePaths.has(reference?.path);
     if (!structural || !captured) return { valid: false, errors: ["evidence must be a captured exact-head path with a positive line or null"] };
     return this.evidenceValidator ? this.evidenceValidator(reference) : { valid: true, errors: [] };
+  }
+  async preflight(token: string, result: unknown): Promise<{ valid: boolean; errors: string[] }> {
+    const task = this.requireTask(token);
+    if (this.results.has(task.id)) throw new Error("task already settled");
+    const checks = this.preflightChecks.get(task.id) ?? 0;
+    if (checks >= MAX_PREFLIGHT_CHECKS) throw new Error("preflight check limit exceeded");
+    this.preflightChecks.set(task.id, checks + 1);
+    await this.persistProgress();
+    const checked = await this.validateCandidate(task, this.sanitizeProvider(result));
+    return checked.valid ? { valid: true, errors: [] } : { valid: false, errors: checked.errors.slice(0, 20) };
   }
   async submit(token: string, idempotencyKey: string, result: unknown): Promise<CoordinatorSubmitResponse> {
     const task = this.requireTask(token);
@@ -174,43 +188,13 @@ export class AtlasApiCoordinator {
         throw new Error(error);
       }
       this.attempts.set(task.id, used + 1);
-      const protocol: ProviderAnalysisTask = task.kind === "anchor"
-        ? { kind: "anchor", id: "anchor", total: 1 }
-        : { kind: task.kind, id: task.id, total: 3, anchor: this.results.get("anchor") as SemanticAnchor };
-      const checked = validateAnchoredTaskOutput(sanitized, protocol);
-      if (!checked.valid || !checked.output) {
+      const checked = await this.validateCandidate(task, sanitized);
+      if (!checked.valid) {
         this.submissions.set(key, { digest: payload, errors: checked.errors });
         this.validationFailures.set(task.id, { result: clone(sanitized), errors: checked.errors.slice(0, 20) });
         await this.audit("submit_result_rejected", { taskId: task.id, errors: checked.errors });
         throw new Error(checked.errors.join("; "));
       }
-      if (task.kind === "anchor" && (this.evidencePaths.size > 0 || this.evidenceHunks.size > 0)) {
-        const covered = changedEvidenceLines((checked.output as SemanticAnchor).changeGroups);
-        const errors: string[] = [];
-        const missingPaths = [...this.evidencePaths].filter((path) => !covered.has(path)).sort();
-        if (missingPaths.length > 0) {
-          const shown = missingPaths.slice(0, 20);
-          errors.push(`Anchor is missing changed evidence for captured changed paths: ${shown.join(", ")}${missingPaths.length > shown.length ? `, and ${missingPaths.length - shown.length} more` : ""}.`);
-        }
-        const missingHunks = [...this.evidenceHunks].flatMap(([path, hunks]) => hunks.filter((hunk) => ![...(covered.get(path) ?? [])].some((line) => hunk.has(line))).map((hunk) => {
-          const ordered = [...hunk].sort((left, right) => left - right);
-          return `${path}:${ordered[0]}${ordered.length > 1 ? `-${ordered.at(-1)}` : ""}`;
-        })).sort();
-        if (missingHunks.length > 0) {
-          const shown = missingHunks.slice(0, 20);
-          errors.push(`Anchor is missing changed evidence for captured changed hunks: ${shown.join(", ")}${missingHunks.length > shown.length ? `, and ${missingHunks.length - shown.length} more` : ""}.`);
-        }
-        if (errors.length > 0) {
-          this.submissions.set(key, { digest: payload, errors });
-          this.validationFailures.set(task.id, { result: clone(sanitized), errors: errors.slice(0, 20) });
-          await this.audit("submit_result_rejected", { taskId: task.id, errors });
-          throw new Error(errors.join("; "));
-        }
-      }
-      const evidenceErrors: string[] = [];
-      const collect = async (value: unknown): Promise<void> => { if (Array.isArray(value)) await Promise.all(value.map(collect)); else if (value && typeof value === "object") for (const [key, item] of Object.entries(value as Record<string, unknown>)) { if ((key === "evidence" || key === "evidenceRefs") && Array.isArray(item)) for (const ref of item) { const checkedEvidence = await this.validateEvidence(task.token, ref as { path: string; line: number; role: "changed" | "unchanged-context" }); if (!checkedEvidence.valid) evidenceErrors.push(...checkedEvidence.errors); } else await collect(item); } };
-      await collect(checked.output);
-      if (evidenceErrors.length) { this.submissions.set(key, { digest: payload, errors: evidenceErrors }); this.validationFailures.set(task.id, { result: clone(sanitized), errors: evidenceErrors.slice(0, 20) }); await this.audit("submit_result_rejected", { taskId: task.id, errors: evidenceErrors }); throw new Error(evidenceErrors.join("; ")); }
       await this.persistResult(task.id, checked.output);
       this.results.set(task.id, clone(checked.output));
       this.validationFailures.delete(task.id);
@@ -230,11 +214,38 @@ export class AtlasApiCoordinator {
     this.inflight.set(key, work);
     try { return await work; } finally { this.inflight.delete(key); }
   }
+  private async validateCandidate(task: TaskRecord, value: unknown): Promise<CandidateValidation> {
+      const protocol: ProviderAnalysisTask = task.kind === "anchor"
+        ? { kind: "anchor", id: "anchor", total: 1 }
+        : { kind: task.kind, id: task.id, total: 3, anchor: this.results.get("anchor") as SemanticAnchor };
+      const checked = validateAnchoredTaskOutput(value, protocol);
+      if (!checked.valid || !checked.output) return { valid: false, errors: checked.errors };
+      const errors: string[] = [];
+      if (task.kind === "anchor" && (this.evidencePaths.size > 0 || this.evidenceHunks.size > 0)) {
+        const covered = changedEvidenceLines((checked.output as SemanticAnchor).changeGroups);
+        const missingPaths = [...this.evidencePaths].filter((path) => !covered.has(path)).sort();
+        if (missingPaths.length > 0) {
+          const shown = missingPaths.slice(0, 20);
+          errors.push(`Anchor is missing changed evidence for captured changed paths: ${shown.join(", ")}${missingPaths.length > shown.length ? `, and ${missingPaths.length - shown.length} more` : ""}.`);
+        }
+        const missingHunks = [...this.evidenceHunks].flatMap(([path, hunks]) => hunks.filter((hunk) => ![...(covered.get(path) ?? [])].some((line) => hunk.has(line))).map((hunk) => {
+          const ordered = [...hunk].sort((left, right) => left - right);
+          return `${path}:${ordered[0]}${ordered.length > 1 ? `-${ordered.at(-1)}` : ""}`;
+        })).sort();
+        if (missingHunks.length > 0) {
+          const shown = missingHunks.slice(0, 20);
+          errors.push(`Anchor is missing changed evidence for captured changed hunks: ${shown.join(", ")}${missingHunks.length > shown.length ? `, and ${missingHunks.length - shown.length} more` : ""}.`);
+        }
+      }
+      const collect = async (candidate: unknown): Promise<void> => { if (Array.isArray(candidate)) await Promise.all(candidate.map(collect)); else if (candidate && typeof candidate === "object") for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) { if ((key === "evidence" || key === "evidenceRefs") && Array.isArray(item)) for (const ref of item) { const checkedEvidence = await this.validateEvidence(task.token, ref as { path: string; line: number; role: "changed" | "unchanged-context" }); if (!checkedEvidence.valid) errors.push(...checkedEvidence.errors); } else await collect(item); } };
+      await collect(checked.output);
+      return errors.length > 0 ? { valid: false, errors } : { valid: true, output: checked.output };
+  }
   private sanitizeProvider(value: unknown): unknown { return redactSecrets(this.sanitize(value), this.redactionSecrets); }
   private requireTask(token: string): TaskRecord { const task = this.byToken.get(token); if (!task) throw new Error("invalid task bearer token"); return task; }
   private async serial<T>(work: () => Promise<T>): Promise<T> { const current = this.transaction.then(work); this.transaction = current.then(() => undefined, () => undefined); return current; }
   private async audit(event: string, payload: unknown) { const root = join(this.directory, "coordinator"); await mkdir(root, { recursive: true }); await appendFile(join(root, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event, payload: this.sanitizeProvider(payload) })}\n`); }
-  private async persistProgress() { const root = join(this.directory, "coordinator"); await mkdir(root, { recursive: true }); const value = { at: new Date().toISOString(), tasks: Object.fromEntries(this.progress), atomicSubmissions: Object.fromEntries(TASKS.map((id) => [id, this.submissionStats(id)])) }; await appendFile(join(root, "progress.jsonl"), `${JSON.stringify(value)}\n`); const target = join(root, "progress.json"); const temporary = `${target}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temporary, JSON.stringify(value, null, 2)); await rename(temporary, target); }
+  private async persistProgress() { const root = join(this.directory, "coordinator"); await mkdir(root, { recursive: true }); const value = { at: new Date().toISOString(), tasks: Object.fromEntries(this.progress), atomicSubmissions: Object.fromEntries(TASKS.map((id) => [id, this.submissionStats(id)])), preflightChecks: Object.fromEntries(TASKS.map((id) => { const checks = this.preflightChecks.get(id) ?? 0; return [id, { checks, remainingChecks: MAX_PREFLIGHT_CHECKS - checks }]; })) }; await appendFile(join(root, "progress.jsonl"), `${JSON.stringify(value)}\n`); const target = join(root, "progress.json"); const temporary = `${target}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temporary, JSON.stringify(value, null, 2)); await rename(temporary, target); }
   private async persistResult(taskId: string, result: AnchoredTaskOutput) { const root = join(this.directory, "coordinator", "results"); await mkdir(root, { recursive: true }); const target = join(root, `${taskId}.json`); const temporary = `${target}.${randomBytes(6).toString("hex")}.tmp`; await writeFile(temporary, JSON.stringify(result, null, 2)); await rename(temporary, target); }
 }
 
@@ -261,7 +272,7 @@ export async function startAtlasCoordinator(coordinator: AtlasApiCoordinator): P
       const token = request.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]; if (!token) throw new Error("missing bearer token");
       const body = request.method === "POST" ? await readBody(request) as Record<string, unknown> : {};
       const route = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
-      const value = route === "/v1/get_task" ? coordinator.getTask(token) : route === "/v1/get_anchor" ? coordinator.getAnchor(token) : route === "/v1/get_pr_context" ? coordinator.getPrContext(token) : route === "/v1/validate_evidence" ? await coordinator.validateEvidence(token, body.evidence as { path: string; line: number; role: "changed" | "unchanged-context" }) : route === "/v1/report_progress" ? await coordinator.reportProgress(token, body as { state: "pending" | "running" | "complete" | "failed"; detail?: string }) : route === "/v1/submit_result" ? await coordinator.submit(token, body.idempotencyKey as string, body.result) : (() => { throw new Error("unknown coordinator route"); })();
+      const value = route === "/v1/get_task" ? coordinator.getTask(token) : route === "/v1/get_anchor" ? coordinator.getAnchor(token) : route === "/v1/get_pr_context" ? coordinator.getPrContext(token) : route === "/v1/validate_evidence" ? await coordinator.validateEvidence(token, body.evidence as { path: string; line: number; role: "changed" | "unchanged-context" }) : route === "/v1/preflight_result" ? await coordinator.preflight(token, body.result) : route === "/v1/report_progress" ? await coordinator.reportProgress(token, body as { state: "pending" | "running" | "complete" | "failed"; detail?: string }) : route === "/v1/submit_result" ? await coordinator.submit(token, body.idempotencyKey as string, body.result) : (() => { throw new Error("unknown coordinator route"); })();
       response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(value));
     } catch (error) { response.writeHead(/token|bearer/i.test(String(error)) ? 401 : 400, { "content-type": "application/json" }); response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) })); }
   });

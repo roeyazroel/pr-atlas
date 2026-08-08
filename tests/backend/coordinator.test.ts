@@ -82,12 +82,14 @@ describe("Atlas API coordinator", () => {
         ...anchor,
         domains: anchor.domains.map((domain) => domain.id === "production-path" ? { ...domain, evidence: [...domain.evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] } : domain),
       };
-      await expect(coordinator.submit(task.token, "incomplete", domainOnly)).rejects.toThrow(/missing changed evidence.*src\/b\.ts.*changed hunk.*src\/a\.ts:10/i);
+      await expect(coordinator.preflight(task.token, domainOnly)).resolves.toMatchObject({ valid: false, errors: [expect.stringMatching(/missing changed evidence.*src\/b\.ts/i), expect.stringMatching(/changed hunk.*src\/a\.ts:10/i)] });
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
       const complete = {
         ...anchor,
         changeGroups: [{ ...anchor.changeGroups[0], evidence: [...anchor.changeGroups[0].evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] }],
       };
       await expect(coordinator.submit(task.token, "complete", complete)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 1, remainingAtomicSubmissionAttempts: 1 });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -100,6 +102,21 @@ describe("Atlas API coordinator", () => {
       await expect(coordinator.submit(task.token, "accepted", anchor)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
       expect(coordinator.result("anchor")).toEqual(anchor);
       expect(coordinator.submissionStats("anchor").lastDiagnostic).toMatchObject({ code: "post-settlement-telemetry-failed" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("bounds preflight checks without consuming the atomic submission budget", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
+    try {
+      const task = coordinator.task("anchor");
+      await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      expect(JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8")).preflightChecks.anchor).toEqual({ checks: 1, remainingChecks: 2 });
+      expect(coordinator.result("anchor")).toBeNull();
+      for (let index = 1; index < 3; index += 1) await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      await expect(coordinator.preflight(task.token, { taskId: "anchor" })).rejects.toThrow(/preflight check limit/i);
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      expect(coordinator.getTask(task.token)).toMatchObject({ preflight: { checks: 3, remainingChecks: 0 } });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
@@ -194,6 +211,7 @@ describe("Atlas API coordinator", () => {
       await expect(coordinator.reportProgress(token, { state: "complete", detail: "one too many" })).rejects.toThrow(/progress update limit/i);
       const progress = JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8"));
       expect(progress.tasks.anchor.detail).toBe("update-19");
+      expect(progress.preflightChecks.anchor).toEqual({ checks: 0, remainingChecks: 3 });
       const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
       expect(audit).not.toContain("secret-token");
       expect(audit).not.toContain("/private/worktree");
