@@ -5,6 +5,7 @@ import type {
   AnchorDomainId, CoordinatorEvidenceReference, ProviderAnalysisTask, SemanticAnchor,
   WalkthroughDocument,
 } from "../../shared/contracts.js";
+import { validateWalkthroughDocument } from "../../shared/schema.js";
 
 export const LARGE_ANALYSIS_THRESHOLDS = { files: 20, changes: 1_000 } as const;
 export const ANCHOR_DOMAIN_IDS = [
@@ -34,6 +35,24 @@ const strings = (value: unknown): value is string[] => Array.isArray(value) && v
 const closed = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => isRecord(value) && Object.keys(value).every((key) => keys.includes(key)) && keys.every((key) => key in value);
 const evidence = (value: unknown): value is CoordinatorEvidenceReference => closed(value, ["path", "line", "role"]) && text(value.path) && Number.isInteger(value.line) && (value.line as number) > 0 && (value.role === "changed" || value.role === "unchanged-context");
 const unique = (values: string[]) => new Set(values).size === values.length;
+function canonicalReviewIds(value: unknown): { ids: string[]; errors: string[] } {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const errors: string[] = [];
+  const register = (id: unknown) => {
+    if (!text(id)) { errors.push("Review provenance is missing a canonical id."); return; }
+    if (seen.has(id)) { errors.push("Review provenance contains a duplicate canonical id."); return; }
+    seen.add(id); ids.push(id);
+  };
+  if (!Array.isArray(value)) return { ids, errors: ["Review provenance must be an array."] };
+  for (const thread of value) {
+    if (!isRecord(thread)) { errors.push("Review provenance contains an invalid thread."); continue; }
+    register(thread.id);
+    if (!Array.isArray(thread.replies)) { errors.push("Review provenance contains an invalid replies array."); continue; }
+    for (const reply of thread.replies) register(isRecord(reply) ? reply.id : undefined);
+  }
+  return { ids, errors };
+}
 
 function validateAnchor(value: unknown, task: ProviderAnalysisTask): { valid: boolean; output?: SemanticAnchor; errors: string[] } {
   if (!isRecord(value) || Object.keys(value).some((key) => !["taskId", "domains", "changeGroups"].includes(key))) return { valid: false, errors: ["Anchor output must be a closed object."] };
@@ -71,6 +90,7 @@ function validateSpecialist(value: unknown, task: ProviderAnalysisTask): { valid
   const required = allowed.filter((key) => key !== "evidenceRefs");
   if (Object.keys(content).some((key) => !allowed.includes(key)) || !required.every((key) => key in content)) return { valid: false, errors: [`${task.kind} specialist content has missing or unknown fields.`] };
   if (!validSpecialistContent(task.kind as "walkthrough" | "tests-risks" | "flows", content)) return { valid: false, errors: [`${task.kind} specialist content has invalid nested field shapes.`] };
+  if (task.kind === "walkthrough" && canonicalReviewIds(content.reviewThreads).errors.length) return { valid: false, errors: ["Walkthrough specialist review provenance ids must be unique and canonical."] };
   const references = task.kind === "walkthrough"
     ? (content.walkthrough as Record<string, unknown>[]).map((step) => step.changeGroupId).filter(text)
     : task.kind === "tests-risks"
@@ -107,7 +127,10 @@ function validFlowSemantics(graphs: unknown, knownGroups: ReadonlySet<string>): 
       && value.edges.every((edge) => isRecord(edge) && text(edge.id) && text(edge.source) && text(edge.target) && knownNodes.has(edge.source) && knownNodes.has(edge.target) && strings(edge.changeGroupIds) && edge.changeGroupIds.every((id) => knownGroups.has(id)))
       && value.guidedTours.every((tour) => isRecord(tour) && text(tour.id) && text(tour.title) && Array.isArray(tour.steps) && tour.steps.length > 0 && tour.steps.every((step) => isRecord(step) && text(step.nodeId) && knownNodes.has(step.nodeId) && text(step.title) && text(step.explanation)));
   };
-  return check(graphs.systemOverview, true) && check(graphs.dataFlow, false) && check(graphs.codeDependency, false) && check(graphs.userAction, false);
+  const graphValues = [graphs.systemOverview, graphs.dataFlow, graphs.codeDependency, graphs.userAction];
+  const nodeIds = graphValues.flatMap((graph) => isRecord(graph) && Array.isArray(graph.nodes) ? graph.nodes.map((node) => isRecord(node) ? node.id : undefined) : []);
+  return check(graphs.systemOverview, true) && check(graphs.dataFlow, false) && check(graphs.codeDependency, false) && check(graphs.userAction, false)
+    && nodeIds.every(text) && unique(nodeIds as string[]);
 }
 
 function collectStrings(value: unknown, keys: string[], found: string[] = []): string[] {
@@ -209,6 +232,47 @@ function canonicalizeEvidence(value: unknown, ids: Map<string, string>): unknown
   }
   return next;
 }
+function nextUniqueId(base: string, occupied: Set<string>): string {
+  let candidate = base;
+  let suffix = 2;
+  while (occupied.has(candidate)) candidate = `${base}-${suffix++}`;
+  occupied.add(candidate);
+  return candidate;
+}
+function namespaceSemanticCollection(value: unknown, prefix: string, occupied: Set<string>): { items: Record<string, unknown>[]; ids: Map<string, string> } {
+  const ids = new Map<string, string>();
+  const items = (Array.isArray(value) ? value : []).filter(isRecord).map((item) => {
+    if (!text(item.id)) return item;
+    const id = nextUniqueId(`${prefix}-${item.id}`, occupied);
+    if (!ids.has(item.id)) ids.set(item.id, id);
+    return { ...item, id };
+  });
+  return { items, ids };
+}
+function remapIds(value: unknown, ids: ReadonlyMap<string, string>): unknown {
+  return Array.isArray(value) ? value.map((id) => typeof id === "string" ? ids.get(id) ?? id : id) : value;
+}
+function remapId(value: unknown, ids: ReadonlyMap<string, string>): unknown {
+  return typeof value === "string" ? ids.get(value) ?? value : value;
+}
+function namespaceGraphs(graphs: Record<string, unknown>, occupied: Set<string>, changeGroupIds: ReadonlyMap<string, string>, testIds: ReadonlyMap<string, string>, reviewThreadIds: ReadonlyMap<string, string>, reviewInsightIds: ReadonlyMap<string, string>): { graphs: Record<string, unknown>; nodeIds: Map<string, string> } {
+  const nodeIds = new Map<string, string>();
+  const entries = (["systemOverview", "dataFlow", "codeDependency", "userAction"] as const).map((key) => {
+    const value = graphs[key];
+    if (!isRecord(value)) return [key, value] as const;
+    const nodes = namespaceSemanticCollection(value.nodes, "graph-node", occupied);
+    const edges = namespaceSemanticCollection(value.edges, "graph-edge", occupied);
+    const tours = namespaceSemanticCollection(value.guidedTours, "graph-tour", occupied);
+    for (const [source, id] of nodes.ids) if (!nodeIds.has(source)) nodeIds.set(source, id);
+    return [key, {
+      ...value,
+      nodes: nodes.items.map((node) => ({ ...node, changeGroupIds: remapIds(node.changeGroupIds, changeGroupIds), testIds: remapIds(node.testIds, testIds), reviewThreadIds: remapIds(node.reviewThreadIds, reviewThreadIds), reviewInsightIds: remapIds(node.reviewInsightIds, reviewInsightIds) })),
+      edges: edges.items.map((edge) => ({ ...edge, source: remapId(edge.source, nodes.ids), target: remapId(edge.target, nodes.ids), changeGroupIds: remapIds(edge.changeGroupIds, changeGroupIds), reviewThreadIds: remapIds(edge.reviewThreadIds, reviewThreadIds) })),
+      guidedTours: tours.items.map((tour) => ({ ...tour, steps: Array.isArray(tour.steps) ? tour.steps.map((step) => !isRecord(step) ? step : { ...step, nodeId: remapId(step.nodeId, nodes.ids) }) : tour.steps })),
+    }] as const;
+  });
+  return { graphs: Object.fromEntries(entries), nodeIds };
+}
 function connected(graph: Record<string, unknown>): boolean {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes.filter(isRecord) : [];
   if (nodes.length <= 1) return nodes.length === 1;
@@ -242,13 +306,34 @@ export function assembleAnchoredDocument(request: AnalysisRequest, anchor: Seman
   const refs = [...collectRefs(anchor), ...Object.values(specialists).flatMap((item) => collectRefs(item.content))];
   const evidenceByKey = new Map<string, CoordinatorEvidenceReference>();
   for (const ref of refs) evidenceByKey.set(evidenceKey(ref), ref);
-  const ids = new Map<string, string>(); for (const [key, ref] of evidenceByKey) ids.set(key, evidenceId(ref));
-  const evidenceItems = [...evidenceByKey.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([key, ref]) => ({ id: ids.get(key)!, kind: "file", title: `${ref.path}:${ref.line}`, path: ref.path, line: ref.line, url: null }));
+  const canonicalReviews = canonicalReviewIds(specialists.walkthrough.content.reviewThreads);
+  if (canonicalReviews.errors.length) return { valid: false, errors: canonicalReviews.errors };
+  const occupiedSemanticIds = new Set(canonicalReviews.ids);
+  const namespacedGroups = namespaceSemanticCollection(anchor.changeGroups, "group", occupiedSemanticIds);
+  const evidenceEntries = [...evidenceByKey.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const ids = new Map<string, string>(); for (const [key, ref] of evidenceEntries) ids.set(key, nextUniqueId(evidenceId(ref), occupiedSemanticIds));
+  const evidenceItems = evidenceEntries.map(([key, ref]) => ({ id: ids.get(key)!, kind: "file", title: `${ref.path}:${ref.line}`, path: ref.path, line: ref.line, url: null }));
   const walk = canonicalizeEvidence(specialists.walkthrough.content, ids) as Record<string, unknown>;
   const tests = canonicalizeEvidence(specialists["tests-risks"].content, ids) as Record<string, unknown>;
   const flows = canonicalizeEvidence(specialists.flows.content, ids) as Record<string, unknown>;
-  const groups = anchor.changeGroups.map((group) => ({ ...group, evidenceIds: group.evidence.map((ref) => ids.get(evidenceKey(ref))!), evidence: undefined }));
-  const graphSource = flows.graphs as Record<string, unknown> | undefined;
+  const groups = anchor.changeGroups.map((group, index) => ({ ...group, id: namespacedGroups.items[index]?.id, evidenceIds: group.evidence.map((ref) => ids.get(evidenceKey(ref))!), evidence: undefined }));
+  const namespacedWalkthrough = namespaceSemanticCollection(walk.walkthrough, "step", occupiedSemanticIds);
+  const namespacedTests = namespaceSemanticCollection(tests.tests, "test", occupiedSemanticIds);
+  const canonicalReviewThreads = (Array.isArray(walk.reviewThreads) ? walk.reviewThreads : []).filter(isRecord);
+  const canonicalReviewThreadIds = new Map(canonicalReviewThreads.filter((thread) => text(thread.id)).map((thread) => [thread.id as string, thread.id as string]));
+  const namespacedReviewInsights = namespaceSemanticCollection(walk.reviewInsights, "review-insight", occupiedSemanticIds);
+  const namespacedRisks = namespaceSemanticCollection(tests.risks, "risk", occupiedSemanticIds);
+  const namespacedDependencies = namespaceSemanticCollection(walk.dependencies, "dependency", occupiedSemanticIds);
+  const namespacedUnchangedInteractions = namespaceSemanticCollection(walk.unchangedInteractions, "unchanged-interaction", occupiedSemanticIds);
+  const graphNamespace = isRecord(flows.graphs) ? namespaceGraphs(flows.graphs, occupiedSemanticIds, namespacedGroups.ids, namespacedTests.ids, canonicalReviewThreadIds, namespacedReviewInsights.ids) : undefined;
+  const walkthrough = namespacedWalkthrough.items.map((step) => ({ ...step, changeGroupId: remapId(step.changeGroupId, namespacedGroups.ids), dependsOnStepIds: remapIds(step.dependsOnStepIds, namespacedWalkthrough.ids), flowNodeIds: remapIds(step.flowNodeIds, graphNamespace?.nodeIds ?? new Map()), testIds: remapIds(step.testIds, namespacedTests.ids), reviewInsightIds: remapIds(step.reviewInsightIds, namespacedReviewInsights.ids) }));
+  const testsOutput = namespacedTests.items.map((test) => ({ ...test, changeGroupIds: remapIds(test.changeGroupIds, namespacedGroups.ids) }));
+  const reviewThreads = canonicalReviewThreads.map((thread) => ({ ...thread, changeGroupIds: remapIds(thread.changeGroupIds, namespacedGroups.ids), graphNodeIds: remapIds(thread.graphNodeIds, graphNamespace?.nodeIds ?? new Map()), reviewInsightIds: remapIds(thread.reviewInsightIds, namespacedReviewInsights.ids) }));
+  const reviewInsights = namespacedReviewInsights.items.map((insight) => ({ ...insight, changeGroupIds: remapIds(insight.changeGroupIds, namespacedGroups.ids), graphNodeIds: remapIds(insight.graphNodeIds, graphNamespace?.nodeIds ?? new Map()), reviewThreadIds: remapIds(insight.reviewThreadIds, canonicalReviewThreadIds) }));
+  const risks = namespacedRisks.items.map((risk) => ({ ...risk, changeGroupIds: remapIds(risk.changeGroupIds, namespacedGroups.ids) }));
+  const dependencies = namespacedDependencies.items.map((dependency) => ({ ...dependency, changeGroupIds: remapIds(dependency.changeGroupIds, namespacedGroups.ids), dependsOnIds: remapIds(dependency.dependsOnIds, namespacedWalkthrough.ids) }));
+  const unchangedInteractions = namespacedUnchangedInteractions.items.map((interaction) => ({ ...interaction, changeGroupIds: remapIds(interaction.changeGroupIds, namespacedGroups.ids) }));
+  const graphSource = graphNamespace?.graphs;
   if (!graphSource || !["systemOverview", "dataFlow", "codeDependency", "userAction"].every((key) => isRecord(graphSource[key]))) return { valid: false, errors: ["Flows specialist must provide exactly four graphs."] };
   const maxNodes = request.config?.maxGraphNodes ?? 80;
   for (const [key, id] of [["systemOverview", "system-overview"], ["dataFlow", "data-flow"], ["codeDependency", "code-dependency"], ["userAction", "user-action"]] as const) if (!validGraph(graphSource[key] as Record<string, unknown>, id, maxNodes)) return { valid: false, errors: [`${key} graph has invalid nodes, edges, tours, or node limit.`] };
@@ -258,11 +343,12 @@ export function assembleAnchoredDocument(request: AnalysisRequest, anchor: Seman
     schemaVersion: "1.1.0", run: { id: "anchored-provider-run", createdAt: new Date().toISOString(), provider: request.provider, model: request.model ?? model ?? "default", skillVersion: "1.0.0" },
     pullRequest: { host: "github.com", repository: request.repository, number: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha },
     summary: { ...(isRecord(walk.summary) ? walk.summary : {}), limitations }, changeGroups: groups,
-    walkthrough: Array.isArray(walk.walkthrough) ? walk.walkthrough : [], graphs: graphSource,
-    tests: Array.isArray(tests.tests) ? tests.tests : [], reviewThreads: Array.isArray(walk.reviewThreads) ? walk.reviewThreads : [], reviewInsights: Array.isArray(walk.reviewInsights) ? walk.reviewInsights : [], evidence: evidenceItems,
-    unchangedInteractions: Array.isArray(walk.unchangedInteractions) ? walk.unchangedInteractions : [], risks: Array.isArray(tests.risks) ? tests.risks : [], dependencies: Array.isArray(walk.dependencies) ? walk.dependencies : [],
+    walkthrough, graphs: graphSource,
+    tests: testsOutput, reviewThreads, reviewInsights, evidence: evidenceItems,
+    unchangedInteractions, risks, dependencies,
   } as unknown as WalkthroughDocument;
-  return { valid: true, document, errors: [] };
+  const validation = validateWalkthroughDocument(document);
+  return validation.valid ? { valid: true, document: validation.document, errors: [] } : { valid: false, errors: validation.errors };
 }
 
 export function taskOutputFrom(result: AgentAnalysisResult): AnchoredTaskOutput | undefined { return result.taskOutput; }

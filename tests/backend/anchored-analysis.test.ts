@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assembleAnchoredDocument, anchoredSchemaForProvider, shouldUseAnchoredAnalysis, validateAnchoredTaskOutput } from "../../electron/backend/anchored-analysis";
 import { buildAnalysisPrompt, schemaForProvider } from "../../electron/backend/agent";
+import { validateReviewCoverage } from "../../electron/backend/review-coverage";
 import type { AnalysisRequest, ProviderAnalysisTask } from "../../shared/contracts";
 import { validateWalkthroughDocument } from "../../shared/schema";
 
@@ -40,6 +41,70 @@ describe("anchored provider contracts", () => {
     expect(new Set(assembled.document?.evidence.map((item) => item.id)).size).toBe(2);
     const validation = validateWalkthroughDocument(assembled.document);
     expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
+  });
+
+  it("host-namespaces and remaps every model-originated id category", () => {
+    const changed = { path: "src/a.ts", line: 1, role: "changed" } as const;
+    const collisionAnchor = {
+      ...anchor,
+      changeGroups: [{ ...anchor.changeGroups[0], id: "shared", evidence: [changed] }],
+      domains: anchor.domains.map((domain) => domain.id === "production-path"
+        ? { ...domain, changeGroupIds: ["shared"], evidence: [changed] }
+        : domain),
+    };
+    const coverage = collisionAnchor.domains.map((domain) => ({ domainId: domain.id, status: domain.id === "production-path" ? "covered" : "not-applicable", rationale: "Covered." }));
+    const graph = (id: string, system = false) => {
+      const itemId = system ? `${id}-node` : id === "data-flow" ? "shared" : `${id}-node`;
+      return { id, description: "Relationship graph.", nodes: [{ id: itemId, label: "Node", explanation: "Grounded node.", changed: !system, changeGroupIds: system ? [] : ["shared"], testIds: system ? [] : ["shared"], reviewThreadIds: system ? [] : ["review-insight-shared"], reviewInsightIds: system ? [] : ["shared"], evidence: system ? [] : [changed] }], edges: system ? [] : [{ id: "shared", source: itemId, target: itemId, label: "loops", evidence: [changed], changeGroupIds: ["shared"], reviewThreadIds: ["review-insight-shared"] }], guidedTours: [{ id: system ? `${id}-tour` : "shared", title: "Tour", steps: [{ nodeId: itemId, title: "Inspect", explanation: "Inspect this node." }] }] };
+    };
+    const reply = (id: string) => ({ id, author: "Reviewer", body: "Follow up.", authorAssociation: null, createdAt: null, updatedAt: null, url: null, path: null, line: null, originalLine: null, side: null, commitSha: null, originalCommitSha: null });
+    const specialists = {
+      walkthrough: { taskId: "walkthrough", coverage, content: { summary: { intent: "Explain.", behavioralChanges: ["Changed."], architecturalImpact: ["Impact."], limitations: [] }, walkthrough: [
+        { id: "shared", title: "First", reason: "Review.", summary: "Inspect.", limitations: [], dependsOnStepIds: [], changeGroupId: "shared", flowNodeIds: ["shared"], testIds: ["shared"], reviewInsightIds: ["shared"], evidence: [changed] },
+        { id: "follow-up", title: "Second", reason: "Review.", summary: "Inspect next.", limitations: [], dependsOnStepIds: ["shared"], changeGroupId: "shared", flowNodeIds: ["shared"], testIds: ["shared"], reviewInsightIds: ["shared"], evidence: [changed] },
+      ], reviewThreads: [{ id: "review-insight-shared", status: "active", provenance: "GitHub", evidence: [changed], author: "Reviewer", body: "Review this.", replies: [reply("github-comment-1"), reply("github-comment-2")], replyCount: 2, url: null, resolvedBy: null, authorAssociation: null, path: null, line: null, originalLine: null, side: null, startLine: null, originalStartLine: null, commitSha: null, originalCommitSha: null, createdAt: null, updatedAt: null, changeGroupIds: ["shared"], graphNodeIds: ["shared"], reviewInsightIds: ["shared"] }], reviewInsights: [{ id: "shared", title: "Insight", detail: "Inspect this.", status: "active", provenance: "GitHub", evidence: [changed], changeGroupIds: ["shared"], reviewThreadIds: ["review-insight-shared"], graphNodeIds: ["shared"] }], limitations: [], dependencies: [{ id: "shared", title: "Dependency", detail: "Follow first.", dependsOnIds: ["shared"], changeGroupIds: ["shared"], evidence: [changed] }, { id: "shared", title: "Dependency two", detail: "Follow first again.", dependsOnIds: ["shared"], changeGroupIds: ["shared"], evidence: [changed] }], unchangedInteractions: [{ id: "shared", title: "Stable", detail: "Unchanged.", changeGroupIds: ["shared"], evidence: [changed] }, { id: "shared", title: "Stable two", detail: "Still unchanged.", changeGroupIds: ["shared"], evidence: [changed] }] } },
+      "tests-risks": { taskId: "tests-risks", coverage, content: { tests: [{ id: "shared", title: "Test", behavior: "Checks.", status: "covered", changeGroupIds: ["shared"], evidence: [changed] }], risks: [{ id: "shared", title: "Risk", detail: "Observe.", changeGroupIds: ["shared"], evidence: [changed] }, { id: "shared", title: "Risk two", detail: "Observe again.", changeGroupIds: ["shared"], evidence: [changed] }], limitations: [] } },
+      flows: { taskId: "flows", coverage, content: { graphs: { systemOverview: graph("system-overview", true), dataFlow: graph("data-flow"), codeDependency: graph("code-dependency"), userAction: graph("user-action") } } },
+    } as never;
+
+    const assembled = assembleAnchoredDocument(request, collisionAnchor as never, specialists);
+
+    expect(assembled.valid, JSON.stringify(assembled.errors)).toBe(true);
+    expect(validateWalkthroughDocument(assembled.document).valid).toBe(true);
+    expect(assembled.document?.changeGroups[0].id).toBe("group-shared");
+    expect(assembled.document?.walkthrough.map((step) => step.id)).toEqual(["step-shared", "step-follow-up"]);
+    expect(assembled.document?.walkthrough[1].dependsOnStepIds).toEqual(["step-shared"]);
+    expect(assembled.document?.walkthrough[0].changeGroupId).toBe("group-shared");
+    expect(assembled.document?.walkthrough[0].flowNodeIds).toEqual(["graph-node-shared"]);
+    expect(assembled.document?.walkthrough[0].testIds).toEqual(["test-shared"]);
+    expect(assembled.document?.tests[0]).toMatchObject({ id: "test-shared", changeGroupIds: ["group-shared"] });
+    expect(assembled.document?.reviewThreads[0]).toMatchObject({ id: "review-insight-shared", changeGroupIds: ["group-shared"], graphNodeIds: ["graph-node-shared"], reviewInsightIds: ["review-insight-shared-2"], replies: [{ id: "github-comment-1" }, { id: "github-comment-2" }] });
+    expect(assembled.document?.reviewInsights[0]).toMatchObject({ id: "review-insight-shared-2", changeGroupIds: ["group-shared"], graphNodeIds: ["graph-node-shared"], reviewThreadIds: ["review-insight-shared"] });
+    expect(assembled.document?.risks).toMatchObject([{ id: "risk-shared", changeGroupIds: ["group-shared"] }, { id: "risk-shared-2", changeGroupIds: ["group-shared"] }]);
+    expect(assembled.document?.dependencies).toMatchObject([{ id: "dependency-shared", dependsOnIds: ["step-shared"], changeGroupIds: ["group-shared"] }, { id: "dependency-shared-2", dependsOnIds: ["step-shared"], changeGroupIds: ["group-shared"] }]);
+    expect(assembled.document?.unchangedInteractions).toMatchObject([{ id: "unchanged-interaction-shared", changeGroupIds: ["group-shared"] }, { id: "unchanged-interaction-shared-2", changeGroupIds: ["group-shared"] }]);
+    expect(assembled.document?.graphs.dataFlow.nodes[0]).toMatchObject({ id: "graph-node-shared", changeGroupIds: ["group-shared"], testIds: ["test-shared"], reviewThreadIds: ["review-insight-shared"], reviewInsightIds: ["review-insight-shared-2"] });
+    expect(assembled.document?.graphs.dataFlow.edges[0]).toMatchObject({ id: "graph-edge-shared", source: "graph-node-shared", target: "graph-node-shared", changeGroupIds: ["group-shared"], reviewThreadIds: ["review-insight-shared"] });
+    expect(assembled.document?.graphs.dataFlow.guidedTours[0]).toMatchObject({ id: "graph-tour-shared", steps: [{ nodeId: "graph-node-shared" }] });
+    expect(assembled.document?.graphs.codeDependency.edges[0].id).toBe("graph-edge-shared-2");
+    expect(assembled.document?.graphs.userAction.guidedTours[0].id).toBe("graph-tour-shared-3");
+    const document = assembled.document! as typeof assembled.document & { risks: Array<{ id: string }>; dependencies: Array<{ id: string }>; unchangedInteractions: Array<{ id: string }> };
+    const graphs = [document.graphs.systemOverview, document.graphs.dataFlow, document.graphs.codeDependency, document.graphs.userAction];
+    const allIds = [
+      ...document.changeGroups, ...document.walkthrough, ...document.tests, ...document.reviewThreads, ...document.reviewInsights, ...document.evidence,
+      ...graphs.flatMap((item) => [...item.nodes, ...item.edges, ...item.guidedTours]),
+      ...document.reviewThreads.flatMap((thread) => thread.replies), ...document.risks, ...document.dependencies, ...document.unchangedInteractions,
+    ].map((item) => item.id);
+    expect(new Set(allIds).size).toBe(allIds.length);
+    const rawReviews = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [{
+      id: "review-insight-shared", isResolved: false, isOutdated: false,
+      comments: { nodes: [
+        { id: "github-original", body: "Review this.", author: { login: "Reviewer" }, authorAssociation: null },
+        { id: "github-comment-1", body: "Follow up.", author: { login: "Reviewer" }, authorAssociation: null },
+        { id: "github-comment-2", body: "Follow up.", author: { login: "Reviewer" }, authorAssociation: null },
+      ] },
+    }] } } } } }];
+    expect(validateReviewCoverage(rawReviews, document)).toEqual({ valid: true, errors: [] });
   });
 
   it("requires all mandatory anchor domains and rejects unknown specialist ledger ids", () => {
@@ -121,6 +186,12 @@ describe("anchored provider contracts", () => {
     const walkthroughOutput = { taskId: walkthroughTask.id, coverage, content: { summary: { intent: "Explain the migration.", behavioralChanges: ["New path."], architecturalImpact: ["Caller order."], limitations: [] }, walkthrough: [{ id: "step-1", title: "Inspect migration", reason: "It changes behavior.", summary: "Follow the new call path.", limitations: [], dependsOnStepIds: [], changeGroupId: "group-1", flowNodeIds: ["data-flow-node"], testIds: [], reviewInsightIds: [], evidence: [ref] }], reviewThreads: [], reviewInsights: [], limitations: [], dependencies: [dependency], unchangedInteractions: [unchanged] } };
     expect(validateAnchoredTaskOutput(walkthroughOutput, walkthroughTask).valid).toBe(true);
     expect(validateAnchoredTaskOutput({ ...walkthroughOutput, content: { ...walkthroughOutput.content, dependencies: [{ ...dependency, extra: "no" }] } }, walkthroughTask).valid).toBe(false);
+    const canonicalReply = { id: "github-comment", author: "Reviewer", body: "Reply.", authorAssociation: null, createdAt: null, updatedAt: null, url: null, path: null, line: null, originalLine: null, side: null, commitSha: null, originalCommitSha: null };
+    const canonicalThread = { id: "github-thread", status: "active", provenance: "GitHub", evidence: [ref], author: "Reviewer", body: "Thread.", replies: [canonicalReply], replyCount: 1, url: null, resolvedBy: null, authorAssociation: null, path: null, line: null, originalLine: null, side: null, startLine: null, originalStartLine: null, commitSha: null, originalCommitSha: null, createdAt: null, updatedAt: null, changeGroupIds: ["group-1"], graphNodeIds: [], reviewInsightIds: [] };
+    const withReview = { ...walkthroughOutput, content: { ...walkthroughOutput.content, reviewThreads: [canonicalThread] } };
+    expect(validateAnchoredTaskOutput(withReview, walkthroughTask).valid).toBe(true);
+    expect(validateAnchoredTaskOutput({ ...withReview, content: { ...withReview.content, reviewThreads: [canonicalThread, canonicalThread] } }, walkthroughTask).valid).toBe(false);
+    expect(validateAnchoredTaskOutput({ ...withReview, content: { ...withReview.content, reviewThreads: [canonicalThread, { ...canonicalThread, id: "github-thread-two", replies: [canonicalReply] }] } }, walkthroughTask).valid).toBe(false);
   });
 
   it("grounds domain statuses and change groups in their declared evidence roles", () => {
@@ -138,6 +209,7 @@ describe("anchored provider contracts", () => {
     const task = { kind: "flows", id: "flows", total: 3, anchor } as unknown as ProviderAnalysisTask;
     const output = { taskId: task.id, coverage, content: { graphs: { systemOverview: graph("system-overview", true), dataFlow: graph("data-flow"), codeDependency: graph("code-dependency"), userAction: graph("user-action") } } };
     expect(validateAnchoredTaskOutput(output, task).valid).toBe(true);
+    expect(validateAnchoredTaskOutput({ ...output, content: { graphs: { ...output.content.graphs, codeDependency: { ...output.content.graphs.codeDependency, nodes: [{ ...output.content.graphs.codeDependency.nodes[0], id: "data-flow-node" }], edges: [{ ...output.content.graphs.codeDependency.edges[0], source: "data-flow-node", target: "data-flow-node" }], guidedTours: [{ ...output.content.graphs.codeDependency.guidedTours[0], steps: [{ ...output.content.graphs.codeDependency.guidedTours[0].steps[0], nodeId: "data-flow-node" }] }] } } } }, task).valid).toBe(false);
     expect(validateAnchoredTaskOutput({ ...output, content: { graphs: { ...output.content.graphs, systemOverview: { ...output.content.graphs.systemOverview, nodes: [{ ...output.content.graphs.systemOverview.nodes[0], evidence: [context] }] } } } }, task).valid).toBe(false);
     expect(validateAnchoredTaskOutput({ ...output, content: { graphs: { ...output.content.graphs, systemOverview: { ...output.content.graphs.systemOverview, nodes: [{ ...output.content.graphs.systemOverview.nodes[0], testIds: ["test-1"] }] } } } }, task).valid).toBe(false);
     expect(validateAnchoredTaskOutput({ ...output, content: { graphs: { ...output.content.graphs, systemOverview: { ...output.content.graphs.systemOverview, edges: [{ id: "system-edge", source: "system-overview-node", target: "system-overview-node", label: "Invalid", evidence: [], changeGroupIds: [], reviewThreadIds: [] }] } } } }, task).valid).toBe(false);
