@@ -787,7 +787,14 @@ export async function runProviderProcess(
   task?: ProviderAnalysisTask,
   extraEnvironment?: NodeJS.ProcessEnv,
 ): Promise<AgentAnalysisResult> {
+  const cancelled = (): AgentAnalysisResult => ({
+    status: "cancelled",
+    rawOutput: "",
+    logs: [],
+  });
+  if (signal?.aborted) return cancelled();
   const installation = await adapter.detect();
+  if (signal?.aborted) return cancelled();
   if (!installation.installed)
     return {
       status: "failed",
@@ -802,6 +809,7 @@ export async function runProviderProcess(
     "generating",
     `Generating a walkthrough with ${adapter.displayName} in read-only mode.`,
   );
+  if (signal?.aborted) return cancelled();
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";

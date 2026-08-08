@@ -46,6 +46,20 @@ describe("anchored service orchestration", () => {
     finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("does not start coordinator provider work when cancellation lands during inspection", async () => {
+    const root = join(tmpdir(), `pr-atlas-inspection-cancel-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
+    await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
+    const calls: string[] = []; let service: AnalysisService;
+    const adapter: AgentAdapter = { id: "codex", displayName: "Test", detect: async () => ({ provider: "codex", displayName: "Test", executable: "test", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze: async (_r, _w, _i, _signal, _progress, _model, task) => { calls.push(task?.kind ?? "single"); return output(task!); } };
+    const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
+    try {
+      service = new AnalysisService(root, runner as never, (event) => { if (event.stage === "inspecting") service.cancelAnalysis(event.runId); }, undefined, [adapter]);
+      const result = await service.startAnalysis({ ...request, config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 20 } });
+      expect(result.status).toBe("cancelled");
+      expect(calls).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("falls back to legacy map batching for a deletion-only large PR and reports why", async () => {
     const root = join(tmpdir(), `pr-atlas-deletions-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
     await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
@@ -69,6 +83,68 @@ describe("anchored service orchestration", () => {
     const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
     try { const states: string[] = []; const result = await new AnalysisService(root, runner as never, (event) => { events.push(event.message); states.push(`${event.stage}:${event.taskState ?? ""}`); }, undefined, [adapter]).startAnalysis({ ...request, provider: "cursor", config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 20 } }); expect(result.status).toBe("failed"); expect(calls).toEqual(["anchor", "map"]); expect(states).toContain("anchoring:running"); expect(states.indexOf("anchoring:failed")).toBeGreaterThan(states.indexOf("anchoring:running")); expect(states.indexOf("generating:")).toBeGreaterThan(states.indexOf("anchoring:failed")); expect(events).toContain("Cursor coordinator instruction isolation was unavailable; using legacy analysis."); }
     finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it.each(["walkthrough", "tests-risks", "flows"] as const)("routes a Cursor %s isolation failure to legacy mapping instead of a generic anchored failure", async (failingKind) => {
+    const root = join(tmpdir(), `pr-atlas-cursor-specialist-isolation-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
+    await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
+    const calls: string[] = []; const events: string[] = []; const states: string[] = [];
+    const adapter: AgentAdapter = { id: "cursor", displayName: "Cursor", detect: async () => ({ provider: "cursor", displayName: "Cursor", executable: "cursor-agent", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze: async (_r, _w, _i, _s, _p, _m, task) => { calls.push(task?.kind ?? "single"); if (task?.kind === failingKind) return { status: "failed", rawOutput: "", logs: [], errors: ["Cursor coordinator instruction isolation was unavailable."] }; if (task?.kind === "map") return { status: "failed", rawOutput: "", logs: [], errors: ["legacy map"] }; return output(task!); } };
+    const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
+    try {
+      const result = await new AnalysisService(root, runner as never, (event) => { events.push(event.message); states.push(`${event.stage}:${event.taskState ?? ""}`); }, undefined, [adapter]).startAnalysis({ ...request, provider: "cursor", config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 20 } });
+      expect(result.status).toBe("failed");
+      expect(calls).toEqual(["anchor", "walkthrough", "tests-risks", "flows", "map"]);
+      expect(states.indexOf(`${failingKind}:failed`)).toBeGreaterThan(states.indexOf(`${failingKind}:running`));
+      expect(states.indexOf("generating:")).toBeGreaterThan(states.indexOf(`${failingKind}:failed`));
+      expect(events).toContain(`Cursor coordinator instruction isolation was unavailable during ${failingKind}; using legacy analysis.`);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("does not restart legacy batching when cancellation produces Cursor isolation sentinels", async () => {
+    const root = join(tmpdir(), `pr-atlas-cursor-cancel-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
+    await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
+    const calls: string[] = []; let service: AnalysisService;
+    const adapter: AgentAdapter = { id: "cursor", displayName: "Cursor", detect: async () => ({ provider: "cursor", displayName: "Cursor", executable: "cursor-agent", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze: async (_r, _w, _i, signal, _p, _m, task) => { calls.push(task?.kind ?? "single"); if (task?.kind === "anchor") return output(task); if (task?.kind === "map") return { status: "failed", rawOutput: "", logs: [], errors: ["legacy map must not run"] }; expect(signal?.aborted).toBe(true); return { status: "failed", rawOutput: "", logs: [], errors: ["Cursor coordinator instruction isolation was unavailable."] }; } };
+    const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
+    try {
+      service = new AnalysisService(root, runner as never, (event) => { if (event.stage === "walkthrough" && event.taskState === "running") service.cancelAnalysis(event.runId); }, undefined, [adapter]);
+      const result = await service.startAnalysis({ ...request, provider: "cursor", config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 20 } });
+      expect(result.status).toBe("cancelled");
+      expect(calls).toEqual(["anchor", "walkthrough", "tests-risks", "flows"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("does not start legacy provider work when cancellation lands during the Cursor fallback handoff", async () => {
+    const root = join(tmpdir(), `pr-atlas-cursor-handoff-cancel-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
+    await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
+    const calls: string[] = []; let service: AnalysisService;
+    const adapter: AgentAdapter = { id: "cursor", displayName: "Cursor", detect: async () => ({ provider: "cursor", displayName: "Cursor", executable: "cursor-agent", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze: async (_r, _w, _i, _signal, _p, _m, task) => { calls.push(task?.kind ?? "single"); if (task?.kind === "walkthrough") return { status: "failed", rawOutput: "", logs: [], errors: ["Cursor coordinator instruction isolation was unavailable."] }; if (task?.kind === "map") return { status: "failed", rawOutput: "", logs: [], errors: ["legacy map must not run"] }; return output(task!); } };
+    const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
+    try {
+      service = new AnalysisService(root, runner as never, (event) => { if (event.message.includes("using legacy analysis")) service.cancelAnalysis(event.runId); }, undefined, [adapter]);
+      const result = await service.startAnalysis({ ...request, provider: "cursor", config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 20 } });
+      expect(result.status).toBe("cancelled");
+      expect(calls).toEqual(["anchor", "walkthrough", "tests-risks", "flows"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("does not restart legacy batching when a timeout produces Cursor isolation sentinels", async () => {
+    vi.useFakeTimers();
+    const root = join(tmpdir(), `pr-atlas-cursor-timeout-${crypto.randomUUID()}`); const worktree = resolve(root, "worktrees/github.com/acme/atlas", request.headSha);
+    await mkdir(resolve(root, "repositories/github.com/acme/atlas/.git"), { recursive: true }); await mkdir(resolve(worktree, "src"), { recursive: true }); await writeFile(resolve(worktree, "src/f0.ts"), "export {};\n");
+    const calls: string[] = []; let specialistStarted!: () => void; const started = new Promise<void>((resolveStarted) => { specialistStarted = resolveStarted; });
+    const adapter: AgentAdapter = { id: "cursor", displayName: "Cursor", detect: async () => ({ provider: "cursor", displayName: "Cursor", executable: "cursor-agent", installed: true, capabilities: caps }), getCapabilities: () => caps, analyze: async (_r, _w, _i, signal, _p, _m, task) => { calls.push(task?.kind ?? "single"); if (task?.kind === "anchor") return output(task); if (task?.kind === "map") return { status: "failed", rawOutput: "", logs: [], errors: ["legacy map must not run"] }; if (!signal) throw new Error("Expected coordinator abort signal."); specialistStarted(); await new Promise<void>((resolveAbort) => { if (signal.aborted) resolveAbort(); else signal.addEventListener("abort", () => resolveAbort(), { once: true }); }); return { status: "failed", rawOutput: "", logs: [], errors: ["Cursor coordinator instruction isolation was unavailable."] }; } };
+    const runner = { run: vi.fn(async (file: string, args: string[]) => { if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? worktree : request.headSha, stderr: "" }; if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" }; if (file === "git") return { stdout: "diff --git a/src/f0.ts b/src/f0.ts\n--- a/src/f0.ts\n+++ b/src/f0.ts\n@@ -1 +1000 @@\n+export {};\n", stderr: "" }; if (String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify([{ filename: "src/f0.ts", additions: 1000, deletions: 0 }]), stderr: "" }; if (String(args.at(-1)).includes("graphql")) return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" }; return { stdout: "[]", stderr: "" }; }) };
+    try {
+      const resultPromise = new AnalysisService(root, runner as never, () => undefined, undefined, [adapter]).startAnalysis({ ...request, provider: "cursor", config: { depth: "standard", scanMode: "coordinator", includeReviewComments: false, maxGraphNodes: 80, timeoutMinutes: 1 } });
+      await started;
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await resultPromise;
+      expect(result.status).toBe("failed");
+      expect(result.error?.message).toContain("timed out");
+      expect(calls).toEqual(["anchor", "walkthrough", "tests-risks", "flows"]);
+    } finally { vi.useRealTimers(); await rm(root, { recursive: true, force: true }); }
   });
 
   it("falls back to legacy map batching when a mixed large PR contains a fully deleted file", async () => {

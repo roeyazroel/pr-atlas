@@ -23,6 +23,29 @@ const request: AnalysisRequest = {
 }
 
 describe('provider process security boundary', () => {
+  it('does not spawn a provider when cancellation lands during detection', async () => {
+    let finishDetection!: () => void
+    const detectionPending = new Promise<void>((resolve) => { finishDetection = resolve })
+    const adapter = {
+      id: 'codex',
+      displayName: 'Codex CLI',
+      detect: vi.fn(async (): Promise<AgentInstallationStatus> => {
+        await detectionPending
+        return { provider: 'codex', displayName: 'Codex CLI', executable: 'codex', installed: true, capabilities }
+      }),
+      getCapabilities: () => capabilities,
+    } as unknown as AgentAdapter
+    const controller = new AbortController()
+    const spawn = vi.fn()
+
+    const pending = runProviderProcess(adapter, { run: vi.fn() }, spawn, 'codex', [], request, '/worktree', controller.signal, vi.fn())
+    controller.abort()
+    finishDetection()
+
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' })
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['codex', 'OPENAI_API_KEY', 'CODEX_HOME', ['ANTHROPIC_API_KEY', 'CURSOR_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN']],
     ['claude', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR', ['OPENAI_API_KEY', 'CURSOR_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN']],

@@ -609,6 +609,7 @@ export class AnalysisService {
     signal: AbortSignal,
     progress: (stage: AnalysisProgressEvent["stage"], message: string, taskState?: AnalysisProgressEvent["taskState"]) => void,
   ): Promise<AgentAnalysisResult> {
+    if (signal.aborted) return { status: "cancelled", rawOutput: "", logs: [], errors: ["Analysis was cancelled before provider work started."] };
     const files = await readChangedDiffs(inputDirectory);
     const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
     if (!shouldUseAnchoredAnalysis({ files: files.length, changes }))
@@ -643,14 +644,17 @@ export class AnalysisService {
     }, (value) => redactProviderValue(value), prContext);
     const coordinatorServer = await startAtlasCoordinator(coordinator);
     const execution = new AbortController(); let timedOut = false;
-    const abort = () => execution.abort(); signal.addEventListener("abort", abort, { once: true });
+    const abort = () => execution.abort();
+    if (signal.aborted) execution.abort(); else signal.addEventListener("abort", abort, { once: true });
     const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
     try {
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
     progress("anchoring", "Semantic anchor started · classifying the PR once.", "running");
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
     const coordinatorTask = <T extends "anchor" | "walkthrough" | "tests-risks" | "flows">(kind: T) => ({ url: coordinatorServer.url, token: coordinator.task(kind).token, shimPath: resolve(__dirname, "coordinator-mcp.cjs"), submitted: () => coordinator.result(kind), submitForHarness: (key: string, result: AnchoredTaskOutput) => coordinator.submit(coordinator.task(kind).token, key, result) });
     const anchorTask = { kind: "anchor", id: "anchor", total: 1, coordinator: coordinatorTask("anchor") } as const;
     const anchorResponse = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, anchorTask);
-    if (adapter.id === "cursor" && anchorResponse.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)) {
+    if (adapter.id === "cursor" && !signal.aborted && !timedOut && !execution.signal.aborted && anchorResponse.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)) {
       progress("anchoring", "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", "failed");
       progress("generating", "Cursor coordinator instruction isolation was unavailable; using legacy analysis.");
       return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
@@ -681,6 +685,14 @@ export class AnalysisService {
       progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation.`, output ? "complete" : "failed");
       return { kind, response, attempts, output, errors: checked?.errors };
     }));
+    const cursorIsolationFailure = adapter.id === "cursor"
+      ? responses.find((item) => item.attempts.some((attempt) => attempt.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)))
+      : undefined;
+    if (cursorIsolationFailure && !signal.aborted && !timedOut && !execution.signal.aborted) {
+      progress(stage[cursorIsolationFailure.kind], `Cursor coordinator instruction isolation was unavailable; ${cursorIsolationFailure.kind} stopped before legacy fallback.`, "failed");
+      progress("generating", `Cursor coordinator instruction isolation was unavailable during ${cursorIsolationFailure.kind}; using legacy analysis.`);
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    }
     const failed = responses.find((item) => !item.output);
     const allResponses = [anchorResponse, ...responses.flatMap((item) => item.attempts)];
     if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
@@ -703,10 +715,18 @@ export class AnalysisService {
     signal: AbortSignal,
     progress: (stage: AnalysisProgressEvent["stage"], message: string) => void,
   ): Promise<AgentAnalysisResult> {
+    const execution = new AbortController(); let timedOut = false;
+    const abort = () => execution.abort();
+    if (signal.aborted) execution.abort(); else signal.addEventListener("abort", abort, { once: true });
+    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
+    const interrupted = (): AgentAnalysisResult => ({ status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before legacy batching started."] : ["Analysis was cancelled before legacy batching started."] });
+    try {
+    if (execution.signal.aborted) return interrupted();
     const files = await readChangedDiffs(inputDirectory);
+    if (execution.signal.aborted) return interrupted();
     const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
     if (!shouldBatchAnalysis({ files: files.length, changes }))
-      return adapter.analyze(request, worktree, inputDirectory, signal, progress);
+      return adapter.analyze(request, worktree, inputDirectory, execution.signal, progress);
     const plan = buildBatchPlan(files);
     if (!plan.coverage.complete)
       return { status: "invalid", rawOutput: "", logs: [], errors: ["Batch planner did not cover every changed file."] };
@@ -716,10 +736,7 @@ export class AnalysisService {
       chunks: plan.chunks.map((task) => ({ id: task.id, bytes: task.bytes, subsystems: task.subsystems, units: task.files.map(({ path, segment, bytes }) => ({ path, segment, bytes })) })),
     };
     await writeBatchJson(directory, "plan.json", planManifest);
-    const execution = new AbortController(); let timedOut = false;
-    const abort = () => execution.abort(); signal.addEventListener("abort", abort, { once: true });
-    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
-    try {
+    if (execution.signal.aborted) return interrupted();
     progress("generating", `Generating ${plan.chunks.length} map batches (maximum ${MAX_BATCH_CONCURRENCY} concurrent).`);
     const outputs: NonNullable<AgentAnalysisResult["mapOutput"]>[] = [];
     const responses: AgentAnalysisResult[] = [];
@@ -737,6 +754,7 @@ export class AnalysisService {
         const validatorFile = "validate-map-output.mjs"; const launcherFile = validatorLauncherName("map");
         await writeFile(resolve(scope, validatorFile), buildBatchMapValidatorScript(task), "utf8");
         if (process.platform === "win32") await writeFile(resolve(scope, launcherFile), buildWindowsValidatorLauncher(validatorFile), "utf8");
+        if (execution.signal.aborted) return;
         const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(validatorFile, process.platform, launcherFile), assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
         const validated = response.status === "ready" && response.mapOutput
           ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)
@@ -771,7 +789,9 @@ export class AnalysisService {
     if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
     progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
     const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };

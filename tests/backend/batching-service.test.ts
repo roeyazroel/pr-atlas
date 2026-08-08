@@ -124,6 +124,22 @@ describe("batched service orchestration", () => {
     finally { await rm(env.root, { recursive: true, force: true }); }
   });
 
+  it("does not invoke the reducer when cancellation lands on reducer-start progress", async () => {
+    const tasks: string[] = []; let service: AnalysisService;
+    const env = await setup(20, 50_000, async (_r, _w, _i, _signal, _progress, _model, task) => {
+      tasks.push(task?.kind ?? "single");
+      return task?.kind === "map"
+        ? { status: "ready", rawOutput: "{}", logs: [], mapOutput: completeMap(task) }
+        : { status: "ready", rawOutput: "{}", logs: [], document: reducerDocument() as never };
+    }, (event) => { if (event.message.includes("Reducer started")) service.cancelAnalysis(event.runId); });
+    service = env.service;
+    try {
+      const result = await service.startAnalysis(request);
+      expect(result.status).toBe("cancelled");
+      expect(tasks).not.toContain("reduce");
+    } finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
   it("installs Ready only after a successful final reducer document", async () => {
     let reduceScope = ""; const mapScopes: string[] = []; const isolated: boolean[] = []; const env = await setup(20, 50_000, async (_r, providerRoot, input, _s, _p, _m, task) => { isolated.push(providerRoot === input); if (task?.kind === "map") { mapScopes.push(input); return { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) }; } reduceScope = input; return { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
     try { await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true }); await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n"); expect((await env.service.startAnalysis(request)).status).toBe("ready"); expect(isolated.every(Boolean)).toBe(true); expect(mapScopes.length).toBeGreaterThan(0); for (const scope of mapScopes) expect(await readFile(resolve(scope, "validate-map-output.mjs"), "utf8")).toContain("Map output validation"); expect(JSON.parse(await readFile(resolve(reduceScope, "request.json"), "utf8"))).toMatchObject({ repository: request.repository, baseSha: request.baseSha, headSha: request.headSha }); const reducerPlanText = await readFile(resolve(reduceScope, "plan.json"), "utf8"); const reducerPlan = JSON.parse(reducerPlanText); expect(reducerPlan.coverage.complete).toBe(true); expect(reducerPlan.chunks[0].units[0]).toMatchObject({ path: expect.any(String), segment: 0 }); expect(reducerPlanText).not.toContain('"diff"'); expect(await readFile(resolve(reduceScope, "review-threads.json"), "utf8")).toBeTruthy(); }
