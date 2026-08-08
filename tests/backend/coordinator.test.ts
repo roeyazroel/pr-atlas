@@ -69,13 +69,23 @@ describe("Atlas API coordinator", () => {
       { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) },
       new Set(["src/a.ts", "src/b.ts"]),
       async () => ({ valid: true, errors: [] }),
+      (value) => value,
+      {},
+      new Map([
+        ["src/a.ts", [new Set([1]), new Set([10])]],
+        ["src/b.ts", [new Set([1])]],
+      ]),
     );
     try {
       const task = coordinator.task("anchor");
-      await expect(coordinator.submit(task.token, "incomplete", anchor)).rejects.toThrow(/missing changed evidence.*src\/b\.ts/i);
+      const domainOnly = {
+        ...anchor,
+        domains: anchor.domains.map((domain) => domain.id === "production-path" ? { ...domain, evidence: [...domain.evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] } : domain),
+      };
+      await expect(coordinator.submit(task.token, "incomplete", domainOnly)).rejects.toThrow(/missing changed evidence.*src\/b\.ts.*changed hunk.*src\/a\.ts:10/i);
       const complete = {
         ...anchor,
-        changeGroups: [{ ...anchor.changeGroups[0], evidence: [...anchor.changeGroups[0].evidence, { path: "src/b.ts", line: 1, role: "changed" as const }] }],
+        changeGroups: [{ ...anchor.changeGroups[0], evidence: [...anchor.changeGroups[0].evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] }],
       };
       await expect(coordinator.submit(task.token, "complete", complete)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
     } finally { await rm(directory, { recursive: true, force: true }); }

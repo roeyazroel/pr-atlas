@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
-import { AnalysisService, changedLines, isValidPhysicalLine } from "../../electron/backend/service";
+import { AnalysisService, changedLineHunks, changedLines, isValidPhysicalLine } from "../../electron/backend/service";
 import { validateAnchoredTaskOutput } from "../../electron/backend/anchored-analysis";
 import { validateWalkthroughDocument } from "../../shared/schema";
 import type { AgentAdapter, AnalysisRequest, ProviderAnalysisTask, SemanticAnchor, SpecialistCoverage } from "../../shared/contracts";
@@ -21,12 +21,14 @@ function output(task: ProviderAnalysisTask) {
 
 describe("anchored service orchestration", () => {
   it("maps added lines without advancing over no-newline markers and recognizes +++ source content", () => {
-    const lines = changedLines([
+    const files = [
       { path: "src/replaced.ts", diff: "diff --git a/src/replaced.ts b/src/replaced.ts\n--- a/src/replaced.ts\n+++ b/src/replaced.ts\n@@ -1 +1 @@\n-before\n+after\n\\ No newline at end of file\n" },
-      { path: "src/plus.ts", diff: "diff --git a/src/plus.ts b/src/plus.ts\n--- a/src/plus.ts\n+++ b/src/plus.ts\n@@ -0,0 +3 @@\n+first\n+second\n++++source-text\n" },
-    ]);
+      { path: "src/plus.ts", diff: "diff --git a/src/plus.ts b/src/plus.ts\n--- a/src/plus.ts\n+++ b/src/plus.ts\n@@ -0,0 +3 @@\n+first\n+second\n++++source-text\n@@ -9 +12 @@\n-old\n+later\n" },
+    ];
+    const lines = changedLines(files);
     expect(lines.get("src/replaced.ts")).toEqual(new Set([1]));
-    expect(lines.get("src/plus.ts")).toEqual(new Set([3, 4, 5]));
+    expect(lines.get("src/plus.ts")).toEqual(new Set([3, 4, 5, 12]));
+    expect(changedLineHunks(files).get("src/plus.ts")).toEqual([new Set([3, 4, 5]), new Set([12])]);
   });
 
   it("rejects synthetic trailing-newline and empty-file evidence lines while accepting a real final line", () => {

@@ -27,14 +27,18 @@ function digest(value: unknown): string { return JSON.stringify(value); }
 function safeText(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isAbsolutePath(value: string): boolean { return /^(?:\/(?!\/)|~[\\/]|[a-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+|\/\/[^\\/]+[\\/][^\\/]+)/i.test(value); }
-function changedEvidencePaths(value: unknown, paths = new Set<string>()): Set<string> {
+function changedEvidenceLines(value: unknown, lines = new Map<string, Set<number>>()): Map<string, Set<number>> {
   if (Array.isArray(value)) {
-    for (const item of value) changedEvidencePaths(item, paths);
+    for (const item of value) changedEvidenceLines(item, lines);
   } else if (isRecord(value)) {
-    if (safeText(value.path) && value.role === "changed") paths.add(value.path);
-    for (const item of Object.values(value)) changedEvidencePaths(item, paths);
+    if (safeText(value.path) && value.role === "changed" && Number.isInteger(value.line)) {
+      const pathLines = lines.get(value.path) ?? new Set<number>();
+      pathLines.add(value.line as number);
+      lines.set(value.path, pathLines);
+    }
+    for (const item of Object.values(value)) changedEvidenceLines(item, lines);
   }
-  return paths;
+  return lines;
 }
 function redactProgressDetail(value: string): string { return value.replace(/(^|[\s"'`=([{,])(?:(?:~[\\/]|\/(?!\/))[^\s"'`)}\],]+|(?:[a-z]:[\\/]|\\\\|\/\/)[^\s"'`)}\],]+)/gi, "$1[PATH]"); }
 function redactSecrets(value: unknown, secrets: ReadonlySet<string>): unknown {
@@ -77,7 +81,7 @@ export class AtlasApiCoordinator {
   private transaction: Promise<void> = Promise.resolve();
   private snapshotVersion = 0;
 
-  constructor(private readonly directory: string, private readonly identity: Identity, private readonly evidencePaths: ReadonlySet<string> = new Set(), private readonly evidenceValidator?: EvidenceValidation, private readonly sanitize: (value: unknown) => unknown = (value) => value, context: unknown = {}) {
+  constructor(private readonly directory: string, private readonly identity: Identity, private readonly evidencePaths: ReadonlySet<string> = new Set(), private readonly evidenceValidator?: EvidenceValidation, private readonly sanitize: (value: unknown) => unknown = (value) => value, context: unknown = {}, private readonly evidenceHunks: ReadonlyMap<string, readonly ReadonlySet<number>[]> = new Map()) {
     this.prContext = sanitizePrContext(context, (value) => this.sanitizeProvider(value));
     for (const kind of TASKS) {
       const task = { kind, id: kind, token: randomBytes(32).toString("base64url") };
@@ -180,16 +184,27 @@ export class AtlasApiCoordinator {
         await this.audit("submit_result_rejected", { taskId: task.id, errors: checked.errors });
         throw new Error(checked.errors.join("; "));
       }
-      if (task.kind === "anchor" && this.evidencePaths.size > 0) {
-        const covered = changedEvidencePaths(checked.output);
-        const missing = [...this.evidencePaths].filter((path) => !covered.has(path)).sort();
-        if (missing.length > 0) {
-          const shown = missing.slice(0, 20);
-          const error = `Anchor is missing changed evidence for captured changed paths: ${shown.join(", ")}${missing.length > shown.length ? `, and ${missing.length - shown.length} more` : ""}.`;
-          this.submissions.set(key, { digest: payload, errors: [error] });
-          this.validationFailures.set(task.id, { result: clone(sanitized), errors: [error] });
-          await this.audit("submit_result_rejected", { taskId: task.id, errors: [error] });
-          throw new Error(error);
+      if (task.kind === "anchor" && (this.evidencePaths.size > 0 || this.evidenceHunks.size > 0)) {
+        const covered = changedEvidenceLines((checked.output as SemanticAnchor).changeGroups);
+        const errors: string[] = [];
+        const missingPaths = [...this.evidencePaths].filter((path) => !covered.has(path)).sort();
+        if (missingPaths.length > 0) {
+          const shown = missingPaths.slice(0, 20);
+          errors.push(`Anchor is missing changed evidence for captured changed paths: ${shown.join(", ")}${missingPaths.length > shown.length ? `, and ${missingPaths.length - shown.length} more` : ""}.`);
+        }
+        const missingHunks = [...this.evidenceHunks].flatMap(([path, hunks]) => hunks.filter((hunk) => ![...(covered.get(path) ?? [])].some((line) => hunk.has(line))).map((hunk) => {
+          const ordered = [...hunk].sort((left, right) => left - right);
+          return `${path}:${ordered[0]}${ordered.length > 1 ? `-${ordered.at(-1)}` : ""}`;
+        })).sort();
+        if (missingHunks.length > 0) {
+          const shown = missingHunks.slice(0, 20);
+          errors.push(`Anchor is missing changed evidence for captured changed hunks: ${shown.join(", ")}${missingHunks.length > shown.length ? `, and ${missingHunks.length - shown.length} more` : ""}.`);
+        }
+        if (errors.length > 0) {
+          this.submissions.set(key, { digest: payload, errors });
+          this.validationFailures.set(task.id, { result: clone(sanitized), errors: errors.slice(0, 20) });
+          await this.audit("submit_result_rejected", { taskId: task.id, errors });
+          throw new Error(errors.join("; "));
         }
       }
       const evidenceErrors: string[] = [];

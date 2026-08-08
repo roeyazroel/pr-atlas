@@ -97,22 +97,26 @@ async function writeAnchoredJson(directory: string, name: string, value: unknown
   await writeFile(target, JSON.stringify(value, null, 2), "utf8");
 }
 export function changedLines(files: ChangedDiff[]): Map<string, Set<number>> {
-  const result = new Map<string, Set<number>>();
+  return new Map([...changedLineHunks(files)].map(([path, hunks]) => [path, new Set(hunks.flatMap((hunk) => [...hunk]))]));
+}
+export function changedLineHunks(files: ChangedDiff[]): Map<string, Set<number>[]> {
+  const result = new Map<string, Set<number>[]>();
   for (const file of files) {
-    const lines = new Set<number>(); let next: number | undefined;
+    const hunks: Set<number>[] = []; let lines: Set<number> | undefined; let next: number | undefined;
     for (const line of file.diff.split(/\r?\n/)) {
       if (line.startsWith("diff --git ")) { next = undefined; continue; }
       const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
-      if (hunk) { next = Number(hunk[1]); continue; }
+      if (hunk) { if (lines?.size) hunks.push(lines); lines = new Set<number>(); next = Number(hunk[1]); continue; }
       if (line === "\\ No newline at end of file") continue;
       if (next === undefined) {
         if (line.startsWith("--- ") || line.startsWith("+++ ")) continue;
         continue;
       }
-      if (line.startsWith("+")) { lines.add(next++); continue; }
+      if (line.startsWith("+")) { lines?.add(next++); continue; }
       if (!line.startsWith("-")) next += 1;
     }
-    result.set(file.path, lines);
+    if (lines?.size) hunks.push(lines);
+    result.set(file.path, hunks);
   }
   return result;
 }
@@ -641,7 +645,7 @@ export class AnalysisService {
         if (reference.role === "unchanged-context" && added) return { valid: false, errors: ["unchanged-context evidence must cite a current non-added line"] };
         return { valid: true, errors: [] };
       } catch { return { valid: false, errors: ["evidence does not name a readable UTF-8 exact-head file"] }; }
-    }, (value) => redactProviderValue(value), prContext);
+    }, (value) => redactProviderValue(value), prContext, changedLineHunks(files));
     const coordinatorServer = await startAtlasCoordinator(coordinator);
     const execution = new AbortController(); let timedOut = false;
     const abort = () => execution.abort();
