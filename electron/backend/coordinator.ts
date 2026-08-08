@@ -27,6 +27,15 @@ function digest(value: unknown): string { return JSON.stringify(value); }
 function safeText(value: unknown): value is string { return typeof value === "string" && value.length > 0; }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isAbsolutePath(value: string): boolean { return /^(?:\/(?!\/)|~[\\/]|[a-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+|\/\/[^\\/]+[\\/][^\\/]+)/i.test(value); }
+function changedEvidencePaths(value: unknown, paths = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) changedEvidencePaths(item, paths);
+  } else if (isRecord(value)) {
+    if (safeText(value.path) && value.role === "changed") paths.add(value.path);
+    for (const item of Object.values(value)) changedEvidencePaths(item, paths);
+  }
+  return paths;
+}
 function redactProgressDetail(value: string): string { return value.replace(/(^|[\s"'`=([{,])(?:(?:~[\\/]|\/(?!\/))[^\s"'`)}\],]+|(?:[a-z]:[\\/]|\\\\|\/\/)[^\s"'`)}\],]+)/gi, "$1[PATH]"); }
 function redactSecrets(value: unknown, secrets: ReadonlySet<string>): unknown {
   if (typeof value === "string") return [...secrets].reduce((text, secret) => secret ? text.split(secret).join("[REDACTED]") : text, value);
@@ -171,6 +180,18 @@ export class AtlasApiCoordinator {
         await this.audit("submit_result_rejected", { taskId: task.id, errors: checked.errors });
         throw new Error(checked.errors.join("; "));
       }
+      if (task.kind === "anchor" && this.evidencePaths.size > 0) {
+        const covered = changedEvidencePaths(checked.output);
+        const missing = [...this.evidencePaths].filter((path) => !covered.has(path)).sort();
+        if (missing.length > 0) {
+          const shown = missing.slice(0, 20);
+          const error = `Anchor is missing changed evidence for captured changed paths: ${shown.join(", ")}${missing.length > shown.length ? `, and ${missing.length - shown.length} more` : ""}.`;
+          this.submissions.set(key, { digest: payload, errors: [error] });
+          this.validationFailures.set(task.id, { result: clone(sanitized), errors: [error] });
+          await this.audit("submit_result_rejected", { taskId: task.id, errors: [error] });
+          throw new Error(error);
+        }
+      }
       const evidenceErrors: string[] = [];
       const collect = async (value: unknown): Promise<void> => { if (Array.isArray(value)) await Promise.all(value.map(collect)); else if (value && typeof value === "object") for (const [key, item] of Object.entries(value as Record<string, unknown>)) { if ((key === "evidence" || key === "evidenceRefs") && Array.isArray(item)) for (const ref of item) { const checkedEvidence = await this.validateEvidence(task.token, ref as { path: string; line: number; role: "changed" | "unchanged-context" }); if (!checkedEvidence.valid) evidenceErrors.push(...checkedEvidence.errors); } else await collect(item); } };
       await collect(checked.output);
@@ -182,7 +203,13 @@ export class AtlasApiCoordinator {
       this.progress.set(task.id, { state: "complete", updatedAt: new Date().toISOString() });
       const response = { accepted: true as const, taskId: task.id, snapshotVersion: this.snapshotVersion };
       this.submissions.set(key, { digest: payload, response });
-      await this.persistProgress(); await this.audit("submit_result", { taskId: task.id, snapshotVersion: this.snapshotVersion });
+      const telemetry = await Promise.allSettled([
+        this.persistProgress(),
+        this.audit("submit_result", { taskId: task.id, snapshotVersion: this.snapshotVersion }),
+      ]);
+      if (telemetry.some((entry) => entry.status === "rejected")) {
+        this.lastDiagnostics.set(task.id, { code: "post-settlement-telemetry-failed", message: "The result was accepted and persisted, but coordinator progress or audit telemetry could not be fully persisted." });
+      }
       return response;
     });
     this.inflight.set(key, work);

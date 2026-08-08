@@ -151,7 +151,11 @@ describe("anchored provider contracts", () => {
         expect(prompt).toMatch(/directly required by the changed runtime path/i);
         expect(prompt).toMatch(/exclude unrelated unchanged concepts/i);
         expect(prompt).toMatch(/alternate or fallback result paths separate from primary-only assembly/i);
+        expect(prompt).toMatch(/explicit Legacy selection.*before.*coordinator-only safety/i);
       }
+      if (kind === "anchor") expect(prompt).toMatch(/every changed path.*changed evidence/i);
+      if (kind === "tests-risks") expect(prompt).toMatch(/search the entire repository test suite/i);
+      if (kind === "walkthrough") expect(prompt).toMatch(/eventual assembled document/i);
     }
   });
 

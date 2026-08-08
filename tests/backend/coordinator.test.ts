@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AtlasApiCoordinator, startAtlasCoordinator } from "../../electron/backend/coordinator";
 
 const anchor = {
@@ -60,6 +60,37 @@ describe("Atlas API coordinator", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("rejects an anchor until changed evidence covers every captured changed path", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(
+      directory,
+      { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) },
+      new Set(["src/a.ts", "src/b.ts"]),
+      async () => ({ valid: true, errors: [] }),
+    );
+    try {
+      const task = coordinator.task("anchor");
+      await expect(coordinator.submit(task.token, "incomplete", anchor)).rejects.toThrow(/missing changed evidence.*src\/b\.ts/i);
+      const complete = {
+        ...anchor,
+        changeGroups: [{ ...anchor.changeGroups[0], evidence: [...anchor.changeGroups[0].evidence, { path: "src/b.ts", line: 1, role: "changed" as const }] }],
+      };
+      await expect(coordinator.submit(task.token, "complete", complete)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("keeps a durably accepted result accepted when post-settlement telemetry fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
+    vi.spyOn(coordinator as unknown as { persistProgress: () => Promise<void> }, "persistProgress").mockRejectedValueOnce(new Error("progress write failed"));
+    try {
+      const task = coordinator.task("anchor");
+      await expect(coordinator.submit(task.token, "accepted", anchor)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+      expect(coordinator.result("anchor")).toEqual(anchor);
+      expect(coordinator.submissionStats("anchor").lastDiagnostic).toMatchObject({ code: "post-settlement-telemetry-failed" });
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("compares an in-flight idempotency key payload before joining its accepted result", async () => {
