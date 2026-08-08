@@ -154,6 +154,8 @@ describe("anchored provider contracts", () => {
         expect(prompt).toMatch(/exclude unrelated unchanged concepts/i);
         expect(prompt).toMatch(/alternate or fallback result paths separate from primary-only assembly/i);
         expect(prompt).toMatch(/explicit Legacy selection.*before.*coordinator-only safety/i);
+        expect(prompt).toMatch(/edge direction.*caller.*callee.*data movement/i);
+        expect(prompt).toMatch(/pre-start eligibility.*post-start validation/i);
       }
       if (kind === "anchor") {
         expect(prompt).toMatch(/every changed path.*changed evidence/i);
@@ -162,9 +164,13 @@ describe("anchored provider contracts", () => {
         expect(prompt).toMatch(/binary.*UTF-8.*validation failure.*not.*Legacy fallback/i);
         expect(prompt).toMatch(/systemOverview.*edgeless.*exempt.*connectivity/i);
       }
-      if (kind === "tests-risks") expect(prompt).toMatch(/search the entire repository test suite/i);
+      if (kind === "tests-risks") {
+        expect(prompt).toMatch(/search the entire repository test suite/i);
+        expect(prompt).toMatch(/configuration defaults.*validation.*persistence.*exact tests/i);
+      }
       if (kind === "walkthrough") {
         expect(prompt).toMatch(/eventual assembled document/i);
+        expect(prompt).toMatch(/exact numeric limits.*consumes each budget.*shared validation/i);
         expect(prompt).toMatch(/binary.*UTF-8.*validation failure.*not.*Legacy fallback/i);
         expect(prompt).toMatch(/systemOverview.*edgeless.*exempt.*connectivity/i);
       }
