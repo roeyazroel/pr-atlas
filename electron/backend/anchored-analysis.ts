@@ -91,16 +91,17 @@ function validateSpecialist(value: unknown, task: ProviderAnalysisTask): { valid
   if (Object.keys(content).some((key) => !allowed.includes(key)) || !required.every((key) => key in content)) return { valid: false, errors: [`${task.kind} specialist content has missing or unknown fields.`] };
   if (!validSpecialistContent(task.kind as "walkthrough" | "tests-risks" | "flows", content)) return { valid: false, errors: [`${task.kind} specialist content has invalid nested field shapes.`] };
   if (task.kind === "walkthrough" && canonicalReviewIds(content.reviewThreads).errors.length) return { valid: false, errors: ["Walkthrough specialist review provenance ids must be unique and canonical."] };
-  const references = task.kind === "walkthrough"
+  const coverageReferences = task.kind === "walkthrough"
     ? (content.walkthrough as Record<string, unknown>[]).map((step) => step.changeGroupId).filter(text)
     : task.kind === "tests-risks"
       ? (content.tests as Record<string, unknown>[]).flatMap((test) => strings(test.changeGroupIds) ? test.changeGroupIds : [])
       : collectStrings(content.graphs, ["changeGroupIds"]);
   const knownGroups = new Set(anchor.changeGroups.map((group) => group.id));
-  if (references.some((id) => !knownGroups.has(id))) return { valid: false, errors: ["Specialist output references an unknown anchor change group."] };
+  const relationshipReferences = [...coverageReferences, ...collectStrings(content, ["changeGroupIds"])];
+  if (relationshipReferences.some((id) => !knownGroups.has(id))) return { valid: false, errors: ["Specialist output references an unknown anchor change group."] };
   if (task.kind === "flows" && !validFlowSemantics(content.graphs, knownGroups)) return { valid: false, errors: ["Flow nodes violate changed/unchanged anchor evidence semantics."] };
   if (task.kind === "walkthrough" || task.kind === "tests-risks") {
-    const covered = new Set(references);
+    const covered = new Set(coverageReferences);
     if (anchor.changeGroups.some((group) => !covered.has(group.id))) return { valid: false, errors: [`${task.kind} must represent every immutable anchor change group.`] };
   }
   if (!collectRefs(content).every(evidence)) return { valid: false, errors: ["Specialist output contains invalid evidence references."] };

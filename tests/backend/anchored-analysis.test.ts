@@ -195,6 +195,7 @@ describe("anchored provider contracts", () => {
     const riskOutput = { taskId: riskTask.id, coverage, content: { tests: [{ id: "test-1", title: "Migration test", behavior: "Covers the new path.", status: "covered", changeGroupIds: ["group-1"], evidence: [ref] }], risks, limitations: [] } };
     expect(validateAnchoredTaskOutput(riskOutput, riskTask).valid).toBe(true);
     expect(validateAnchoredTaskOutput({ ...riskOutput, content: { ...riskOutput.content, risks: [{ ...risks[0], unexpected: true }] } }, riskTask).valid).toBe(false);
+    expect(validateAnchoredTaskOutput({ ...riskOutput, content: { ...riskOutput.content, risks: [{ ...risks[0], changeGroupIds: ["unknown-group"] }] } }, riskTask).valid).toBe(false);
 
     const walkthroughTask = { kind: "walkthrough", id: "walkthrough", total: 3, anchor } as unknown as ProviderAnalysisTask;
     const dependency = { id: "dependency-1", title: "Caller ordering", detail: "Callers must initialize after the migration.", dependsOnIds: ["step-1"], changeGroupIds: ["group-1"], evidence: [ref] };
@@ -202,6 +203,8 @@ describe("anchored provider contracts", () => {
     const walkthroughOutput = { taskId: walkthroughTask.id, coverage, content: { summary: { intent: "Explain the migration.", behavioralChanges: ["New path."], architecturalImpact: ["Caller order."], limitations: [] }, walkthrough: [{ id: "step-1", title: "Inspect migration", reason: "It changes behavior.", summary: "Follow the new call path.", limitations: [], dependsOnStepIds: [], changeGroupId: "group-1", flowNodeIds: ["data-flow-node"], testIds: [], reviewInsightIds: [], evidence: [ref] }], reviewThreads: [], reviewInsights: [], limitations: [], dependencies: [dependency], unchangedInteractions: [unchanged] } };
     expect(validateAnchoredTaskOutput(walkthroughOutput, walkthroughTask).valid).toBe(true);
     expect(validateAnchoredTaskOutput({ ...walkthroughOutput, content: { ...walkthroughOutput.content, dependencies: [{ ...dependency, extra: "no" }] } }, walkthroughTask).valid).toBe(false);
+    expect(validateAnchoredTaskOutput({ ...walkthroughOutput, content: { ...walkthroughOutput.content, dependencies: [{ ...dependency, changeGroupIds: ["unknown-group"] }] } }, walkthroughTask).valid).toBe(false);
+    expect(validateAnchoredTaskOutput({ ...walkthroughOutput, content: { ...walkthroughOutput.content, unchangedInteractions: [{ ...unchanged, changeGroupIds: ["unknown-group"] }] } }, walkthroughTask).valid).toBe(false);
     const canonicalReply = { id: "github-comment", author: "Reviewer", body: "Reply.", authorAssociation: null, createdAt: null, updatedAt: null, url: null, path: null, line: null, originalLine: null, side: null, commitSha: null, originalCommitSha: null };
     const canonicalThread = { id: "github-thread", status: "active", provenance: "GitHub", evidence: [ref], author: "Reviewer", body: "Thread.", replies: [canonicalReply], replyCount: 1, url: null, resolvedBy: null, authorAssociation: null, path: null, line: null, originalLine: null, side: null, startLine: null, originalStartLine: null, commitSha: null, originalCommitSha: null, createdAt: null, updatedAt: null, changeGroupIds: ["group-1"], graphNodeIds: [], reviewInsightIds: [] };
     const withReview = { ...walkthroughOutput, content: { ...walkthroughOutput.content, reviewThreads: [canonicalThread] } };
