@@ -97,6 +97,15 @@ describe('provider process security boundary', () => {
     expect(redacted).toContain('[REDACTED]')
   })
 
+  it('keeps already-redacted credential prose stable across repeated sanitization', () => {
+    const source = 'task-token [REDACTED] · Bearer [REDACTED] · Authorization: [REDACTED] · Authorization: Bearer [REDACTED] · Proxy-Authorization: Basic [REDACTED] · Authorization=Token [REDACTED]'
+    const once = redactProviderStderr(source, {})
+
+    expect(once).toBe(source)
+    expect(redactProviderStderr(once, {})).toBe(once)
+    expect(once).not.toContain('[REDACTED]]')
+  })
+
   it('redacts credentials embedded in proxy URLs', () => {
     const redacted = redactProviderStderr(
       'proxy failed: https://proxy-user:proxy-password@proxy.example.test:8443/path',

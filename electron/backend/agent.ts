@@ -203,19 +203,19 @@ export function redactProviderStderr(
   // Handle bearer credentials before key/value matching so the scheme and
   // complete credential are never split across two partial replacements.
   redacted = redacted.replace(
-    /\b(?:Proxy-)?Authorization[ \t]*([=:])[ \t]*(?:Bearer|Basic|Token)[ \t]+[^\s,;}\])]+/gi,
+    /\b(?:Proxy-)?Authorization[ \t]*([=:])[ \t]*(?:Bearer|Basic|Token)[ \t]+(?!\[REDACTED\])[^\s,;}\])]+/gi,
     (_match, separator: string) => `Authorization${separator} [REDACTED]`,
   );
   redacted = redacted.replace(
-    /\bBearer[ \t]+[^\s,;}\])]+/gi,
+    /\bBearer[ \t]+(?!\[REDACTED\])[^\s,;}\])]+/gi,
     "Bearer [REDACTED]",
   );
   redacted = redacted.replace(
-    /\b(Token|Secret|Password)[ \t]+[^\s,;}\])]+/gi,
+    /\b(Token|Secret|Password)[ \t]+(?!\[REDACTED\])[^\s,;}\])]+/gi,
     "$1 [REDACTED]",
   );
   redacted = redacted.replace(
-    /(\b(?:[A-Za-z][A-Za-z0-9_.-]*(?:API[_-]?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|CREDENTIALS?)|token|secret|password|authorization)\b[ \t]*(?:=|:)[ \t]*)(?!\[REDACTED\])(?:"[^"]*"|'[^']*'|[^\s,;}\])]+)/gi,
+    /(\b(?:[A-Za-z][A-Za-z0-9_.-]*(?:API[_-]?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|CREDENTIALS?)|token|secret|password|authorization)\b[ \t]*(?:=|:)[ \t]*)(?!\[REDACTED\])(?!(?:Bearer|Basic|Token)[ \t]+\[REDACTED\])(?:"[^"]*"|'[^']*'|[^\s,;}\])]+)/gi,
     (_match, prefix: string) => `${prefix}[REDACTED]`,
   );
   return redacted;

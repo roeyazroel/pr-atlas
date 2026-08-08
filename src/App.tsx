@@ -4237,7 +4237,7 @@ function AnalysisProgress({
   );
 }
 
-function WalkthroughRich({
+export function WalkthroughRich({
   pr,
   markGroup,
   reviewed,
@@ -4312,6 +4312,16 @@ function WalkthroughRich({
         .map((node) => ({ flow, node })),
     ),
   );
+  const coordinatorEntries = (key: string) =>
+    safeArray(pr.walkthrough?.[key])
+      .map((entry) => objectValue(entry))
+      .filter((entry) => {
+        const changeGroupIds = safeArray(entry.changeGroupIds);
+        return changeGroupIds.length === 0 || changeGroupIds.includes(group.id);
+      });
+  const risks = coordinatorEntries("risks");
+  const dependencies = coordinatorEntries("dependencies");
+  const unchangedInteractions = coordinatorEntries("unchangedInteractions");
   const setStatus = (next: ReviewProgressStatus) => {
     updateProgress(String(step.id), next, note);
     setNoteDrafts((current) => ({ ...current, [noteKey]: note }));
@@ -4380,6 +4390,45 @@ function WalkthroughRich({
             <section className="evidence-section">
               <SectionTitle label="Step limitations" />
               <p>{safeArray(step.limitations).join(" · ")}</p>
+            </section>
+          )}
+          {risks.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Risks and watchpoints" />
+              <div className="flow-context-list">
+                {risks.map((risk, index) => (
+                  <div className="walkthrough-context-item" key={safeString(risk.id, `risk-${index + 1}`)}>
+                    <strong>{safeString(risk.title, `Risk ${index + 1}`)}</strong>
+                    <span>{safeString(risk.detail, "No additional risk detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {dependencies.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Cross-change dependencies" />
+              <div className="flow-context-list">
+                {dependencies.map((dependency, index) => (
+                  <div className="walkthrough-context-item" key={safeString(dependency.id, `dependency-${index + 1}`)}>
+                    <strong>{safeString(dependency.title, `Dependency ${index + 1}`)}</strong>
+                    <span>{safeString(dependency.detail, "No additional dependency detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {unchangedInteractions.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Unchanged integration context" />
+              <div className="flow-context-list">
+                {unchangedInteractions.map((interaction, index) => (
+                  <div className="walkthrough-context-item" key={safeString(interaction.id, `unchanged-${index + 1}`)}>
+                    <strong>{safeString(interaction.title, `Unchanged interaction ${index + 1}`)}</strong>
+                    <span>{safeString(interaction.detail, "No additional integration detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
             </section>
           )}
           <div className="behavior-compare">

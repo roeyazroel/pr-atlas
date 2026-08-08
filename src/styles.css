@@ -3595,6 +3595,15 @@ button:disabled {
   text-align: left;
   cursor: pointer;
 }
+.walkthrough-context-item {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--ink);
+}
 .flow-context-list button:hover {
   border-color: var(--teal);
 }
