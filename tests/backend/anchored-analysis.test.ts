@@ -42,6 +42,12 @@ describe("anchored provider contracts", () => {
     for (const graph of [assembled.document?.graphs.dataFlow, assembled.document?.graphs.codeDependency, assembled.document?.graphs.userAction]) {
       expect(graph?.nodes[0].testIds).toEqual(["test-test-1"]);
     }
+    expect(assembled.document?.walkthrough[0].testIds).toEqual(["test-test-1"]);
+    expect(assembled.document?.walkthrough[0].flowNodeIds).toEqual([
+      "graph-node-data-flow-node",
+      "graph-node-code-dependency-node",
+      "graph-node-user-action-node",
+    ]);
     const validation = validateWalkthroughDocument(assembled.document);
     expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
   });
@@ -78,7 +84,7 @@ describe("anchored provider contracts", () => {
     expect(assembled.document?.walkthrough.map((step) => step.id)).toEqual(["step-shared", "step-follow-up"]);
     expect(assembled.document?.walkthrough[1].dependsOnStepIds).toEqual(["step-shared"]);
     expect(assembled.document?.walkthrough[0].changeGroupId).toBe("group-shared");
-    expect(assembled.document?.walkthrough[0].flowNodeIds).toEqual(["graph-node-shared"]);
+    expect(assembled.document?.walkthrough[0].flowNodeIds).toEqual(["graph-node-shared", "graph-node-code-dependency-node", "graph-node-user-action-node"]);
     expect(assembled.document?.walkthrough[0].testIds).toEqual(["test-shared"]);
     expect(assembled.document?.tests[0]).toMatchObject({ id: "test-shared", changeGroupIds: ["group-shared"] });
     expect(assembled.document?.reviewThreads[0]).toMatchObject({ id: "review-insight-shared", changeGroupIds: ["group-shared"], graphNodeIds: ["graph-node-shared"], reviewInsightIds: ["review-insight-shared-2"], replies: [{ id: "github-comment-1" }, { id: "github-comment-2" }] });

@@ -351,12 +351,32 @@ export function assembleAnchoredDocument(request: AnalysisRequest, anchor: Seman
   const maxNodes = request.config?.maxGraphNodes ?? 80;
   for (const [key, id] of [["systemOverview", "system-overview"], ["dataFlow", "data-flow"], ["codeDependency", "code-dependency"], ["userAction", "user-action"]] as const) if (!validGraph(graphSource[key] as Record<string, unknown>, id, maxNodes)) return { valid: false, errors: [`${key} graph has invalid nodes, edges, tours, or node limit.`] };
   for (const key of ["dataFlow", "codeDependency", "userAction"] as const) if (!connected(graphSource[key] as Record<string, unknown>)) return { valid: false, errors: [`${key} graph is disconnected or has an orphan node.`] };
+  const joinedWalkthrough = walkthrough.map((step) => {
+    if (!text(step.changeGroupId)) return step;
+    const groupId = step.changeGroupId;
+    const relatedTestIds = (testsOutput as Record<string, unknown>[])
+      .filter((test) => strings(test.changeGroupIds) && (test.changeGroupIds as string[]).includes(groupId))
+      .map((test) => test.id)
+      .filter(text) as string[];
+    const relatedFlowNodeIds = Object.entries(graphSource).flatMap(([key, value]) => {
+      if (key === "systemOverview" || !isRecord(value) || !Array.isArray(value.nodes)) return [];
+      return value.nodes.filter(isRecord)
+        .filter((node) => node.changed === true && strings(node.changeGroupIds) && (node.changeGroupIds as string[]).includes(groupId))
+        .map((node) => node.id)
+        .filter(text) as string[];
+    });
+    return {
+      ...step,
+      testIds: [...new Set([...(strings(step.testIds) ? step.testIds as string[] : []), ...relatedTestIds])],
+      flowNodeIds: [...new Set([...(strings(step.flowNodeIds) ? step.flowNodeIds as string[] : []), ...relatedFlowNodeIds])],
+    };
+  });
   const limitations = [...new Set([...(Array.isArray(walk.limitations) ? walk.limitations : []), ...(Array.isArray(tests.limitations) ? tests.limitations : [])].filter(text))];
   const document = {
     schemaVersion: "1.1.0", run: { id: "anchored-provider-run", createdAt: new Date().toISOString(), provider: request.provider, model: request.model ?? model ?? "default", skillVersion: "1.0.0" },
     pullRequest: { host: "github.com", repository: request.repository, number: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha },
     summary: { ...(isRecord(walk.summary) ? walk.summary : {}), limitations }, changeGroups: groups,
-    walkthrough, graphs: graphSource,
+    walkthrough: joinedWalkthrough, graphs: graphSource,
     tests: testsOutput, reviewThreads, reviewInsights, evidence: evidenceItems,
     unchangedInteractions, risks, dependencies,
   } as unknown as WalkthroughDocument;
