@@ -157,9 +157,15 @@ describe("anchored provider contracts", () => {
         expect(prompt).toMatch(/every changed path.*changed evidence/i);
         expect(prompt).toMatch(/each separate changed hunk/i);
         expect(prompt).toMatch(/changeGroups\[\]\.evidence/i);
+        expect(prompt).toMatch(/binary.*UTF-8.*validation failure.*not.*Legacy fallback/i);
+        expect(prompt).toMatch(/systemOverview.*edgeless.*exempt.*connectivity/i);
       }
       if (kind === "tests-risks") expect(prompt).toMatch(/search the entire repository test suite/i);
-      if (kind === "walkthrough") expect(prompt).toMatch(/eventual assembled document/i);
+      if (kind === "walkthrough") {
+        expect(prompt).toMatch(/eventual assembled document/i);
+        expect(prompt).toMatch(/binary.*UTF-8.*validation failure.*not.*Legacy fallback/i);
+        expect(prompt).toMatch(/systemOverview.*edgeless.*exempt.*connectivity/i);
+      }
     }
   });
 
