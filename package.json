@@ -9,7 +9,7 @@
     "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:desktop\"",
     "dev:web": "vite --host 127.0.0.1",
     "dev:desktop": "wait-on http://127.0.0.1:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron dist-electron/main.cjs",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs && esbuild electron/backend/coordinator-mcp.ts --bundle --platform=node --format=cjs --outfile=dist-electron/coordinator-mcp.cjs",
     "build": "npm run build:electron && npm run typecheck && npm run typecheck:electron && vite build",
     "preview": "vite preview",
     "package": "npm run build && electron-builder --publish never",

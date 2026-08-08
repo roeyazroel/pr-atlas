@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { GithubClient } from '../../electron/backend/github'
@@ -81,7 +81,10 @@ describe('GitHub review ingestion', () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-review-`)
     try {
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') { await mkdir(args[3], { recursive: true }); return { stdout: '', stderr: '' } }
+        if (file === 'git' && args[0] === 'rev-parse') return { stdout: args[1] === '--show-toplevel' ? options?.cwd ?? '' : options?.cwd?.split(/[\\/]/).at(-1) ?? '', stderr: '' }
+        if (file === 'git' && args[0] === 'status') return { stdout: '', stderr: '' }
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         if (file === 'gh') return { stdout: '', stderr: '' }

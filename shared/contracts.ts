@@ -123,6 +123,8 @@ export interface AnalysisRequest {
 
 export interface AnalysisRunConfig {
   depth: "quick" | "standard" | "deep";
+  /** Coordinator is the current architecture; legacy preserves the established map/reduce flow. */
+  scanMode: "coordinator" | "legacy";
   includeReviewComments: boolean;
   maxGraphNodes: number;
   timeoutMinutes: number;
@@ -130,6 +132,7 @@ export interface AnalysisRunConfig {
 
 export const DEFAULT_ANALYSIS_RUN_CONFIG: AnalysisRunConfig = {
   depth: "standard",
+  scanMode: "coordinator",
   includeReviewComments: true,
   maxGraphNodes: 80,
   timeoutMinutes: 20,
@@ -163,6 +166,7 @@ export interface AnalysisProgressEvent {
   stage: AnalysisStage;
   message: string;
   timestamp: string;
+  taskState?: "pending" | "running" | "complete" | "failed";
 }
 
 export interface AgentAnalysisResult {
@@ -174,20 +178,25 @@ export interface AgentAnalysisResult {
   errors?: string[];
   /** Validated, provider-neutral intermediate result for anchored large-PR work. */
   taskOutput?: AnchoredTaskOutput;
+  /** Legacy map-stage result. Kept so the selectable compatibility engine remains executable. */
+  mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: ProviderEvidenceReference[]; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
 }
 
 export type AnchoredTaskKind = "anchor" | "walkthrough" | "tests-risks" | "flows";
+export type LegacyBatchTaskKind = "map" | "reduce";
 export type AnchorDomainId = "production-path" | "experimental-pocs" | "migration-rollback" | "updater-installer" | "runtime-packaging" | "reviewer-workflow";
 export type AnchorDomainStatus = "changed" | "unchanged-relevant" | "not-evidenced";
-export interface ProviderEvidenceReference { path: string; line: number | null; }
+export interface ProviderEvidenceReference { path: string; line: number | null; role?: "changed" | "unchanged-context"; }
+/** Coordinator evidence is always line-specific and declares why the line is usable. */
+export interface CoordinatorEvidenceReference { path: string; line: number; role: "changed" | "unchanged-context"; }
 export interface SemanticAnchorGroup {
   id: string; title: string; summary: string; motivation: string;
   previousBehavior: string; newBehavior: string; attention: "low" | "medium" | "high";
-  evidence: ProviderEvidenceReference[];
+  evidence: CoordinatorEvidenceReference[];
 }
 export interface SemanticAnchorDomain {
   id: AnchorDomainId; status: AnchorDomainStatus; rationale: string;
-  evidence: ProviderEvidenceReference[]; changeGroupIds: string[];
+  evidence: CoordinatorEvidenceReference[]; changeGroupIds: string[];
 }
 export interface SemanticAnchor { taskId: string; domains: SemanticAnchorDomain[]; changeGroups: SemanticAnchorGroup[]; }
 export interface SpecialistCoverage { domainId: AnchorDomainId; status: "covered" | "not-applicable"; rationale: string; }
@@ -199,11 +208,18 @@ export interface AnchoredSpecialistOutput {
 export type AnchoredTaskOutput = SemanticAnchor | AnchoredSpecialistOutput;
 
 export interface ProviderAnalysisTask {
-  kind: AnchoredTaskKind;
+  kind: AnchoredTaskKind | LegacyBatchTaskKind;
   id: string;
   total: number;
   /** The accepted semantic source of truth supplied verbatim to every specialist. */
   anchor?: SemanticAnchor;
+  /** Trusted task-local validator command/runtime for the retained legacy engine only. */
+  validatorCommand?: string;
+  validatorRuntime?: string;
+  assignedPaths?: string[];
+  assignedUnits?: Array<{ path: string; segment: number }>;
+  /** Host-owned MCP bootstrap for the coordinator lane; never contains repository input. */
+  coordinator?: { url: string; token: string; shimPath: string; submitted: () => AnchoredTaskOutput | null; submitForHarness?: (key: string, result: AnchoredTaskOutput) => Promise<unknown> };
 }
 
 /** Provider-neutral process boundary used by the main-process orchestration. */

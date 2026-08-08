@@ -235,6 +235,19 @@ describe("analysis store", () => {
     await expect(store.listRuns("example/backend", 481)).resolves.toEqual([]);
   });
 
+  it("normalizes corrupted persisted scan modes to the coordinator default", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-corrupt-config");
+    await store.writeManifest(directory, {
+      ...run("run-corrupt-config"),
+      config: { depth: "standard", scanMode: { injected: true }, includeReviewComments: true, maxGraphNodes: 80, timeoutMinutes: 20 } as never,
+    });
+    await expect(store.listRuns("example/backend", 481)).resolves.toEqual([
+      expect.objectContaining({ config: expect.objectContaining({ scanMode: "coordinator" }) }),
+    ]);
+  });
+
   it("loads a ready run only when its manifest and validated walkthrough match the requested identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);

@@ -120,6 +120,13 @@ const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
 const LARGE_PR_FILE_THRESHOLD = 20;
 const LARGE_PR_CHANGE_THRESHOLD = 1_000;
+const COORDINATOR_EXCLUSIVE_PROGRESS_STAGES = new Set<AnalysisProgressEvent["stage"]>([
+  "anchoring",
+  "walkthrough",
+  "tests-risks",
+  "flows",
+  "assembling",
+]);
 
 export type EvidenceCodeLineKind =
   | "context"
@@ -1150,6 +1157,14 @@ function readStored<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
+function readAnalysisConfig(): AnalysisRunConfig {
+  const saved = readStored<Partial<AnalysisRunConfig>>(ANALYSIS_CONFIG_STORAGE_KEY, {});
+  return {
+    ...DEFAULT_ANALYSIS_RUN_CONFIG,
+    ...saved,
+    scanMode: saved.scanMode === "legacy" ? "legacy" : "coordinator",
+  };
+}
 
 function StatusPill({ status }: { status: PRStatus }) {
   const meta = statusMeta[status];
@@ -1275,6 +1290,7 @@ function App() {
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
   } | null>(null);
   const [analysisDone, setAnalysisDone] = useState<Record<string, boolean>>({});
@@ -1334,9 +1350,7 @@ function App() {
   const [customPrompt, setCustomPrompt] = useState(() =>
     readStored(CUSTOM_PROMPT_STORAGE_KEY, ""),
   );
-  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(() =>
-    readStored(ANALYSIS_CONFIG_STORAGE_KEY, DEFAULT_ANALYSIS_RUN_CONFIG),
-  );
+  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(readAnalysisConfig);
   const [retentionSettings, setRetentionSettings] =
     useState<RunRetentionSettings>(DEFAULT_RETENTION_SETTINGS);
   const [stepProgress, setStepProgress] = useState<
@@ -2127,6 +2141,7 @@ function App() {
       startedAt: Date.now(),
       live: true,
       provider,
+      scanMode: analysisConfig.scanMode,
       activity: [],
     });
     let result: AnalysisRunResult;
@@ -2734,6 +2749,7 @@ function App() {
             </p>
             <p className="confirm-detail">
               {analysisConfig.depth} depth ·{" "}
+              {analysisConfig.scanMode === "coordinator" ? "coordinator engine" : "legacy batching engine"} ·{" "}
               {analysisConfig.includeReviewComments
                 ? "review comments included"
                 : "review comments excluded"}{" "}
@@ -3053,6 +3069,24 @@ function App() {
               )}
               <fieldset className="provider-fieldset">
                 <legend>Analysis scope</legend>
+                <label className="model-setting">
+                  <span>Scan engine</span>
+                  <SelectMenu
+                    ariaLabel="Scan engine"
+                    value={analysisConfig.scanMode}
+                    options={[
+                      { value: "coordinator", label: "Coordinator (recommended)" },
+                      { value: "legacy", label: "Legacy batching" },
+                    ]}
+                    onChange={(value) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        scanMode: value as AnalysisRunConfig["scanMode"],
+                      }))
+                    }
+                  />
+                  <small>Coordinator anchors the PR before parallel specialists. Legacy keeps the established map/reduce batching flow.</small>
+                </label>
                 <label className="model-setting">
                   <span>Depth</span>
                   <SelectMenu
@@ -3677,6 +3711,7 @@ function ViewContent({
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
   } | null;
   providerName: string;
@@ -4041,6 +4076,7 @@ function AnalysisProgress({
     stage: number;
     running: boolean;
     live?: boolean;
+    scanMode?: AnalysisRunConfig["scanMode"];
     startedAt: number;
     activity: AnalysisProgressEvent[];
   };
@@ -4059,6 +4095,22 @@ function AnalysisProgress({
   const elapsedSeconds = Math.max(
     0,
     Math.floor((now - analysis.startedAt) / 1_000),
+  );
+  const coordinatorRows = [
+    ["anchoring", "Anchor"],
+    ["walkthrough", "Walkthrough"],
+    ["tests-risks", "Tests & risks"],
+    ["flows", "Flows"],
+    ["assembling", "Assembly"],
+    ["validating", "Validation"],
+  ] as const;
+  const coordinatorState = (stage: AnalysisProgressEvent["stage"]) => {
+    const events = analysis.activity.filter((event) => event.stage === stage);
+    const latest = events.at(-1);
+    return latest?.taskState ?? (latest ? "running" : "pending");
+  };
+  const hasCoordinatorActivity = analysis.activity.some((event) =>
+    COORDINATOR_EXCLUSIVE_PROGRESS_STAGES.has(event.stage),
   );
   return (
     <div className="analysis-screen">
@@ -4123,6 +4175,17 @@ function AnalysisProgress({
             Shows scan operations and validation milestones, not private model
             reasoning.
           </small>
+        </section>
+      )}
+      {live && hasCoordinatorActivity && (
+        <section className="agent-activity coordinator-task-state" aria-label="Coordinator task state">
+          <div className="agent-activity-head"><div><strong>Coordinator task state</strong><span>Independent task receipts remain visible while parallel work continues.</span></div><Workflow size={14} /></div>
+          <div role="list" aria-label="Coordinator tasks">
+            {coordinatorRows.map(([stage, label]) => {
+              const state = coordinatorState(stage);
+              return <div className="agent-activity-row" role="listitem" aria-label={`${label}: ${state}`} key={stage}><strong>{label}</strong><span>{state}</span></div>;
+            })}
+          </div>
         </section>
       )}
       <div className="stage-list">
