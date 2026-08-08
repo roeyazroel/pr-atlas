@@ -333,7 +333,20 @@ export function assembleAnchoredDocument(request: AnalysisRequest, anchor: Seman
   const risks = namespacedRisks.items.map((risk) => ({ ...risk, changeGroupIds: remapIds(risk.changeGroupIds, namespacedGroups.ids) }));
   const dependencies = namespacedDependencies.items.map((dependency) => ({ ...dependency, changeGroupIds: remapIds(dependency.changeGroupIds, namespacedGroups.ids), dependsOnIds: remapIds(dependency.dependsOnIds, namespacedWalkthrough.ids) }));
   const unchangedInteractions = namespacedUnchangedInteractions.items.map((interaction) => ({ ...interaction, changeGroupIds: remapIds(interaction.changeGroupIds, namespacedGroups.ids) }));
-  const graphSource = graphNamespace?.graphs;
+  const graphSource = graphNamespace?.graphs && Object.fromEntries(Object.entries(graphNamespace.graphs).map(([key, value]) => {
+    if (!isRecord(value) || key === "systemOverview") return [key, value];
+    const nodes = Array.isArray(value.nodes) ? value.nodes.map((rawNode) => {
+      if (!isRecord(rawNode) || rawNode.changed !== true || !strings(rawNode.changeGroupIds)) return rawNode;
+      const groupIds = new Set(rawNode.changeGroupIds as string[]);
+      const relatedTestIds = (testsOutput as Record<string, unknown>[])
+        .filter((test) => strings(test.changeGroupIds) && (test.changeGroupIds as string[]).some((id) => groupIds.has(id)))
+        .map((test) => test.id)
+        .filter(text) as string[];
+      const declaredTestIds = strings(rawNode.testIds) ? rawNode.testIds as string[] : [];
+      return { ...rawNode, testIds: [...new Set([...declaredTestIds, ...relatedTestIds])] };
+    }) : value.nodes;
+    return [key, { ...value, nodes }];
+  }));
   if (!graphSource || !["systemOverview", "dataFlow", "codeDependency", "userAction"].every((key) => isRecord(graphSource[key]))) return { valid: false, errors: ["Flows specialist must provide exactly four graphs."] };
   const maxNodes = request.config?.maxGraphNodes ?? 80;
   for (const [key, id] of [["systemOverview", "system-overview"], ["dataFlow", "data-flow"], ["codeDependency", "code-dependency"], ["userAction", "user-action"]] as const) if (!validGraph(graphSource[key] as Record<string, unknown>, id, maxNodes)) return { valid: false, errors: [`${key} graph has invalid nodes, edges, tours, or node limit.`] };

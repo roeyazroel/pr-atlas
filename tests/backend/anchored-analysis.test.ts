@@ -39,6 +39,9 @@ describe("anchored provider contracts", () => {
     expect(assembled.valid, JSON.stringify(assembled.errors)).toBe(true);
     expect(assembled.document?.evidence).toHaveLength(2);
     expect(new Set(assembled.document?.evidence.map((item) => item.id)).size).toBe(2);
+    for (const graph of [assembled.document?.graphs.dataFlow, assembled.document?.graphs.codeDependency, assembled.document?.graphs.userAction]) {
+      expect(graph?.nodes[0].testIds).toEqual(["test-test-1"]);
+    }
     const validation = validateWalkthroughDocument(assembled.document);
     expect(validation.valid, JSON.stringify(validation.errors)).toBe(true);
   });
@@ -136,6 +139,13 @@ describe("anchored provider contracts", () => {
       expect(prompt).toContain(`You are the ${kind} task`);
       expect(prompt).toMatch(/untrusted data/i);
       expect(prompt).toMatch(/Never return a complete walkthrough/i);
+      expect(prompt).toMatch(/executing through a live provider process/i);
+      expect(prompt).toMatch(/task authentication/i);
+      if (kind === "flows") {
+        expect(prompt).toMatch(/directly required by the changed runtime path/i);
+        expect(prompt).toMatch(/exclude unrelated unchanged concepts/i);
+        expect(prompt).toMatch(/alternate or fallback result paths separate from primary-only assembly/i);
+      }
     }
   });
 
