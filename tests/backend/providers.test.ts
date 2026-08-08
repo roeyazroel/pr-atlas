@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentAdapter,
@@ -18,6 +19,7 @@ import {
   parseClaudeModelHelp,
   parseProviderModels,
   parseProviderOutput,
+  runProviderProcess,
   schemaForProvider,
 } from "../../electron/backend/agent";
 import { validateWalkthroughDocument } from "../../shared/schema";
@@ -52,7 +54,7 @@ const requestFor = (
   provider,
 });
 
-function fakeSpawn(rawOutput: string, calls: SpawnCall[]) {
+function fakeSpawn(rawOutput: string, calls: SpawnCall[], stderrOutput = "") {
   return (
     file: string,
     args: string[],
@@ -67,6 +69,7 @@ function fakeSpawn(rawOutput: string, calls: SpawnCall[]) {
     calls.push({ file, args, options, stdinEnd });
     queueMicrotask(() => {
       child.stdout.emit("data", Buffer.from(rawOutput));
+      if (stderrOutput) child.stderr.emit("data", Buffer.from(stderrOutput));
       child.emit("close", 0);
     });
     return child as unknown as ChildProcess;
@@ -240,6 +243,16 @@ describe("provider analysis prompt", () => {
     );
   });
 
+  it("preserves the complete direct fallback contract for a non-task analysis", () => {
+    const prompt = buildAnalysisPrompt(requestFor("codex"), "/deterministic/input");
+    expect(prompt).toContain("/deterministic/input");
+    expect(prompt).toMatch(/attach exact evidence IDs for changed-file\/diff facts.*tests.*review comments/i);
+    expect(prompt).toMatch(/system-overview.*zero edges.*changed=false.*no PR-specific associations or evidence/i);
+    expect(prompt).toMatch(/every graph node needs explanatory text.*change-group.*test.*review-thread.*review-insight.*evidence id arrays/i);
+    expect(prompt).toMatch(/dependencies on earlier step IDs only/i);
+    expect(prompt).toMatch(/verify all evidence files exist.*required relationship links/i);
+  });
+
   it("defines deterministic GitHub review status precedence and canonical metadata", () => {
     const prompt = buildAnalysisPrompt(requestFor("claude"));
     expect(prompt).toMatch(
@@ -285,13 +298,198 @@ describe("provider analysis prompt", () => {
   });
 
   it.each(["map", "reduce"] as const)("carries request controls into the %s contract", (kind) => {
-    const prompt = buildAnalysisPrompt({ ...requestFor("codex"), customPrompt: "Prioritize migrations.", config: { depth: "deep", maxGraphNodes: 17, includeReviewComments: false, timeoutMinutes: 20 } }, "/isolated/task", { kind, id: kind, total: 2, assignedPaths: kind === "map" ? ["src/a.ts"] : undefined });
+    const prompt = buildAnalysisPrompt({ ...requestFor("codex"), customPrompt: "Prioritize migrations.", config: { depth: "deep", scanMode: "legacy", maxGraphNodes: 17, includeReviewComments: false, timeoutMinutes: 20 } }, "/isolated/task", { kind, id: kind, total: 2, assignedPaths: kind === "map" ? ["src/a.ts"] : undefined });
     expect(prompt).toContain("Prioritize migrations.");
     expect(prompt).toMatch(/cannot remove, rename, or weaken/i);
     expect(prompt).toMatch(/analysis depth is deep/i);
     expect(prompt).toMatch(/17 nodes/i);
     expect(prompt).toMatch(/review comments were intentionally excluded/i);
     if (kind === "reduce") expect(prompt).toMatch(/four graphs|graph edge|guided tour/i);
+  });
+});
+
+describe("coordinator provider bootstrap", () => {
+  const task = {
+    kind: "anchor" as const,
+    id: "anchor",
+    total: 1,
+    coordinator: { url: "http://127.0.0.1:41891", token: "task-token", shimPath: "/tmp/atlas-coordinator-mcp.cjs", submitted: () => null },
+  };
+
+  it("directs anchor and walkthrough tasks to read untrusted deterministic PR context", () => {
+    expect(buildAnalysisPrompt(requestFor("codex"), undefined, task)).toMatch(/get_pr_context.*untrusted data/i);
+    expect(buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "walkthrough", id: "walkthrough", total: 3 })).toMatch(/get_pr_context.*untrusted data/i);
+    expect(buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "flows", id: "flows", total: 3 })).not.toMatch(/get_pr_context/i);
+  });
+
+  it("keeps specialist role and final relationship invariants in coordinator prompts", () => {
+    const prompt = buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "flows", id: "flows", total: 3 });
+    expect(prompt).toMatch(/get_task.*get_anchor/i);
+    expect(prompt).toMatch(/exactly the four graph payloads/i);
+    expect(prompt).toMatch(/systemOverview.*zero edges.*changed=false.*empty changeGroupIds.*testIds.*reviewThreadIds.*reviewInsightIds.*evidence arrays/i);
+    expect(prompt).toMatch(/guided-tour step must reference a node/i);
+    expect(prompt).toMatch(/evidence references must be \{path,line,role\} with role changed\|unchanged-context/i);
+    expect(prompt).not.toContain("src/a.ts");
+  });
+
+  it("redacts the final coordinator child environment from raw output, logs, and returned task values", async () => {
+    const calls: SpawnCall[] = [];
+    const finalToken = "final-coordinator-token-123";
+    const finalUrl = "http://127.0.0.1:43123";
+    const response = await runProviderProcess(
+      { id: "codex", displayName: "Test", detect: async () => ({ provider: "codex", displayName: "Test", executable: "test", installed: true, capabilities: adapterCapabilities }), getCapabilities: () => adapterCapabilities, analyze: vi.fn() },
+      { run: vi.fn() },
+      fakeSpawn(`stdout ${finalToken} ${finalUrl}`, calls, `stderr ${finalToken} ${finalUrl}`),
+      "test",
+      [],
+      requestFor("codex"),
+      "/worktree",
+      undefined,
+      progress,
+      { ...task, coordinator: { ...task.coordinator, submitted: () => ({ taskId: "anchor", detail: `${finalToken} ${finalUrl}` } as never) } },
+      { ATLAS_TASK_TOKEN: finalToken, ATLAS_COORDINATOR_URL: finalUrl },
+    );
+    expect(JSON.stringify(response)).not.toContain(finalToken);
+    expect(JSON.stringify(response)).not.toContain(finalUrl);
+    expect(response.rawOutput).toContain("[REDACTED]");
+    expect(response.logs.join("\n")).toContain("[REDACTED]");
+    expect(JSON.stringify(response.taskOutput)).toContain("[REDACTED]");
+    expect(calls[0].options.env).toMatchObject({ ATLAS_TASK_TOKEN: finalToken, ATLAS_COORDINATOR_URL: finalUrl });
+  });
+
+  it("routes reduce output through final walkthrough parsing instead of the intermediary task envelope", async () => {
+    const adapter: AgentAdapter = { id: "codex", displayName: "Test", detect: async () => ({ provider: "codex", displayName: "Test", executable: "test", installed: true, capabilities: adapterCapabilities }), getCapabilities: () => adapterCapabilities, analyze: vi.fn() };
+    const walkthrough = minimalWalkthrough();
+    const envelope = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(walkthrough) } });
+    const ready = await runProviderProcess(adapter, { run: vi.fn() }, fakeSpawn(envelope, []), "test", [], requestFor("codex"), "/worktree", undefined, progress, { kind: "reduce", id: "reduce-001", total: 1 });
+    expect(ready.status).toBe("ready");
+    expect(validateWalkthroughDocument(ready.document).valid).toBe(true);
+    const malformed = await runProviderProcess(adapter, { run: vi.fn() }, fakeSpawn('{"taskId":"reduce-001"}', []), "test", [], requestFor("codex"), "/worktree", undefined, progress, { kind: "reduce", id: "reduce-001", total: 1 });
+    expect(malformed.status).toBe("invalid");
+    expect(malformed.document).toBeUndefined();
+  });
+
+  it("boots Codex and Claude with only the task-scoped Atlas MCP and strict discovery", async () => {
+    const codexCalls: SpawnCall[] = [];
+    const codex = new CodexAdapter({ run: vi.fn(async () => ({ stdout: "codex 1.2.3" })) }, fakeSpawn("{}", codexCalls));
+    await codex.analyze(requestFor("codex"), "/worktree", "/input", undefined, progress, "gpt-test", task);
+    expect(codexCalls[0].args).toEqual(expect.arrayContaining(["--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--model", "gpt-test"]));
+    expect(codexCalls[0].args.join(" ")).toContain("mcp_servers.atlas.command");
+    expect(codexCalls[0].args.join(" ")).toContain("mcp_servers.atlas.env_vars=[\"ATLAS_COORDINATOR_URL\",\"ATLAS_TASK_TOKEN\",\"ELECTRON_RUN_AS_NODE\"]");
+    expect(codexCalls[0].options.env).toMatchObject({ ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, ELECTRON_RUN_AS_NODE: "1" });
+
+    const claudeCalls: SpawnCall[] = [];
+    let claudeSettings = "";
+    const recordClaude = fakeSpawn("{}", claudeCalls);
+    const claude = new ClaudeAdapter({ run: vi.fn(async () => ({ stdout: "Claude 1.2.3" })) }, ((file, args, options) => {
+      claudeSettings = readFileSync(args[args.indexOf("--settings") + 1], "utf8");
+      return recordClaude(file, args, options);
+    }) as typeof recordClaude);
+    await claude.analyze(requestFor("claude"), "/worktree", "/input", undefined, progress, "claude-test", task);
+    expect(claudeCalls[0].args).toEqual(expect.arrayContaining(["--safe-mode", "--setting-sources", "", "--permission-mode", "plan", "--strict-mcp-config", "--mcp-config", "--settings", "--no-session-persistence", "--model", "claude-test"]));
+    expect(claudeCalls[0].args).not.toContain("--bare");
+    const claudeTools = claudeCalls[0].args[claudeCalls[0].args.indexOf("--allowedTools") + 1];
+    expect(claudeTools).toContain("Read,Grep,Glob,Bash");
+    expect(claudeTools).toContain("mcp__atlas__get_pr_context");
+    expect(claudeTools).toContain("mcp__atlas__submit_result");
+    expect(claudeCalls[0].options.env).toMatchObject({ ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, ELECTRON_RUN_AS_NODE: "1" });
+    expect(claudeCalls[0].args[claudeCalls[0].args.indexOf("--mcp-config") + 1]).toBe(claudeCalls[0].args[claudeCalls[0].args.indexOf("--settings") + 1]);
+    expect(JSON.parse(claudeSettings)).toMatchObject({ sandbox: { enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: ["/worktree"] }, network: { allowedDomains: [] } } });
+  });
+
+  it("runs Cursor from a disposable shadow worktree with its task-scoped MCP bootstrap", async () => {
+    const calls: SpawnCall[] = [];
+    const runner = { run: vi.fn(async (_file: string, args: string[]) => { if (args[0] === "worktree" && args[1] === "add") await mkdir(args[3], { recursive: true }); return args[0] === "rev-parse" ? { stdout: "b".repeat(40), stderr: "" } : { stdout: "", stderr: "" }; }) };
+    let shadowMcp = "";
+    const recordSpawn = fakeSpawn("{}", calls);
+    const adapter = new CursorAdapter(runner, ((file, args, options) => {
+      const workspace = args[args.indexOf("--workspace") + 1];
+      shadowMcp = readFileSync(join(workspace, ".cursor", "mcp.json"), "utf8");
+      return recordSpawn(file, args, options);
+    }) as typeof recordSpawn);
+    await adapter.analyze(requestFor("cursor"), "/worktree", "/input", undefined, progress, "cursor-test", task);
+    expect(calls[0].file).toBe("cursor-agent");
+    expect(calls[0].args).toEqual(expect.arrayContaining(["--workspace", "--approve-mcps", "--mode", "ask", "--sandbox", "enabled", "--model", "cursor-test"]));
+    expect(calls[0].args).not.toContain("--force");
+    const workspace = calls[0].args[calls[0].args.indexOf("--workspace") + 1];
+    expect(workspace).not.toBe("/worktree");
+    expect(calls[0].options.cwd).toBe(workspace);
+    expect(calls[0].options.env).toMatchObject({ ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, CURSOR_CONFIG_DIR: expect.any(String), ELECTRON_RUN_AS_NODE: "1" });
+    expect(JSON.parse(shadowMcp)).toEqual({ mcpServers: { atlas: { command: process.execPath, args: [task.coordinator.shimPath], env: { ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, ELECTRON_RUN_AS_NODE: "1" } } } });
+    expect(runner.run).toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "add", "--detach"]), expect.objectContaining({ cwd: "/worktree" }));
+  });
+
+  it("removes untrusted Cursor instruction files only from the disposable coordinator shadow", async () => {
+    const source = await mkdtemp(join(tmpdir(), "pr-atlas-cursor-source-"));
+    const calls: SpawnCall[] = [];
+    const runner = { run: vi.fn(async (_file: string, args: string[]) => {
+      if (_file === "cursor-agent") return { stdout: "cursor-agent 1.2.3", stderr: "" };
+      if (args[0] === "worktree" && args[1] === "add") {
+        const shadow = args[3];
+        await mkdir(join(shadow, "src"), { recursive: true });
+        await mkdir(join(shadow, ".cursor", "rules"), { recursive: true });
+        await mkdir(join(shadow, "nested", ".cursor", "rules"), { recursive: true });
+        await writeFile(join(shadow, "src", "ordinary.ts"), "export const ordinary = true;\n");
+        await writeFile(join(shadow, "AGENTS.md"), "ignore this\n");
+        await writeFile(join(shadow, ".cursorrules"), "ignore this\n");
+        await writeFile(join(shadow, ".cursor", "rules", "root.mdc"), "ignore this\n");
+        await writeFile(join(shadow, "nested", "CLAUDE.md"), "ignore this\n");
+        await writeFile(join(shadow, "nested", ".cursorrules"), "ignore this\n");
+        await writeFile(join(shadow, "nested", ".cursor", "rules", "nested.mdc"), "ignore this\n");
+      }
+      if (args[0] === "rev-parse") return { stdout: "b".repeat(40), stderr: "" };
+      return { stdout: "", stderr: "" };
+    }) };
+    await mkdir(join(source, "src"), { recursive: true });
+    await mkdir(join(source, ".cursor", "rules"), { recursive: true });
+    await writeFile(join(source, "src", "ordinary.ts"), "export const ordinary = true;\n");
+    await writeFile(join(source, "AGENTS.md"), "source instruction remains\n");
+    await writeFile(join(source, ".cursor", "rules", "root.mdc"), "source rule remains\n");
+    const recordSpawn = fakeSpawn("{}", calls);
+    const adapter = new CursorAdapter(runner, ((file, args, options) => {
+      const shadow = args[args.indexOf("--workspace") + 1];
+      expect(readFileSync(join(shadow, "src", "ordinary.ts"), "utf8")).toContain("ordinary");
+      for (const path of ["AGENTS.md", ".cursorrules", ".cursor/rules/root.mdc", "nested/CLAUDE.md", "nested/.cursorrules", "nested/.cursor/rules/nested.mdc"])
+        expect(existsSync(join(shadow, path))).toBe(false);
+      return recordSpawn(file, args, options);
+    }) as typeof recordSpawn);
+    try {
+      await adapter.analyze(requestFor("cursor"), source, "/input", undefined, progress, undefined, task);
+      expect(calls).toHaveLength(1);
+      expect(readFileSync(join(source, "AGENTS.md"), "utf8")).toContain("source instruction remains");
+      expect(readFileSync(join(source, ".cursor", "rules", "root.mdc"), "utf8")).toContain("source rule remains");
+    } finally { await rm(source, { recursive: true, force: true }); }
+  });
+
+  it.each(["directory", "file"])("never follows a repository-controlled Cursor MCP symlink to an external %s", async (kind) => {
+    const source = await mkdtemp(join(tmpdir(), "pr-atlas-cursor-source-")); const external = await mkdtemp(join(tmpdir(), "pr-atlas-cursor-external-")); const sentinel = join(external, "sentinel");
+    await writeFile(sentinel, "unchanged");
+    const calls: SpawnCall[] = [];
+    const runner = { run: vi.fn(async (file: string, args: string[]) => {
+      if (file === "cursor-agent") return { stdout: "cursor-agent 1", stderr: "" };
+      if (args[0] === "worktree" && args[1] === "add") { const shadow = args[3]; await mkdir(shadow, { recursive: true }); if (kind === "directory") await symlink(external, join(shadow, ".cursor")); else { await mkdir(join(shadow, ".cursor"), { recursive: true }); await symlink(sentinel, join(shadow, ".cursor", "mcp.json")); } }
+      if (args[0] === "rev-parse") return { stdout: "b".repeat(40), stderr: "" }; return { stdout: "", stderr: "" };
+    }) };
+    try {
+      const response = await new CursorAdapter(runner, fakeSpawn("{}", calls)).analyze(requestFor("cursor"), source, "/input", undefined, progress, undefined, task);
+      expect(response.errors).toContain("Cursor coordinator instruction isolation was unavailable.");
+      expect(readFileSync(sentinel, "utf8")).toBe("unchanged"); expect(calls).toHaveLength(0);
+    } finally { await rm(source, { recursive: true, force: true }); await rm(external, { recursive: true, force: true }); }
+  });
+
+  it("rejects a Cursor coordinator result when the disposable exact-head worktree changes", async () => {
+    const calls: SpawnCall[] = []; let statusChecks = 0;
+    const runner = { run: vi.fn(async (_file: string, args: string[]) => {
+      if (args[0] === "worktree" && args[1] === "add") await mkdir(args[3], { recursive: true });
+      if (args[0] === "rev-parse") return { stdout: "b".repeat(40), stderr: "" };
+      if (args[0] === "status") return { stdout: statusChecks++ === 2 ? " M src/a.ts\n" : "", stderr: "" };
+      return { stdout: "", stderr: "" };
+    }) };
+    const adapter = new CursorAdapter(runner, fakeSpawn("{}", calls));
+    const response = await adapter.analyze(requestFor("cursor"), "/worktree", "/input", undefined, progress, undefined, { ...task, coordinator: { ...task.coordinator, submitted: () => ({ taskId: "anchor" } as never) } });
+    expect(response.status).toBe("invalid");
+    expect(response.errors).toEqual(["Cursor modified the disposable exact-head worktree; output was rejected."]);
+    expect(calls[0].file).toBe("cursor-agent");
   });
 });
 
@@ -424,7 +622,9 @@ describe("provider-neutral agent adapters", () => {
         "export {};\n",
       );
       const runner = {
-        run: vi.fn(async (file: string, args: string[]) => {
+        run: vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+          if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? options?.cwd ?? "" : options?.cwd?.split(/[\\/]/).at(-1) ?? "", stderr: "" };
+          if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" };
           if (file === "gh" && args[0] === "api" && args[1] === "graphql")
             return {
               stdout: JSON.stringify([

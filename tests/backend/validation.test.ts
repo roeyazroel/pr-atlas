@@ -143,6 +143,19 @@ describe("analysis request validation", () => {
       }).valid,
     ).toBe(false);
   });
+
+  it("defaults persisted pre-scan-engine configurations to the coordinator and accepts legacy explicitly", () => {
+    const oldConfig = {
+      depth: "standard" as const,
+      includeReviewComments: true,
+      maxGraphNodes: 80,
+      timeoutMinutes: 20,
+    };
+    const old = validateAnalysisRequest({ ...validRequest(), config: oldConfig });
+    expect(old).toMatchObject({ valid: true, value: { config: { ...oldConfig, scanMode: "coordinator" } } });
+    expect(validateAnalysisRequest({ ...validRequest(), config: { ...oldConfig, scanMode: "legacy" } })).toMatchObject({ valid: true, value: { config: { scanMode: "legacy" } } });
+    expect(validateAnalysisRequest({ ...validRequest(), config: { ...oldConfig, scanMode: "unsupported" } }).valid).toBe(false);
+  });
 });
 
 describe("pull request comment validation", () => {

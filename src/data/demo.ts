@@ -452,6 +452,7 @@ const atlasWalkthrough: WalkthroughDocument = {
     skillVersion: "1.1.0",
     config: {
       depth: "deep",
+      scanMode: "coordinator",
       includeReviewComments: true,
       maxGraphNodes: 80,
       timeoutMinutes: 20,

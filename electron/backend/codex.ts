@@ -23,6 +23,18 @@ export class CodexAdapter implements AgentAdapter {
   discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
   async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CodexResponse> {
+    if (task?.coordinator) {
+      const selectedModel = model?.trim() || request.model?.trim();
+      const config = [
+        `mcp_servers.atlas.command=${JSON.stringify(process.execPath)}`,
+        `mcp_servers.atlas.args=[${JSON.stringify(task.coordinator.shimPath)}]`,
+        "mcp_servers.atlas.env_vars=[\"ATLAS_COORDINATOR_URL\",\"ATLAS_TASK_TOKEN\",\"ELECTRON_RUN_AS_NODE\"]",
+        "mcp_servers.atlas.default_tools_approval_mode=\"approve\"",
+        "approval_policy=\"never\"",
+      ];
+      const args = ["exec", ...(request.effort ? ["-c", `model_reasoning_effort=\"${request.effort}\"`] : []), ...(selectedModel ? ["--model", selectedModel] : []), "--json", "--sandbox", "read-only", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", ...config.flatMap((item) => ["-c", item]), buildAnalysisPrompt(request, undefined, task)];
+      return runProviderProcess(this, this.runner, this.spawn, "codex", args, request, worktree, signal, progress, task);
+    }
     return withTemporarySchema(async (schemaPath) => {
       const selectedModel = model?.trim() || request.model?.trim();
       const effort = request.effort;

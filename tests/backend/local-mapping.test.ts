@@ -242,4 +242,83 @@ describe("removed local repository mapping", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it.each(["stale HEAD", "dirty untracked files"])("fails closed without invoking a provider when an existing managed worktree has %s", async (condition) => {
+    const root = await mkdtemp(`${tmpdir()}/pr-atlas-managed-worktree-validation-`);
+    const headSha = "b".repeat(40);
+    const clone = resolve(root, "repositories/github.com/example/backend");
+    const worktree = resolve(root, "worktrees/github.com/example/backend", headSha);
+    const analyze = vi.fn(async () => ({ status: "failed" as const, rawOutput: "", logs: [], errors: ["must not run"] }));
+    const run = vi.fn(async (file: string, args: string[]) => {
+      if (file === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") return { stdout: worktree, stderr: "" };
+      if (file === "git" && args[0] === "rev-parse") return { stdout: condition === "stale HEAD" ? "c".repeat(40) : headSha, stderr: "" };
+      if (file === "git" && args[0] === "status") return { stdout: condition === "dirty untracked files" ? "?? provider-artifact.txt\n" : "", stderr: "" };
+      if (file === "git" && args[0] === "worktree" && args[1] === "remove") throw new Error("recovery is unavailable");
+      return { stdout: "", stderr: "" };
+    });
+    const adapter = { id: "claude" as const, displayName: "Test provider", detect: async () => ({ provider: "claude" as const, displayName: "Test provider", executable: "test", installed: true, capabilities }), getCapabilities: () => capabilities, analyze };
+    try {
+      await mkdir(resolve(clone, ".git"), { recursive: true });
+      await mkdir(worktree, { recursive: true });
+      const result = await new AnalysisService(root, { run }, undefined, undefined, [adapter]).startAnalysis({ repository: "example/backend", pullNumber: 42, baseSha: "a".repeat(40), headSha, provider: "claude" });
+      expect(result.status).toBe("failed");
+      expect(analyze).not.toHaveBeenCalled();
+      expect(run).toHaveBeenCalledWith("git", ["worktree", "remove", "--force", worktree], expect.objectContaining({ cwd: clone }));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("reuses only a clean managed worktree at the requested exact head", async () => {
+    const root = await mkdtemp(`${tmpdir()}/pr-atlas-managed-worktree-clean-`);
+    const headSha = "b".repeat(40);
+    const clone = resolve(root, "repositories/github.com/example/backend");
+    const worktree = resolve(root, "worktrees/github.com/example/backend", headSha);
+    const analyze = vi.fn(async () => ({ status: "failed" as const, rawOutput: "", logs: [], errors: ["expected"] }));
+    const run = vi.fn(async (file: string, args: string[]) => {
+      if (file === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") return { stdout: worktree, stderr: "" };
+      if (file === "git" && args[0] === "rev-parse") return { stdout: headSha, stderr: "" };
+      if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" };
+      if (file === "git" && args[0] === "diff") return { stdout: "", stderr: "" };
+      if (file === "gh" && args[0] === "api" && args[1] === "graphql") return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" };
+      if (file === "gh" && args[0] === "api") return { stdout: "[]", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const adapter = { id: "claude" as const, displayName: "Test provider", detect: async () => ({ provider: "claude" as const, displayName: "Test provider", executable: "test", installed: true, capabilities }), getCapabilities: () => capabilities, analyze };
+    try {
+      await mkdir(resolve(clone, ".git"), { recursive: true });
+      await mkdir(worktree, { recursive: true });
+      const result = await new AnalysisService(root, { run }, undefined, undefined, [adapter]).startAnalysis({ repository: "example/backend", pullNumber: 42, baseSha: "a".repeat(40), headSha, provider: "claude" });
+      expect(result.status).toBe("failed");
+      expect(analyze).toHaveBeenCalledOnce();
+      expect(run).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "add"]), expect.anything());
+      expect(run).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "remove"]), expect.anything());
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("verifies a newly created managed worktree before provider use", async () => {
+    const root = await mkdtemp(`${tmpdir()}/pr-atlas-managed-worktree-fresh-`);
+    const headSha = "b".repeat(40);
+    const clone = resolve(root, "repositories/github.com/example/backend");
+    const worktree = resolve(root, "worktrees/github.com/example/backend", headSha);
+    const analyze = vi.fn(async () => ({ status: "failed" as const, rawOutput: "", logs: [], errors: ["expected"] }));
+    const run = vi.fn(async (file: string, args: string[]) => {
+      if (file === "git" && args[0] === "worktree" && args[1] === "add") { await mkdir(args[3], { recursive: true }); return { stdout: "", stderr: "" }; }
+      if (file === "git" && args[0] === "rev-parse" && args[1] === "--show-toplevel") return { stdout: worktree, stderr: "" };
+      if (file === "git" && args[0] === "rev-parse") return { stdout: headSha, stderr: "" };
+      if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" };
+      if (file === "git" && args[0] === "diff") return { stdout: "", stderr: "" };
+      if (file === "gh" && args[0] === "api" && args[1] === "graphql") return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" };
+      if (file === "gh" && args[0] === "api") return { stdout: "[]", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const adapter = { id: "claude" as const, displayName: "Test provider", detect: async () => ({ provider: "claude" as const, displayName: "Test provider", executable: "test", installed: true, capabilities }), getCapabilities: () => capabilities, analyze };
+    try {
+      await mkdir(resolve(clone, ".git"), { recursive: true });
+      const result = await new AnalysisService(root, { run }, undefined, undefined, [adapter]).startAnalysis({ repository: "example/backend", pullNumber: 42, baseSha: "a".repeat(40), headSha, provider: "claude" });
+      expect(result.status).toBe("failed");
+      expect(analyze).toHaveBeenCalledOnce();
+      expect(run).toHaveBeenCalledWith("git", ["rev-parse", "--show-toplevel"], expect.objectContaining({ cwd: worktree }));
+      expect(run).toHaveBeenCalledWith("git", ["rev-parse", "HEAD"], expect.objectContaining({ cwd: worktree }));
+      expect(run).toHaveBeenCalledWith("git", ["status", "--porcelain=v1", "--untracked-files=all"], expect.objectContaining({ cwd: worktree }));
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });

@@ -6,12 +6,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, AgentAnalysisResult, AnalysisProgressEvent, AnalysisRequest, ProviderAnalysisTask } from "../../shared/contracts";
 import { AnalysisService } from "../../electron/backend/service";
 
-const request: AnalysisRequest = { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40), provider: "codex" };
+const request: AnalysisRequest = { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40), provider: "codex", config: { depth: "standard", scanMode: "legacy", includeReviewComments: true, maxGraphNodes: 80, timeoutMinutes: 20 } };
 const caps = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: false, authenticationState: false };
 
 function diff(files: number, bytes: number) { return Array.from({ length: files }, (_, index) => `diff --git a/src/f${index}.ts b/src/f${index}.ts\n--- a/src/f${index}.ts\n+++ b/src/f${index}.ts\n@@ -1 +1 @@\n+${"x".repeat(bytes)}`).join("\n"); }
 function runner(files: number, bytes: number) {
-  return { run: vi.fn(async (file: string, args: string[]) => {
+  return { run: vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+    if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? options?.cwd ?? "" : options?.cwd?.split(/[\\/]/).at(-1) ?? "", stderr: "" };
+    if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" };
     if (file === "git" && args[0] === "diff") return { stdout: diff(files, bytes), stderr: "" };
     if (file === "gh" && args[0] === "api" && args[1] === "graphql") return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" };
     if (file === "gh" && args[0] === "api" && String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify(Array.from({ length: files }, (_, index) => ({ filename: `src/f${index}.ts`, additions: 1, deletions: 0 }))), stderr: "" };
@@ -120,6 +122,22 @@ describe("batched service orchestration", () => {
     }, (event) => { runId = event.runId; });
     try { const pending = env.service.startAnalysis(request); await started; expect(env.service.cancelAnalysis(runId)).toBe(true); const result = await pending; expect(result.status).toBe("cancelled"); expect(tasks).not.toContain("reduce"); }
     finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
+  it("does not invoke the reducer when cancellation lands on reducer-start progress", async () => {
+    const tasks: string[] = []; let service: AnalysisService;
+    const env = await setup(20, 50_000, async (_r, _w, _i, _signal, _progress, _model, task) => {
+      tasks.push(task?.kind ?? "single");
+      return task?.kind === "map"
+        ? { status: "ready", rawOutput: "{}", logs: [], mapOutput: completeMap(task) }
+        : { status: "ready", rawOutput: "{}", logs: [], document: reducerDocument() as never };
+    }, (event) => { if (event.message.includes("Reducer started")) service.cancelAnalysis(event.runId); });
+    service = env.service;
+    try {
+      const result = await service.startAnalysis(request);
+      expect(result.status).toBe("cancelled");
+      expect(tasks).not.toContain("reduce");
+    } finally { await rm(env.root, { recursive: true, force: true }); }
   });
 
   it("installs Ready only after a successful final reducer document", async () => {

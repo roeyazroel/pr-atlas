@@ -120,6 +120,13 @@ const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
 const LARGE_PR_FILE_THRESHOLD = 20;
 const LARGE_PR_CHANGE_THRESHOLD = 1_000;
+const COORDINATOR_EXCLUSIVE_PROGRESS_STAGES = new Set<AnalysisProgressEvent["stage"]>([
+  "anchoring",
+  "walkthrough",
+  "tests-risks",
+  "flows",
+  "assembling",
+]);
 
 export type EvidenceCodeLineKind =
   | "context"
@@ -1150,6 +1157,14 @@ function readStored<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
+function readAnalysisConfig(): AnalysisRunConfig {
+  const saved = readStored<Partial<AnalysisRunConfig>>(ANALYSIS_CONFIG_STORAGE_KEY, {});
+  return {
+    ...DEFAULT_ANALYSIS_RUN_CONFIG,
+    ...saved,
+    scanMode: saved.scanMode === "legacy" ? "legacy" : "coordinator",
+  };
+}
 
 function StatusPill({ status }: { status: PRStatus }) {
   const meta = statusMeta[status];
@@ -1275,6 +1290,7 @@ function App() {
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
   } | null>(null);
   const [analysisDone, setAnalysisDone] = useState<Record<string, boolean>>({});
@@ -1334,9 +1350,7 @@ function App() {
   const [customPrompt, setCustomPrompt] = useState(() =>
     readStored(CUSTOM_PROMPT_STORAGE_KEY, ""),
   );
-  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(() =>
-    readStored(ANALYSIS_CONFIG_STORAGE_KEY, DEFAULT_ANALYSIS_RUN_CONFIG),
-  );
+  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(readAnalysisConfig);
   const [retentionSettings, setRetentionSettings] =
     useState<RunRetentionSettings>(DEFAULT_RETENTION_SETTINGS);
   const [stepProgress, setStepProgress] = useState<
@@ -1604,6 +1618,10 @@ function App() {
               stage:
                 event.stage === "complete"
                   ? analysisStages.length - 1
+                  : ["anchoring", "walkthrough", "tests-risks", "flows"].includes(event.stage)
+                    ? 3
+                    : event.stage === "assembling"
+                      ? 4
                   : Math.max(
                       0,
                       [
@@ -2123,6 +2141,7 @@ function App() {
       startedAt: Date.now(),
       live: true,
       provider,
+      scanMode: analysisConfig.scanMode,
       activity: [],
     });
     let result: AnalysisRunResult;
@@ -2730,6 +2749,7 @@ function App() {
             </p>
             <p className="confirm-detail">
               {analysisConfig.depth} depth ·{" "}
+              {analysisConfig.scanMode === "coordinator" ? "coordinator engine" : "legacy batching engine"} ·{" "}
               {analysisConfig.includeReviewComments
                 ? "review comments included"
                 : "review comments excluded"}{" "}
@@ -3049,6 +3069,24 @@ function App() {
               )}
               <fieldset className="provider-fieldset">
                 <legend>Analysis scope</legend>
+                <label className="model-setting">
+                  <span>Scan engine</span>
+                  <SelectMenu
+                    ariaLabel="Scan engine"
+                    value={analysisConfig.scanMode}
+                    options={[
+                      { value: "coordinator", label: "Coordinator (recommended)" },
+                      { value: "legacy", label: "Legacy batching" },
+                    ]}
+                    onChange={(value) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        scanMode: value as AnalysisRunConfig["scanMode"],
+                      }))
+                    }
+                  />
+                  <small>Coordinator anchors the PR before parallel specialists. Legacy keeps the established map/reduce batching flow.</small>
+                </label>
                 <label className="model-setting">
                   <span>Depth</span>
                   <SelectMenu
@@ -3673,6 +3711,7 @@ function ViewContent({
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
   } | null;
   providerName: string;
@@ -4037,6 +4076,7 @@ function AnalysisProgress({
     stage: number;
     running: boolean;
     live?: boolean;
+    scanMode?: AnalysisRunConfig["scanMode"];
     startedAt: number;
     activity: AnalysisProgressEvent[];
   };
@@ -4055,6 +4095,22 @@ function AnalysisProgress({
   const elapsedSeconds = Math.max(
     0,
     Math.floor((now - analysis.startedAt) / 1_000),
+  );
+  const coordinatorRows = [
+    ["anchoring", "Anchor"],
+    ["walkthrough", "Walkthrough"],
+    ["tests-risks", "Tests & risks"],
+    ["flows", "Flows"],
+    ["assembling", "Assembly"],
+    ["validating", "Validation"],
+  ] as const;
+  const coordinatorState = (stage: AnalysisProgressEvent["stage"]) => {
+    const events = analysis.activity.filter((event) => event.stage === stage);
+    const latest = events.at(-1);
+    return latest?.taskState ?? (latest ? "running" : "pending");
+  };
+  const hasCoordinatorActivity = analysis.activity.some((event) =>
+    COORDINATOR_EXCLUSIVE_PROGRESS_STAGES.has(event.stage),
   );
   return (
     <div className="analysis-screen">
@@ -4121,6 +4177,17 @@ function AnalysisProgress({
           </small>
         </section>
       )}
+      {live && hasCoordinatorActivity && (
+        <section className="agent-activity coordinator-task-state" aria-label="Coordinator task state">
+          <div className="agent-activity-head"><div><strong>Coordinator task state</strong><span>Independent task receipts remain visible while parallel work continues.</span></div><Workflow size={14} /></div>
+          <div role="list" aria-label="Coordinator tasks">
+            {coordinatorRows.map(([stage, label]) => {
+              const state = coordinatorState(stage);
+              return <div className="agent-activity-row" role="listitem" aria-label={`${label}: ${state}`} key={stage}><strong>{label}</strong><span>{state}</span></div>;
+            })}
+          </div>
+        </section>
+      )}
       <div className="stage-list">
         {analysisStages.map((stage: AnalysisStage, index) => (
           <div
@@ -4170,7 +4237,7 @@ function AnalysisProgress({
   );
 }
 
-function WalkthroughRich({
+export function WalkthroughRich({
   pr,
   markGroup,
   reviewed,
@@ -4245,6 +4312,16 @@ function WalkthroughRich({
         .map((node) => ({ flow, node })),
     ),
   );
+  const coordinatorEntries = (key: string) =>
+    safeArray(pr.walkthrough?.[key])
+      .map((entry) => objectValue(entry))
+      .filter((entry) => {
+        const changeGroupIds = safeArray(entry.changeGroupIds);
+        return changeGroupIds.length === 0 || changeGroupIds.includes(group.id);
+      });
+  const risks = coordinatorEntries("risks");
+  const dependencies = coordinatorEntries("dependencies");
+  const unchangedInteractions = coordinatorEntries("unchangedInteractions");
   const setStatus = (next: ReviewProgressStatus) => {
     updateProgress(String(step.id), next, note);
     setNoteDrafts((current) => ({ ...current, [noteKey]: note }));
@@ -4313,6 +4390,45 @@ function WalkthroughRich({
             <section className="evidence-section">
               <SectionTitle label="Step limitations" />
               <p>{safeArray(step.limitations).join(" · ")}</p>
+            </section>
+          )}
+          {risks.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Risks and watchpoints" />
+              <div className="flow-context-list">
+                {risks.map((risk, index) => (
+                  <div className="walkthrough-context-item" key={safeString(risk.id, `risk-${index + 1}`)}>
+                    <strong>{safeString(risk.title, `Risk ${index + 1}`)}</strong>
+                    <span>{safeString(risk.detail, "No additional risk detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {dependencies.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Cross-change dependencies" />
+              <div className="flow-context-list">
+                {dependencies.map((dependency, index) => (
+                  <div className="walkthrough-context-item" key={safeString(dependency.id, `dependency-${index + 1}`)}>
+                    <strong>{safeString(dependency.title, `Dependency ${index + 1}`)}</strong>
+                    <span>{safeString(dependency.detail, "No additional dependency detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+          {unchangedInteractions.length > 0 && (
+            <section className="evidence-section">
+              <SectionTitle label="Unchanged integration context" />
+              <div className="flow-context-list">
+                {unchangedInteractions.map((interaction, index) => (
+                  <div className="walkthrough-context-item" key={safeString(interaction.id, `unchanged-${index + 1}`)}>
+                    <strong>{safeString(interaction.title, `Unchanged interaction ${index + 1}`)}</strong>
+                    <span>{safeString(interaction.detail, "No additional integration detail provided.")}</span>
+                  </div>
+                ))}
+              </div>
             </section>
           )}
           <div className="behavior-compare">

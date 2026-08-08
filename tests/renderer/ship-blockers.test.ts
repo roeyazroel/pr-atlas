@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { createElement } from 'react'
 import { describe, expect, it } from 'vitest'
 import App from '../../src/App'
-import { calculateFitZoom, mapWalkthroughDocument, matchesRelationshipFilter } from '../../src/App'
+import { calculateFitZoom, mapWalkthroughDocument, matchesRelationshipFilter, WalkthroughRich } from '../../src/App'
 import type { PullRequest } from '../../src/types'
 import type { WalkthroughDocument } from '../../shared/contracts'
 
@@ -87,5 +87,53 @@ describe('ship-blocker renderer contracts', () => {
       replies: [expect.objectContaining({ author: 'maintainer', body: 'Done; the renderer now keeps every reply.', authorAssociation: 'MEMBER', path: 'src/App.tsx', line: 43, originalLine: 43, side: 'RIGHT', createdAt: '2026-08-05T00:01:00Z', updatedAt: '2026-08-05T00:01:00Z', commitSha: 'head', originalCommitSha: 'base', url: 'https://github.com/acme/repo/pull/1#discussion_r2' })],
       replyCount: 1,
     }))
+  })
+
+  it('shows coordinator context only for the active walkthrough change group', async () => {
+    const user = userEvent.setup()
+    const coordinatorDocument = {
+      ...document,
+      changeGroups: [...document.changeGroups, { ...document.changeGroups[0], id: 'group-2', title: 'Second group' }],
+      walkthrough: [...document.walkthrough, { ...document.walkthrough[0], id: 'step-2', title: 'Review second group', changeGroupId: 'group-2', dependsOnStepIds: ['step-1'] }],
+      risks: [
+        { id: 'risk-1', title: 'Clean CI ordering', detail: 'Tests must not depend on build output.', changeGroupIds: ['group-1'], evidenceIds: ['ev-1'] },
+        { id: 'risk-2', title: 'Second-group risk', detail: 'Only the second step should show this.', changeGroupIds: ['group-2'], evidenceIds: ['ev-1'] },
+      ],
+      dependencies: [
+        { id: 'dependency-1', title: 'Bridge packaging', detail: 'The provider bootstrap needs the emitted bridge.', dependsOnIds: ['step-1'], changeGroupIds: ['group-1'], evidenceIds: ['ev-1'] },
+        { id: 'dependency-2', title: 'Second-group dependency', detail: 'Only the second step should show this.', dependsOnIds: ['step-1'], changeGroupIds: ['group-2'], evidenceIds: ['ev-1'] },
+      ],
+      unchangedInteractions: [
+        { id: 'unchanged-1', title: 'Existing workflow order', detail: 'The quality workflow still runs tests before build.', changeGroupIds: ['group-1'], evidenceIds: ['ev-1'] },
+        { id: 'unchanged-2', title: 'Second-group context', detail: 'Only the second step should show this.', changeGroupIds: ['group-2'], evidenceIds: ['ev-1'] },
+      ],
+    } as WalkthroughDocument
+    const mapped = mapWalkthroughDocument(coordinatorDocument, basePr, 'codex')
+
+    render(createElement(WalkthroughRich, {
+      pr: mapped,
+      markGroup: () => undefined,
+      reviewed: {},
+      progress: {},
+      updateProgress: () => undefined,
+      openEvidence: () => undefined,
+      openFlow: () => undefined,
+    }))
+
+    expect(screen.getByText('Clean CI ordering')).toBeInTheDocument()
+    expect(screen.getByText('Bridge packaging')).toBeInTheDocument()
+    expect(screen.getByText('Existing workflow order')).toBeInTheDocument()
+    expect(screen.queryByText('Second-group risk')).not.toBeInTheDocument()
+    expect(screen.queryByText('Second-group dependency')).not.toBeInTheDocument()
+    expect(screen.queryByText('Second-group context')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Step 2: Review second group' }))
+
+    expect(screen.getByText('Second-group risk')).toBeInTheDocument()
+    expect(screen.getByText('Second-group dependency')).toBeInTheDocument()
+    expect(screen.getByText('Second-group context')).toBeInTheDocument()
+    expect(screen.queryByText('Clean CI ordering')).not.toBeInTheDocument()
+    expect(screen.queryByText('Bridge packaging')).not.toBeInTheDocument()
+    expect(screen.queryByText('Existing workflow order')).not.toBeInTheDocument()
   })
 })

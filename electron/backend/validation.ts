@@ -53,6 +53,8 @@ export function validateAnalysisRunConfig(
   )
     return null;
   if (typeof config.includeReviewComments !== "boolean") return null;
+  if (config.scanMode !== undefined && config.scanMode !== "coordinator" && config.scanMode !== "legacy")
+    return null;
   if (
     !Number.isInteger(config.maxGraphNodes) ||
     (config.maxGraphNodes as number) < 20 ||
@@ -67,6 +69,7 @@ export function validateAnalysisRunConfig(
     return null;
   return {
     depth: config.depth,
+    scanMode: config.scanMode ?? "coordinator",
     includeReviewComments: config.includeReviewComments,
     maxGraphNodes: config.maxGraphNodes as number,
     timeoutMinutes: config.timeoutMinutes as number,

@@ -45,6 +45,11 @@ const analysisStageSet = new Set<AnalysisProgressEvent["stage"]>([
   "collecting",
   "inspecting",
   "generating",
+  "anchoring",
+  "walkthrough",
+  "tests-risks",
+  "flows",
+  "assembling",
   "validating",
   "complete",
 ]);
@@ -65,6 +70,7 @@ function safeProgressEvent(
     stage: event.stage as AnalysisProgressEvent["stage"],
     message: event.message.slice(0, 1_000),
     timestamp: event.timestamp,
+    ...(event.taskState === "pending" || event.taskState === "running" || event.taskState === "complete" || event.taskState === "failed" ? { taskState: event.taskState } : {}),
   };
 }
 function boundedTextExcerpt(value: string, maximum = 128 * 1024): string {
@@ -791,6 +797,7 @@ function validConfig(value: unknown): AnalysisRunConfig | null {
     (config.timeoutMinutes as number) <= 60
     ? {
         depth: config.depth,
+        scanMode: config.scanMode === "legacy" ? "legacy" : "coordinator",
         includeReviewComments: config.includeReviewComments,
         maxGraphNodes: config.maxGraphNodes as number,
         timeoutMinutes: config.timeoutMinutes as number,

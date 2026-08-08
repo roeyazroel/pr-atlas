@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { resolve, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -23,7 +23,7 @@ import { GithubClient, commandRunner, type CommandRunner } from "./github.js";
 import { AnalysisStore } from "./store.js";
 import { ClaudeAdapter } from "./claude.js";
 import { CodexAdapter } from "./codex.js";
-import { CursorAdapter } from "./cursor.js";
+import { CURSOR_COORDINATOR_ISOLATION_FAILED, CursorAdapter } from "./cursor.js";
 import {
   redactProviderOutput,
   redactProviderValue,
@@ -38,12 +38,31 @@ import {
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
-import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections, shouldBatchAnalysis, validateBatchMapOutput, type ChangedDiff } from "./batching.js";
+import { assembleAnchoredDocument, shouldUseAnchoredAnalysis, taskOutputFrom, validateAnchoredTaskOutput } from "./anchored-analysis.js";
+import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections as parseLegacyDiffSections, shouldBatchAnalysis, validateBatchMapOutput } from "./batching.js";
 import { buildBundledValidatorCommand, buildWindowsValidatorLauncher, validatorLauncherName } from "./validator-command.js";
+import { AtlasApiCoordinator, startAtlasCoordinator } from "./coordinator.js";
+import type { AnchoredSpecialistOutput, AnchoredTaskOutput, SemanticAnchor } from "../../shared/contracts.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
   return result === "" || (!result.startsWith(`..${sep}`) && result !== "..");
+}
+type ExactHeadTarget = { valid: true; target: string } | { valid: false; error: string };
+async function canonicalRegularExactHeadTarget(root: string, path: string): Promise<ExactHeadTarget> {
+  const target = resolve(root, path);
+  if (!inside(root, target)) return { valid: false, error: "evidence path escapes exact-head worktree" };
+  try {
+    const canonicalTarget = await realpath(target);
+    if (!inside(root, canonicalTarget) || canonicalTarget !== target)
+      return { valid: false, error: "evidence path traverses a symlink instead of naming an exact-head file" };
+    const metadata = await lstat(canonicalTarget);
+    if (!metadata.isFile() || metadata.isSymbolicLink())
+      return { valid: false, error: "evidence must name a safe regular exact-head file" };
+    return { valid: true, target: canonicalTarget };
+  } catch {
+    return { valid: false, error: "evidence does not name a readable exact-head file" };
+  }
 }
 function repoPath(root: string, repository: string): string {
   const [owner, repo] = repository.split("/");
@@ -58,9 +77,10 @@ function flattenFilePages(value: unknown): Array<{ filename: string; patch?: str
     ? [value as { filename: string; patch?: string; additions?: number; deletions?: number }]
     : [];
 }
+type ChangedDiff = { path: string; diff: string; additions?: number; deletions?: number };
 async function readChangedDiffs(inputDirectory: string): Promise<ChangedDiff[]> {
   const [raw, diff] = await Promise.all([readFile(resolve(inputDirectory, "files.json"), "utf8"), readFile(resolve(inputDirectory, "diff.patch"), "utf8")]);
-  const sections = parseGitDiffSections(diff);
+  const sections = parseLegacyDiffSections(diff);
   const unique = new Map<string, ChangedDiff>();
   for (const file of flattenFilePages(JSON.parse(raw))) if (!unique.has(file.filename)) {
     const evidence = sections.get(file.filename);
@@ -68,6 +88,47 @@ async function readChangedDiffs(inputDirectory: string): Promise<ChangedDiff[]> 
     unique.set(file.filename, { path: file.filename, diff: evidence, additions: typeof file.additions === "number" ? file.additions : 0, deletions: typeof file.deletions === "number" ? file.deletions : 0 });
   }
   return [...unique.values()];
+}
+async function writeAnchoredJson(directory: string, name: string, value: unknown): Promise<void> {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unsafe anchored artifact name.");
+  const target = resolve(directory, "anchored", name);
+  if (!inside(directory, target)) throw new Error("Unsafe anchored artifact path.");
+  await mkdir(resolve(target, ".."), { recursive: true });
+  await writeFile(target, JSON.stringify(value, null, 2), "utf8");
+}
+export function changedLines(files: ChangedDiff[]): Map<string, Set<number>> {
+  const result = new Map<string, Set<number>>();
+  for (const file of files) {
+    const lines = new Set<number>(); let next: number | undefined;
+    for (const line of file.diff.split(/\r?\n/)) {
+      if (line.startsWith("diff --git ")) { next = undefined; continue; }
+      const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
+      if (hunk) { next = Number(hunk[1]); continue; }
+      if (line === "\\ No newline at end of file") continue;
+      if (next === undefined) {
+        if (line.startsWith("--- ") || line.startsWith("+++ ")) continue;
+        continue;
+      }
+      if (line.startsWith("+")) { lines.add(next++); continue; }
+      if (!line.startsWith("-")) next += 1;
+    }
+    result.set(file.path, lines);
+  }
+  return result;
+}
+
+/** A trailing newline terminates the preceding line; it never creates an evidenceable EOF line. */
+export function isValidPhysicalLine(source: string, line: number): boolean {
+  if (!Number.isInteger(line) || line < 1 || source.length === 0) return false;
+  const count = source.split(/\r?\n/).length - (source.endsWith("\n") ? 1 : 0);
+  return line <= count;
+}
+async function readCoordinatorPrContext(inputDirectory: string, includeReviewComments: boolean | undefined): Promise<Record<string, unknown>> {
+  const read = async (name: string) => redactProviderValue(JSON.parse(await readFile(resolve(inputDirectory, name), "utf8")));
+  const pullRequest = await read("pull-request.json");
+  if (includeReviewComments === false) return { pullRequest, reviewThreads: [], reviews: [], issueComments: [], reviewComments: [] };
+  const [reviewThreads, reviews, issueComments, reviewComments] = await Promise.all([read("review-threads.json"), read("reviews.json"), read("issue-comments.json"), read("review-comments.json")]);
+  return { pullRequest, reviewThreads, reviews, issueComments, reviewComments };
 }
 async function writeBatchJson(directory: string, name: string, value: unknown): Promise<void> {
   if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error("Unsafe batch artifact name.");
@@ -197,12 +258,14 @@ export class AnalysisService {
     const progress = (
       stage: AnalysisProgressEvent["stage"],
       message: string,
+      taskState?: AnalysisProgressEvent["taskState"],
     ) => {
       const event = {
         runId,
         stage,
         message,
         timestamp: new Date().toISOString(),
+        ...(taskState ? { taskState } : {}),
       };
       manifest.lastProgress = event;
       manifest.activity = [...(manifest.activity ?? []), event].slice(-100);
@@ -476,8 +539,43 @@ export class AnalysisService {
         ["worktree", "add", "--detach", worktree, request.headSha],
         { cwd: clone, timeout: 120_000, signal },
       );
+    } else {
+      try {
+        await this.verifyManagedWorktree(worktree, request.headSha, signal);
+      } catch {
+        await this.recreateManagedWorktree(clone, worktree, request.headSha, signal);
+      }
     }
+    await this.verifyManagedWorktree(worktree, request.headSha, signal);
     return worktree;
+  }
+  private async canonicalManagedWorktree(worktree: string): Promise<string> {
+    if (!inside(this.dataRoot, worktree)) throw new Error("Unsafe managed worktree path.");
+    let canonical: string; let canonicalRoot: string;
+    try { [canonical, canonicalRoot] = await Promise.all([realpath(worktree), realpath(this.dataRoot)]); } catch { throw new Error("Managed worktree does not exist."); }
+    const expected = resolve(canonicalRoot, relative(this.dataRoot, worktree));
+    if (canonical !== expected || !inside(canonicalRoot, canonical))
+      throw new Error("Managed worktree is not at its canonical expected path.");
+    return canonical;
+  }
+  private async verifyManagedWorktree(worktree: string, headSha: string, signal: AbortSignal): Promise<void> {
+    const canonical = await this.canonicalManagedWorktree(worktree);
+    const options = { cwd: worktree, timeout: 30_000, signal };
+    const root = (await this.runner.run("git", ["rev-parse", "--show-toplevel"], options)).stdout.trim();
+    let canonicalRoot: string;
+    try { canonicalRoot = root ? await realpath(resolve(root)) : ""; } catch { canonicalRoot = ""; }
+    if (canonicalRoot !== canonical) throw new Error("Managed worktree Git root does not match its expected path.");
+    const head = (await this.runner.run("git", ["rev-parse", "HEAD"], options)).stdout.trim();
+    if (head.toLowerCase() !== headSha.toLowerCase()) throw new Error("Managed worktree is not at the requested exact head.");
+    const status = (await this.runner.run("git", ["status", "--porcelain=v1", "--untracked-files=all"], options)).stdout;
+    if (status.trim()) throw new Error("Managed worktree is not clean.");
+  }
+  private async recreateManagedWorktree(clone: string, worktree: string, headSha: string, signal: AbortSignal): Promise<void> {
+    await this.canonicalManagedWorktree(worktree);
+    await this.runner.run("git", ["worktree", "remove", "--force", worktree], { cwd: clone, timeout: 120_000, signal });
+    await this.runner.run("git", ["worktree", "prune"], { cwd: clone, timeout: 120_000, signal });
+    await mkdir(resolve(worktree, ".."), { recursive: true });
+    await this.runner.run("git", ["worktree", "add", "--detach", worktree, headSha], { cwd: clone, timeout: 120_000, signal });
   }
   private worktreePath(request: AnalysisRequest): string {
     return resolve(
@@ -509,12 +607,126 @@ export class AnalysisService {
     inputDirectory: string,
     directory: string,
     signal: AbortSignal,
-    progress: (stage: AnalysisProgressEvent["stage"], message: string) => void,
+    progress: (stage: AnalysisProgressEvent["stage"], message: string, taskState?: AnalysisProgressEvent["taskState"]) => void,
   ): Promise<AgentAnalysisResult> {
+    if (signal.aborted) return { status: "cancelled", rawOutput: "", logs: [], errors: ["Analysis was cancelled before provider work started."] };
     const files = await readChangedDiffs(inputDirectory);
     const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
-    if (!shouldBatchAnalysis({ files: files.length, changes }))
+    if (!shouldUseAnchoredAnalysis({ files: files.length, changes }))
       return adapter.analyze(request, worktree, inputDirectory, signal, progress);
+    if (request.config?.scanMode === "legacy")
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    const exactLines = changedLines(files);
+    if (files.some((file) => (exactLines.get(file.path)?.size ?? 0) === 0)) {
+      progress("generating", "Large PR has at least one changed file with no added exact-head lines; using legacy batching to represent deletion-only changes truthfully.");
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    }
+    const prContext = await readCoordinatorPrContext(inputDirectory, request.config?.includeReviewComments);
+    const exactHeadRoot = await realpath(worktree);
+    const targetChecks = await Promise.all(files.map((file) => canonicalRegularExactHeadTarget(exactHeadRoot, file.path)));
+    if (targetChecks.some((check) => !check.valid)) {
+      progress("generating", "Large PR includes a changed path that is not a canonical regular exact-head file; using legacy batching to preserve complete coverage.");
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    }
+    const coordinator = new AtlasApiCoordinator(directory, { repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }, new Set(files.map((file) => file.path)), async (reference) => {
+      const checkedTarget = await canonicalRegularExactHeadTarget(exactHeadRoot, reference.path);
+      if (!checkedTarget.valid) return { valid: false, errors: [checkedTarget.error] };
+      try {
+        const bytes = await readFile(checkedTarget.target);
+        if (bytes.includes(0)) return { valid: false, errors: ["evidence file is binary"] };
+        const source = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        if (!isValidPhysicalLine(source, reference.line)) return { valid: false, errors: ["evidence line is outside exact-head file"] };
+        const added = exactLines.get(reference.path)?.has(reference.line) ?? false;
+        if (reference.role === "changed" && !added) return { valid: false, errors: ["changed evidence is not an added line in the captured diff"] };
+        if (reference.role === "unchanged-context" && added) return { valid: false, errors: ["unchanged-context evidence must cite a current non-added line"] };
+        return { valid: true, errors: [] };
+      } catch { return { valid: false, errors: ["evidence does not name a readable UTF-8 exact-head file"] }; }
+    }, (value) => redactProviderValue(value), prContext);
+    const coordinatorServer = await startAtlasCoordinator(coordinator);
+    const execution = new AbortController(); let timedOut = false;
+    const abort = () => execution.abort();
+    if (signal.aborted) execution.abort(); else signal.addEventListener("abort", abort, { once: true });
+    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
+    try {
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
+    progress("anchoring", "Semantic anchor started · classifying the PR once.", "running");
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
+    const coordinatorTask = <T extends "anchor" | "walkthrough" | "tests-risks" | "flows">(kind: T) => ({ url: coordinatorServer.url, token: coordinator.task(kind).token, shimPath: resolve(__dirname, "coordinator-mcp.cjs"), submitted: () => coordinator.result(kind), submitForHarness: (key: string, result: AnchoredTaskOutput) => coordinator.submit(coordinator.task(kind).token, key, result) });
+    const anchorTask = { kind: "anchor", id: "anchor", total: 1, coordinator: coordinatorTask("anchor") } as const;
+    const anchorResponse = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, anchorTask);
+    if (adapter.id === "cursor" && !signal.aborted && !timedOut && !execution.signal.aborted && anchorResponse.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)) {
+      progress("anchoring", "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", "failed");
+      progress("generating", "Cursor coordinator instruction isolation was unavailable; using legacy analysis.");
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    }
+    const anchorValidation = anchorResponse.status === "ready" && taskOutputFrom(anchorResponse)
+      ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(anchorResponse)), anchorTask) : undefined;
+    const anchor = anchorValidation?.valid ? anchorValidation.output as SemanticAnchor : undefined;
+    if (!anchor) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (anchorResponse.status === "ready" ? "invalid" : anchorResponse.status), rawOutput: anchorResponse.rawOutput, logs: anchorResponse.logs, errors: timedOut ? ["Analysis timed out before semantic anchor completed."] : anchorResponse.errors ?? anchorValidation?.errors ?? ["Semantic anchor was missing."] };
+    await writeAnchoredJson(directory, "anchor.output.json", anchor);
+    progress("anchoring", "Semantic anchor completed and validated.", "complete");
+    const tasks = ["walkthrough", "tests-risks", "flows"] as const;
+    const stage = { walkthrough: "walkthrough", "tests-risks": "tests-risks", flows: "flows" } as const;
+    progress("walkthrough", "Walkthrough and reviews specialist started.", "running"); progress("tests-risks", "Tests and risks specialist started.", "running"); progress("flows", "Flows specialist started.", "running");
+    const responses = await Promise.all(tasks.map(async (kind) => {
+      const task = { kind, id: kind, total: 3, anchor, coordinator: coordinatorTask(kind) } as const;
+      let response = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, task);
+      const attempts = [response];
+      let checked = response.status === "ready" && taskOutputFrom(response) ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(response)), task) : undefined;
+      let output = checked?.valid ? checked.output as AnchoredSpecialistOutput : undefined;
+      if (!output && response.status === "invalid" && coordinator.submissionStats(kind).atomicSubmissionAttempts === 1 && !execution.signal.aborted) {
+        progress(stage[kind], `${kind} submitted one rejected result; running the single bounded correction.`, "running");
+        response = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, task);
+        attempts.push(response);
+        checked = response.status === "ready" && taskOutputFrom(response) ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(response)), task) : undefined;
+        output = checked?.valid ? checked.output as AnchoredSpecialistOutput : undefined;
+      }
+      if (output) await writeAnchoredJson(directory, `${kind}.output.json`, output);
+      progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation.`, output ? "complete" : "failed");
+      return { kind, response, attempts, output, errors: checked?.errors };
+    }));
+    const cursorIsolationFailure = adapter.id === "cursor"
+      ? responses.find((item) => item.attempts.some((attempt) => attempt.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)))
+      : undefined;
+    if (cursorIsolationFailure && !signal.aborted && !timedOut && !execution.signal.aborted) {
+      progress(stage[cursorIsolationFailure.kind], `Cursor coordinator instruction isolation was unavailable; ${cursorIsolationFailure.kind} stopped before legacy fallback.`, "failed");
+      progress("generating", `Cursor coordinator instruction isolation was unavailable during ${cursorIsolationFailure.kind}; using legacy analysis.`);
+      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+    }
+    const failed = responses.find((item) => !item.output);
+    const allResponses = [anchorResponse, ...responses.flatMap((item) => item.attempts)];
+    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
+    progress("assembling", "Deterministically assembling anchored specialist output.", "running");
+    const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"walkthrough" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
+    const reportedModel = [request.model, ...allResponses.map((item) => item.model)].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim();
+    const assembled = assembleAnchoredDocument(request, anchor, specialistMap, reportedModel);
+    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: reportedModel, errors: assembled.errors };
+    progress("assembling", "Deterministic assembly completed.", "complete");
+    progress("validating", "Validating deterministic anchored walkthrough assembly.", "running");
+    return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: reportedModel };
+    } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); await coordinatorServer.close(); }
+  }
+  private async runLegacyBatchedAnalysis(
+    adapter: AgentAdapter,
+    request: AnalysisRequest,
+    worktree: string,
+    inputDirectory: string,
+    directory: string,
+    signal: AbortSignal,
+    progress: (stage: AnalysisProgressEvent["stage"], message: string) => void,
+  ): Promise<AgentAnalysisResult> {
+    const execution = new AbortController(); let timedOut = false;
+    const abort = () => execution.abort();
+    if (signal.aborted) execution.abort(); else signal.addEventListener("abort", abort, { once: true });
+    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
+    const interrupted = (): AgentAnalysisResult => ({ status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before legacy batching started."] : ["Analysis was cancelled before legacy batching started."] });
+    try {
+    if (execution.signal.aborted) return interrupted();
+    const files = await readChangedDiffs(inputDirectory);
+    if (execution.signal.aborted) return interrupted();
+    const changes = files.reduce((sum, file) => sum + (file.additions ?? 0) + (file.deletions ?? 0), 0);
+    if (!shouldBatchAnalysis({ files: files.length, changes }))
+      return adapter.analyze(request, worktree, inputDirectory, execution.signal, progress);
     const plan = buildBatchPlan(files);
     if (!plan.coverage.complete)
       return { status: "invalid", rawOutput: "", logs: [], errors: ["Batch planner did not cover every changed file."] };
@@ -524,10 +736,7 @@ export class AnalysisService {
       chunks: plan.chunks.map((task) => ({ id: task.id, bytes: task.bytes, subsystems: task.subsystems, units: task.files.map(({ path, segment, bytes }) => ({ path, segment, bytes })) })),
     };
     await writeBatchJson(directory, "plan.json", planManifest);
-    const execution = new AbortController(); let timedOut = false;
-    const abort = () => execution.abort(); signal.addEventListener("abort", abort, { once: true });
-    const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
-    try {
+    if (execution.signal.aborted) return interrupted();
     progress("generating", `Generating ${plan.chunks.length} map batches (maximum ${MAX_BATCH_CONCURRENCY} concurrent).`);
     const outputs: NonNullable<AgentAnalysisResult["mapOutput"]>[] = [];
     const responses: AgentAnalysisResult[] = [];
@@ -545,6 +754,7 @@ export class AnalysisService {
         const validatorFile = "validate-map-output.mjs"; const launcherFile = validatorLauncherName("map");
         await writeFile(resolve(scope, validatorFile), buildBatchMapValidatorScript(task), "utf8");
         if (process.platform === "win32") await writeFile(resolve(scope, launcherFile), buildWindowsValidatorLauncher(validatorFile), "utf8");
+        if (execution.signal.aborted) return;
         const response = await adapter.analyze(request, scope, scope, execution.signal, () => undefined, request.model, { kind: "map", id: task.id, total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(validatorFile, process.platform, launcherFile), assignedPaths: [...new Set(task.files.map((file) => file.path))], assignedUnits: task.files.map(({ path, segment }) => ({ path, segment })) });
         const validated = response.status === "ready" && response.mapOutput
           ? validateBatchMapOutput(redactProviderValue(response.mapOutput), task)
@@ -579,7 +789,9 @@ export class AnalysisService {
     if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
     progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
     const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };

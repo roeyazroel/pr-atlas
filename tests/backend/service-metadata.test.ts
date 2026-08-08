@@ -1,10 +1,18 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { AnalysisService } from '../../electron/backend/service'
 import { SKILL_CONTRACT_VERSION } from '../../electron/backend/agent'
 
 const capabilities = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: true, authenticationState: false }
+
+async function managedWorktreeCommand(file: string, args: string[], options?: { cwd?: string }) {
+  if (file !== 'git') return null
+  if (args[0] === 'worktree' && args[1] === 'add') { await mkdir(args[3], { recursive: true }); return { stdout: '', stderr: '' } }
+  if (args[0] === 'rev-parse') return { stdout: args[1] === '--show-toplevel' ? options?.cwd ?? '' : options?.cwd?.split(/[\\/]/).at(-1) ?? '', stderr: '' }
+  if (args[0] === 'status') return { stdout: '', stderr: '' }
+  return null
+}
 
 function providerDocument() {
   const graph = (id: string) => ({
@@ -73,7 +81,8 @@ describe('analysis service reproducibility metadata', () => {
     try {
       const legacy = legacyProviderDocument()
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -103,7 +112,8 @@ describe('analysis service reproducibility metadata', () => {
     process.env.OPENAI_API_KEY = 'service-secret-value'
     try {
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -144,7 +154,8 @@ describe('analysis service reproducibility metadata', () => {
     try {
       const selectedModel = 'selected-model'
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -185,7 +196,8 @@ describe('analysis service reproducibility metadata', () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-metadata-fallback-`)
     try {
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }

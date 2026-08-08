@@ -16,6 +16,7 @@ import App, {
   routeGraphEdge,
 } from "../src/App";
 import { pullRequests } from "../src/data/demo";
+import type { AnalysisProgressEvent } from "../shared/contracts";
 
 describe("PR Atlas desktop workflow", () => {
   beforeEach(() => {
@@ -891,14 +892,7 @@ describe("PR Atlas desktop workflow", () => {
       reviewRequested: false,
     };
     const startAnalysis = vi.fn(() => new Promise<never>(() => undefined));
-    let progressListener:
-      | ((event: {
-          runId: string;
-          stage: "generating" | "validating";
-          message: string;
-          timestamp: string;
-        }) => void)
-      | undefined;
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
     const api = {
       bootstrap: vi.fn(async () => ({
         account: null,
@@ -964,6 +958,27 @@ describe("PR Atlas desktop workflow", () => {
       act(() => {
         progressListener?.({
           runId: "run-live",
+          stage: "anchoring",
+          taskState: "complete",
+          message: "Anchor accepted.",
+          timestamp: "2026-08-06T06:27:00.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
+          stage: "walkthrough",
+          taskState: "running",
+          message: "Walkthrough specialist started.",
+          timestamp: "2026-08-06T06:27:30.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
+          stage: "tests-risks",
+          taskState: "failed",
+          message: "Tests specialist rejected.",
+          timestamp: "2026-08-06T06:27:45.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
           stage: "generating",
           message: "Map batch 1/2 started · 10 source units.",
           timestamp: "2026-08-06T06:28:00.000Z",
@@ -991,6 +1006,18 @@ describe("PR Atlas desktop workflow", () => {
       expect(
         screen.getByRole("log", { name: /agent activity/i }),
       ).toHaveTextContent("Reducer started");
+      expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Anchor");
+      expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Validation");
+      expect(screen.getByRole("listitem", { name: /anchor: complete/i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /walkthrough: running/i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /tests & risks: failed/i })).toBeInTheDocument();
+      act(() => {
+        progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "running", message: "Anchor restarted.", timestamp: "2026-08-06T06:30:01.000Z" });
+        progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "failed", message: "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", timestamp: "2026-08-06T06:30:02.000Z" });
+        progressListener?.({ runId: "run-live", stage: "generating", message: "Cursor coordinator instruction isolation was unavailable; using legacy analysis.", timestamp: "2026-08-06T06:30:03.000Z" });
+      });
+      expect(screen.getByRole("listitem", { name: /anchor: failed/i })).toBeInTheDocument();
+      expect(screen.queryByRole("listitem", { name: /anchor: running/i })).not.toBeInTheDocument();
       expect(
         screen.getByText(
           /large pr: 30 files and 1,350 changed lines\. analysis may take several minutes\./i,
@@ -1004,6 +1031,52 @@ describe("PR Atlas desktop workflow", () => {
       });
       vi.useRealTimers();
     }
+  });
+
+  it("does not show coordinator task rows for a live deletion fallback despite coordinator selection", async () => {
+    const repository = { source: "github", id: "repo-legacy", name: "atlas", fullName: "runway/atlas", owner: "runway", private: true, defaultBranch: "main", updatedAt: "2026-08-04T08:00:00.000Z", url: "https://github.com/runway/atlas" };
+    const pullRequest = { source: "github", id: "pr-legacy", repository: repository.fullName, number: 47, title: "Deletion fallback analysis", url: "https://github.com/runway/atlas/pull/47", state: "open", author: "maya", baseRef: "main", headRef: "feature/legacy", baseSha: "base-legacy", headSha: "head-legacy", updatedAt: "2026-08-04T08:30:00.000Z", isDraft: false, additions: 1_200, deletions: 150, changedFiles: 30, labels: [], reviewDecision: null, reviewRequested: false };
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
+    Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [repository], warnings: [] })),
+      listProviders: vi.fn(async () => [{ provider: "claude", displayName: "Claude Code", executable: "claude", installed: true, version: "1.2.3", capabilities: { structuredOutput: true, streaming: true, sessionContinuation: false, readOnly: true, toolAllowlist: true, modelSelection: true, authenticationState: true } }]),
+      listPullRequests: vi.fn(async () => [pullRequest]), listPullRequestComments: vi.fn(async () => []), createPullRequestComment: vi.fn(async () => { throw new Error("unused"); }), startAnalysis: vi.fn(() => new Promise<never>(() => undefined)), cancelAnalysis: vi.fn(async () => true), listAnalysisRuns: vi.fn(async () => []), loadAnalysisRun: vi.fn(async () => null), openExternal: vi.fn(async () => true), subscribeAnalysisProgress: vi.fn((listener) => { progressListener = listener; return () => undefined; }),
+    } });
+    try {
+      render(<App />); await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+      fireEvent.click(within(screen.getByRole("list", { name: /pull request list/i })).getByRole("listitem", { name: /#47 deletion fallback analysis/i }));
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+      act(() => {
+        progressListener?.({ runId: "run-legacy", stage: "generating", message: "Legacy batch started.", timestamp: "2026-08-06T06:30:00.000Z" });
+        progressListener?.({ runId: "run-legacy", stage: "validating", message: "Legacy reducer validating.", timestamp: "2026-08-06T06:30:10.000Z" });
+        progressListener?.({ runId: "run-legacy", stage: "complete", message: "Legacy result complete.", timestamp: "2026-08-06T06:30:20.000Z" });
+      });
+      expect(screen.queryByRole("list", { name: /coordinator tasks/i })).not.toBeInTheDocument();
+    } finally { Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: undefined }); }
+  });
+
+  it("does not show coordinator task rows for a small direct analysis without coordinator progress", async () => {
+    const repository = { source: "github", id: "repo-small", name: "atlas", fullName: "runway/atlas", owner: "runway", private: true, defaultBranch: "main", updatedAt: "2026-08-04T08:00:00.000Z", url: "https://github.com/runway/atlas" };
+    const pullRequest = { source: "github", id: "pr-small", repository: repository.fullName, number: 48, title: "Small direct analysis", url: "https://github.com/runway/atlas/pull/48", state: "open", author: "maya", baseRef: "main", headRef: "feature/small", baseSha: "base-small", headSha: "head-small", updatedAt: "2026-08-04T08:30:00.000Z", isDraft: false, additions: 1, deletions: 0, changedFiles: 1, labels: [], reviewDecision: null, reviewRequested: false };
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
+    Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [repository], warnings: [] })),
+      listProviders: vi.fn(async () => [{ provider: "claude", displayName: "Claude Code", executable: "claude", installed: true, version: "1.2.3", capabilities: { structuredOutput: true, streaming: true, sessionContinuation: false, readOnly: true, toolAllowlist: true, modelSelection: true, authenticationState: true } }]),
+      listPullRequests: vi.fn(async () => [pullRequest]), listPullRequestComments: vi.fn(async () => []), createPullRequestComment: vi.fn(async () => { throw new Error("unused"); }), startAnalysis: vi.fn(() => new Promise<never>(() => undefined)), cancelAnalysis: vi.fn(async () => true), listAnalysisRuns: vi.fn(async () => []), loadAnalysisRun: vi.fn(async () => null), openExternal: vi.fn(async () => true), subscribeAnalysisProgress: vi.fn((listener) => { progressListener = listener; return () => undefined; }),
+    } });
+    try {
+      render(<App />); await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+      fireEvent.click(within(screen.getByRole("list", { name: /pull request list/i })).getByRole("listitem", { name: /#48 small direct analysis/i }));
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+      act(() => {
+        progressListener?.({ runId: "run-small", stage: "generating", message: "Direct provider started.", timestamp: "2026-08-06T06:31:00.000Z" });
+        progressListener?.({ runId: "run-small", stage: "validating", message: "Direct provider validating.", timestamp: "2026-08-06T06:31:10.000Z" });
+        progressListener?.({ runId: "run-small", stage: "complete", message: "Direct result complete.", timestamp: "2026-08-06T06:31:20.000Z" });
+      });
+      expect(screen.queryByRole("list", { name: /coordinator tasks/i })).not.toBeInTheDocument();
+    } finally { Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: undefined }); }
   });
 
   it("offers same-head reruns for a ready live pull request with the selected provider", async () => {
@@ -1170,6 +1243,8 @@ describe("PR Atlas desktop workflow", () => {
         screen.getByRole("button", { name: /analysis depth/i }),
       );
       await user.click(screen.getByRole("option", { name: "Deep" }));
+      await user.click(screen.getByRole("button", { name: /scan engine/i }));
+      await user.click(screen.getByRole("option", { name: /legacy batching/i }));
       await user.click(
         screen.getByRole("checkbox", { name: /include review comments/i }),
       );
@@ -1211,6 +1286,7 @@ describe("PR Atlas desktop workflow", () => {
           name: /send repository context to codex cli/i,
         }),
       ).toBeInTheDocument();
+      expect(screen.getByText(/legacy batching engine/i)).toBeInTheDocument();
       expect(screen.getByText(/thinking effort:/i)).toHaveTextContent("High");
       await user.click(screen.getByRole("button", { name: /continue/i }));
       await act(async () => {
@@ -1258,6 +1334,7 @@ describe("PR Atlas desktop workflow", () => {
           effort: "high",
           config: {
             depth: "deep",
+            scanMode: "legacy",
             includeReviewComments: false,
             maxGraphNodes: 120,
             timeoutMinutes: 25,
