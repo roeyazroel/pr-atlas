@@ -33,7 +33,7 @@ export class ClaudeAdapter implements AgentAdapter {
       '--permission-mode', 'plan', '--allowed-tools', 'Read', 'Grep', 'Glob', ...(validatorTool ? [validatorTool] : []),
       '--add-dir', inputDirectory,
       '--no-session-persistence',
-      '--output-format', 'json',
+      '--output-format', 'stream-json', '--verbose',
       '--json-schema', JSON.stringify(schemaForProvider(task)),
     );
     return runProviderProcess(this, this.runner, this.spawn, 'claude', args, request, worktree, signal, progress, task);

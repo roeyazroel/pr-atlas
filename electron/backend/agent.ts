@@ -25,8 +25,11 @@ import type { CommandRunner } from "./github.js";
 import { anchoredSchemaForProvider, validateAnchoredTaskOutput } from "./anchored-analysis.js";
 import { validateBatchMapOutput } from "./batching.js";
 import { buildBundledValidatorCommand, VALIDATOR_RUNTIME_ENV, validatorLauncherName } from "./validator-command.js";
+import { parseProviderAccounting } from "./costs.js";
 
 export const MAX_PROVIDER_OUTPUT = 8 * 1024 * 1024;
+/** Retain recent JSONL envelopes for terminal usage metadata after raw output caps. */
+export const MAX_PROVIDER_METADATA_TAIL = MAX_PROVIDER_OUTPUT;
 
 /**
  * Provider CLIs run outside Electron's trust boundary. Keep this list
@@ -997,7 +1000,8 @@ export async function runProviderProcess(
   );
   if (signal?.aborted) return cancelled();
   return new Promise((resolve) => {
-    let stdout = "";
+    let stdout = Buffer.alloc(0);
+    let metadataTail = Buffer.alloc(0);
     let stderr = "";
     let stdoutBytes = 0;
     let stderrBytes = 0;
@@ -1034,7 +1038,13 @@ export async function runProviderProcess(
       ATLAS_COORDINATOR_URL_SECRET: providerEnvironment.ATLAS_COORDINATOR_URL,
     };
     const providerOutput = () =>
-      redactProviderOutput(stdout, redactionSource);
+      redactProviderOutput(stdout.toString("utf8"), redactionSource);
+    const providerMetadataOutput = () =>
+      stdoutBytes > MAX_PROVIDER_OUTPUT
+        ? Buffer.concat([stdout, Buffer.from("\n"), metadataTail]).toString("utf8")
+        : stdout.toString("utf8");
+    /** Bounded, non-overlapping head plus tail used only for provider parsing. */
+    const providerParsingOutput = () => providerMetadataOutput();
     const providerLogs = () =>
       stderr ? [redactProviderStderr(stderr, redactionSource)] : [];
     let finished = false;
@@ -1045,6 +1055,14 @@ export async function runProviderProcess(
         finished = true;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener("abort", cancel);
+        // Parse terminal envelopes before returning on every path, including a
+        // failed or cancelled process. The structured metadata is normalized
+        // here; provider stdout itself stays inside the existing redaction path.
+        response.accounting ??= parseProviderAccounting(
+          adapter.id,
+          providerParsingOutput(),
+          modelFromOutput(providerParsingOutput(), redactionSource) ?? request.model,
+        );
         response.diagnosticEvents = [...providerEvents];
         resolve(response);
       }
@@ -1113,9 +1131,25 @@ export async function runProviderProcess(
         });
       }, timeoutMinutes * 60_000);
     child.stdout?.on("data", (chunk: Buffer | string) => {
-      const text = chunk.toString();
-      stdoutBytes += Buffer.byteLength(text, "utf8");
-      stdout = (stdout + text).slice(0, MAX_PROVIDER_OUTPUT);
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const previousStdoutBytes = stdoutBytes;
+      const textBytes = bytes.length;
+      stdoutBytes += textBytes;
+      if (stdout.length < MAX_PROVIDER_OUTPUT)
+        stdout = Buffer.concat([
+          stdout,
+          bytes.subarray(0, MAX_PROVIDER_OUTPUT - stdout.length),
+        ]);
+      if (previousStdoutBytes + textBytes > MAX_PROVIDER_OUTPUT) {
+        const headBytesFromChunk = Math.max(0, MAX_PROVIDER_OUTPUT - previousStdoutBytes);
+        const overflow = bytes.subarray(headBytesFromChunk);
+        const combined = Buffer.concat([metadataTail, overflow]);
+        metadataTail = Buffer.from(
+          combined.subarray(
+            Math.max(0, combined.length - MAX_PROVIDER_METADATA_TAIL),
+          ),
+        );
+      }
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const text = chunk.toString();
@@ -1152,18 +1186,18 @@ export async function runProviderProcess(
         const submitted = task.coordinator.submitted();
         const safeSubmitted = submitted && redactProviderValue(submitted, redactionSource);
         return finish(submitted
-          ? { status: "ready", taskOutput: safeSubmitted!, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(stdout, redactionSource) }
+          ? { status: "ready", taskOutput: safeSubmitted!, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(providerParsingOutput(), redactionSource) }
           : { status: "invalid", rawOutput: providerOutput(), logs: providerLogs(), errors: ["Provider exited without an accepted coordinator submission."] });
       }
       const parsed = task && task.kind !== "reduce"
-        ? parseTaskProviderOutput(stdout, task.id)
-        : parseProviderOutput(stdout);
+        ? parseTaskProviderOutput(providerParsingOutput(), task.id)
+        : parseProviderOutput(providerParsingOutput());
       if (task?.kind === "map") {
         const assignedUnits = task.assignedUnits ?? task.assignedPaths?.map((path) => ({ path, segment: 0 })) ?? [];
         const map = validateBatchMapOutput(parsed, { id: task.id, files: assignedUnits.map(({ path, segment }) => ({ path, segment, diff: "", bytes: 0 })) });
         const redacted = map.valid && map.output ? validateBatchMapOutput(redactProviderValue(map.output, redactionSource), { id: task.id, files: assignedUnits.map(({ path, segment }) => ({ path, segment, diff: "", bytes: 0 })) }) : map;
         return finish(redacted.valid && redacted.output
-          ? { status: "ready", mapOutput: redacted.output, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(stdout, redactionSource) }
+          ? { status: "ready", mapOutput: redacted.output, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(providerParsingOutput(), redactionSource) }
           : { status: "invalid", rawOutput: providerOutput(), logs: providerLogs(), errors: redacted.errors });
       }
       if (task && task.kind !== "reduce") {
@@ -1173,7 +1207,7 @@ export async function runProviderProcess(
           : taskResult;
         return finish(
           redacted.valid && redacted.output
-            ? { status: "ready", taskOutput: redacted.output, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(stdout, redactionSource) }
+            ? { status: "ready", taskOutput: redacted.output, rawOutput: providerOutput(), logs: providerLogs(), model: modelFromOutput(providerParsingOutput(), redactionSource) }
             : { status: "invalid", rawOutput: providerOutput(), logs: providerLogs(), errors: redacted.errors },
         );
       }
@@ -1204,7 +1238,7 @@ export async function runProviderProcess(
               document: safeDocument,
               rawOutput: providerOutput(),
               logs: providerLogs(),
-              model: modelFromOutput(stdout, redactionSource),
+              model: modelFromOutput(providerParsingOutput(), redactionSource),
             }
           : {
               status: "invalid",
@@ -1394,13 +1428,18 @@ function modelFromOutput(
   raw: string,
   source: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    for (const value of [parsed.model, parsed.model_name, parsed.modelName])
-      if (typeof value === "string")
-        return redactProviderOutput(value, source).slice(0, 200);
-  } catch {
-    /* output can be JSONL or plain text */
+  for (const line of [raw, ...raw.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)]) {
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const result = parsed.result && typeof parsed.result === "object"
+        ? parsed.result as Record<string, unknown>
+        : undefined;
+      for (const value of [parsed.model, parsed.model_name, parsed.modelName, result?.model])
+        if (typeof value === "string")
+          return redactProviderOutput(value, source).slice(0, 200);
+    } catch {
+      /* output can be JSONL or plain text */
+    }
   }
   return undefined;
 }

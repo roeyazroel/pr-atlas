@@ -598,6 +598,26 @@ const providerDefaults: Record<AgentProvider, string> = {
   codex: "Codex CLI",
   cursor: "Cursor Agent",
 };
+export function costIndicator(accounting: import("../shared/contracts").ProviderAccounting | undefined): { label: string; title: string } | undefined {
+  const cost = accounting?.cost;
+  if (!cost) {
+    const tokens = accounting?.usage?.inputTokens;
+    return tokens !== undefined
+      ? { label: `${tokens.toLocaleString()} input tokens · Cost unavailable`, title: "Provider reported usage without cost metadata." }
+      : undefined;
+  }
+  if (cost.kind === "reported")
+    return { label: `${cost.amountUsd > 0 && cost.amountUsd < 0.01 ? "<$0.01" : `$${cost.amountUsd.toFixed(2)}`} provider estimate${cost.incomplete ? " (partial)" : ""}`, title: `Provider-reported cost estimate; billing may differ.${cost.incomplete ? " Some invocation usage did not include a reported cost." : ""}` };
+  if (cost.kind === "estimated")
+    return {
+      label: cost.maxAmountUsd !== undefined
+        ? `~$${cost.amountUsd.toFixed(2)}–$${cost.maxAmountUsd.toFixed(2)} API estimate${cost.incomplete ? " (partial)" : ""}`
+        : `${cost.amountUsd > 0 && cost.amountUsd < 0.01 ? "<$0.01" : `~$${cost.amountUsd.toFixed(2)}`} API estimate${cost.incomplete ? " (partial)" : ""}`,
+      title: `API-equivalent estimate from ${cost.pricingSource}, pricing ${cost.pricingVersion} (as of ${cost.pricingAsOf}). This is not a subscription charge.${cost.maxAmountUsd !== undefined ? " The range reflects unavailable request boundaries for long-context pricing." : ""}${cost.incomplete ? " Some invocation usage could not be priced." : ""}`,
+    };
+  const tokens = accounting?.usage?.inputTokens;
+  return { label: tokens !== undefined ? `${tokens.toLocaleString()} input tokens · Cost unavailable` : "Cost unavailable", title: cost.reason };
+}
 const themeModes: { value: ThemeMode; label: string }[] = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
@@ -1787,6 +1807,7 @@ function App() {
                   model: run.model ?? "Tool default",
                   schemaVersion: run.schemaVersion,
                   statusLabel: run.error?.message,
+                  accounting: run.accounting,
                 })) as PullRequest["history"],
               };
               if (currentReady) {
@@ -2341,6 +2362,7 @@ function App() {
                         result.document!.run.model ??
                         "Tool default",
                       schemaVersion: result.manifest.schemaVersion,
+                      accounting: result.manifest.accounting,
                     },
                     ...pr.history,
                   ],
@@ -2383,6 +2405,7 @@ function App() {
                       model: result.manifest.model ?? "Tool default",
                       schemaVersion: result.manifest.schemaVersion,
                       statusLabel: result.error?.message,
+                      accounting: result.manifest.accounting,
                     },
                     ...pr.history.filter((run) => run.id !== result.runId),
                   ],
@@ -5866,12 +5889,14 @@ function DetailsView({
             <span>Duration</span>
             <span>Provider</span>
             <span>Model</span>
+            <span>Usage</span>
             <span>Status</span>
           </div>
           {pr.history.map((run) => {
             const provider = run.provider
               ? providerLabel(run.provider)
               : "Demo runtime";
+            const cost = costIndicator(run.accounting);
             const content = (
               <>
                 <span>
@@ -5881,6 +5906,9 @@ function DetailsView({
                 <span>{run.duration}</span>
                 <span>{provider}</span>
                 <span>{run.model}</span>
+                <span className="run-cost" title={cost?.title} aria-label={cost?.title}>
+                  {cost?.label ?? ""}
+                </span>
                 <span className={`run-status ${run.status}`}>
                   {run.status === "completed" ? "ready" : run.status}
                 </span>
