@@ -1,5 +1,5 @@
 import { ChevronDown } from 'lucide-react'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 export interface SelectMenuOption {
   value: string
@@ -14,24 +14,29 @@ export interface SelectMenuProps {
   onChange: (value: string) => void
   className?: string
   placeholder?: string
+  searchable?: boolean
 }
 
-function enabledIndexes(options: SelectMenuOption[]): number[] {
-  return options.reduce<number[]>((indexes, option, index) => {
-    if (!option.disabled) indexes.push(index)
-    return indexes
-  }, [])
-}
-
-export function SelectMenu({ ariaLabel, value, options, onChange, className, placeholder }: SelectMenuProps) {
+export function SelectMenu({ ariaLabel, value, options, onChange, className, placeholder, searchable = false }: SelectMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const listboxRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const listboxId = useId()
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
   const selectedOption = options.find((option) => option.value === value)
-  const availableIndexes = enabledIndexes(options)
+  const visibleIndexes = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+    return options.flatMap((option, index) => {
+      if (!normalizedQuery) return [index]
+      return `${option.label} ${option.value}`.toLocaleLowerCase().includes(normalizedQuery)
+        ? [index]
+        : []
+    })
+  }, [options, searchQuery])
+  const availableIndexes = visibleIndexes.filter((index) => !options[index].disabled)
   const activeOption = activeIndex === null ? undefined : options[activeIndex]
   const activeOptionId = activeOption && !activeOption.disabled ? `${listboxId}-option-${activeIndex}` : undefined
   const displayLabel = selectedOption?.label ?? placeholder ?? 'Select…'
@@ -64,19 +69,29 @@ export function SelectMenu({ ariaLabel, value, options, onChange, className, pla
   }
 
   const openMenu = (direction?: 1 | -1) => {
+    setSearchQuery('')
     setActiveIndex(direction === -1 ? (availableIndexes.at(-1) ?? null) : initialIndex)
     setOpen(true)
   }
 
   useEffect(() => {
     if (open) {
-      listboxRef.current?.focus()
+      if (searchable) searchInputRef.current?.focus()
+      else listboxRef.current?.focus()
       setActiveIndex((current) => {
         if (current !== null && options[current] && !options[current].disabled) return current
         return initialIndex
       })
     }
-  }, [open, options, initialIndex])
+  }, [open, options, initialIndex, searchable])
+
+  useEffect(() => {
+    if (!open) return
+    setActiveIndex((current) => {
+      if (current !== null && availableIndexes.includes(current)) return current
+      return availableIndexes[0] ?? null
+    })
+  }, [availableIndexes, open])
 
   useEffect(() => {
     if (!open || activeIndex === null) return
@@ -92,7 +107,8 @@ export function SelectMenu({ ariaLabel, value, options, onChange, className, pla
     return () => document.removeEventListener('pointerdown', handleOutsidePointerDown)
   }, [open])
 
-  const handleKeyDown = (event: React.KeyboardEvent) => {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    const searchInputHasFocus = event.currentTarget === searchInputRef.current
     if (event.key === 'Tab') {
       if (open && event.shiftKey) {
         event.preventDefault()
@@ -114,7 +130,7 @@ export function SelectMenu({ ariaLabel, value, options, onChange, className, pla
       else moveActive(direction)
       return
     }
-    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Space' || event.key === 'Spacebar') {
+    if (event.key === 'Enter' || (!searchInputHasFocus && (event.key === ' ' || event.key === 'Space' || event.key === 'Spacebar'))) {
       event.preventDefault()
       if (!open) openMenu()
       else selectActive()
@@ -141,17 +157,36 @@ export function SelectMenu({ ariaLabel, value, options, onChange, className, pla
       <span className="select-menu-value">{displayLabel}</span>
       <ChevronDown size={14} aria-hidden="true" />
     </button>
-    {open && <div
-      ref={listboxRef}
-      id={listboxId}
-      role="listbox"
-      tabIndex={-1}
-      aria-label={`${ariaLabel} options`}
-      aria-activedescendant={activeOptionId}
-      className="select-menu-listbox"
-      onKeyDown={handleKeyDown}
-    >
-      {options.map((option, index) => <div
+    {open && <div className="select-menu-popover">
+      {searchable && <div className="select-menu-search"><input
+        ref={searchInputRef}
+        type="search"
+        role="combobox"
+        aria-label="Search models"
+        aria-controls={listboxId}
+        aria-expanded="true"
+        aria-activedescendant={activeOptionId}
+        placeholder="Search models…"
+        value={searchQuery}
+        onChange={(event) => setSearchQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Escape' || event.key === 'Enter') handleKeyDown(event)
+          event.stopPropagation()
+        }}
+      /></div>}
+      <div
+        ref={listboxRef}
+        id={listboxId}
+        role="listbox"
+        tabIndex={-1}
+        aria-label={`${ariaLabel} options`}
+        aria-activedescendant={searchable ? undefined : activeOptionId}
+        className="select-menu-listbox"
+        onKeyDown={handleKeyDown}
+      >
+      {visibleIndexes.map((index) => {
+        const option = options[index]
+        return <div
         id={`${listboxId}-option-${index}`}
         key={`${option.value}-${index}`}
         role="option"
@@ -165,7 +200,10 @@ export function SelectMenu({ ariaLabel, value, options, onChange, className, pla
             closeMenu(true)
           }
         }}
-      >{option.label}</div>)}
+      >{option.label}</div>
+      })}
+      {searchable && !visibleIndexes.length && <p className="select-menu-empty">No matching models.</p>}
+      </div>
     </div>}
   </div>
 }

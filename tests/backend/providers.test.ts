@@ -812,16 +812,15 @@ describe("provider-neutral agent adapters", () => {
   );
 
   it.each([
-    ["claude", ClaudeAdapter, "claude"],
-    ["codex", CodexAdapter, "codex"],
-    ["cursor", CursorAdapter, "cursor-agent"],
+    ["codex", CodexAdapter, "codex", ["models"]],
+    ["cursor", CursorAdapter, "cursor-agent", ["--list-models"]],
   ] as const)(
     "discovers %s models from the installed runtime",
-    async (_id, Adapter, executable) => {
+    async (_id, Adapter, executable, expectedArgs) => {
       const runner = {
         run: vi.fn(async (file: string, args: string[]) => {
           expect(file).toBe(executable);
-          expect(args).toEqual(["models"]);
+          expect(args).toEqual(expectedArgs);
           return {
             stdout: JSON.stringify({
               models: [
@@ -931,7 +930,6 @@ describe("provider-neutral agent adapters", () => {
   it("falls back to dynamically parsed Claude model aliases from --help", async () => {
     const runner = {
       run: vi.fn(async (_file: string, args: string[]) => {
-        if (args[0] === "models") throw new Error("unsupported models command");
         expect(args).toEqual(["--help"]);
         return {
           stdout: `Options:
@@ -952,7 +950,7 @@ describe("provider-neutral agent adapters", () => {
       { id: "local-quality", label: "local-quality" },
       { id: "provider/model-latest", label: "provider/model-latest" },
     ]);
-    expect(runner.run).toHaveBeenCalledTimes(2);
+    expect(runner.run).toHaveBeenCalledTimes(1);
   });
 
   it("prefers documented Claude aliases over a duplicate full-name example", async () => {

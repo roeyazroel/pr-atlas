@@ -587,7 +587,6 @@ const THEME_STORAGE_KEY = "atlas:theme";
 const PROVIDER_STORAGE_KEY = "atlas:provider";
 const MODEL_STORAGE_KEY = "atlas:provider-models";
 const EFFORT_STORAGE_KEY = "atlas:provider-efforts";
-const CUSTOM_PROMPT_STORAGE_KEY = "atlas:custom-prompt";
 const ANALYSIS_CONFIG_STORAGE_KEY = "atlas:analysis-config";
 const providerDefaults: Record<AgentProvider, string> = {
   claude: "Claude Code",
@@ -1330,6 +1329,8 @@ function App() {
   const [providers, setProviders] = useState<AgentInstallationStatus[]>([]);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const providerStatusesRef = useRef<AgentInstallationStatus[]>([]);
+  const providerLoadRef = useRef<Promise<AgentInstallationStatus[]> | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
   const [updateDownloadState, setUpdateDownloadState] =
     useState<UpdateDownloadState>("idle");
@@ -1347,9 +1348,7 @@ function App() {
   const [selectedEfforts, setSelectedEfforts] = useState<
     Partial<Record<AgentProvider, AnalysisEffort>>
   >(readEffortPreferences);
-  const [customPrompt, setCustomPrompt] = useState(() =>
-    readStored(CUSTOM_PROMPT_STORAGE_KEY, ""),
-  );
+  const [customPrompt, setCustomPrompt] = useState("");
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(readAnalysisConfig);
   const [retentionSettings, setRetentionSettings] =
     useState<RunRetentionSettings>(DEFAULT_RETENTION_SETTINGS);
@@ -1402,12 +1401,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem(EFFORT_STORAGE_KEY, JSON.stringify(selectedEfforts));
   }, [selectedEfforts]);
-  useEffect(() => {
-    localStorage.setItem(
-      CUSTOM_PROMPT_STORAGE_KEY,
-      JSON.stringify(customPrompt),
-    );
-  }, [customPrompt]);
   useEffect(() => {
     localStorage.setItem(
       ANALYSIS_CONFIG_STORAGE_KEY,
@@ -1488,11 +1481,29 @@ function App() {
     const priority = new Map(
       AGENT_PROVIDER_PRIORITY.map((provider, index) => [provider, index]),
     );
-    const orderedStatuses = [...statuses].sort(
+    const previousByProvider = new Map(
+      providerStatusesRef.current.map((status) => [status.provider, status]),
+    );
+    const orderedStatuses = statuses.map((status) => {
+      const previous = previousByProvider.get(status.provider);
+      // Model discovery is a convenience command exposed by external CLIs.
+      // Keep a known-good list through a transient empty response while the
+      // provider itself is still installed, instead of making the selector
+      // disappear after it has already been usable.
+      if (
+        status.installed &&
+        !status.models?.length &&
+        previous?.installed &&
+        previous.models?.length
+      )
+        return { ...status, models: previous.models };
+      return status;
+    }).sort(
       (left, right) =>
         (priority.get(left.provider) ?? Number.MAX_SAFE_INTEGER) -
         (priority.get(right.provider) ?? Number.MAX_SAFE_INTEGER),
     );
+    providerStatusesRef.current = orderedStatuses;
     setProviders(orderedStatuses);
     setProviderError(null);
     setSelectedModels((current) => {
@@ -1523,9 +1534,11 @@ function App() {
   };
   const loadProviders = () => {
     const currentApi = api;
-    if (!currentApi) return;
+    if (!currentApi || providerLoadRef.current) return;
     setProvidersLoading(true);
-    void currentApi.listProviders!()
+    const load = currentApi.listProviders!();
+    providerLoadRef.current = load;
+    void load
       .then(applyProviderStatuses)
       .catch((error: unknown) =>
         setProviderError(
@@ -1534,7 +1547,11 @@ function App() {
             : "Could not detect analysis providers.",
         ),
       )
-      .finally(() => setProvidersLoading(false));
+      .finally(() => {
+        if (providerLoadRef.current !== load) return;
+        providerLoadRef.current = null;
+        setProvidersLoading(false);
+      });
   };
   useEffect(() => {
     if (!api) return;
@@ -2990,11 +3007,29 @@ function App() {
         </aside>
 
         {settingsOpen ? <main className="settings-page" aria-labelledby="workspace-settings-title">
-          <header className="settings-page-header"><div><div className="eyebrow">Workspace</div><h1 id="workspace-settings-title">Workspace settings</h1><p>Choose the provider, model, and thinking budget for every analysis run. Changes save locally and apply to the next scan.</p></div><button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button></header>
-          <div className="settings-page-grid">
-            <section className="settings-panel"><div className="settings-panel-heading"><div><div className="eyebrow">Appearance</div><h2>Interface</h2></div></div><fieldset className="theme-fieldset"><legend>Theme</legend><div className="theme-options">{themeModes.map(({ value, label }) => <label className="theme-option" key={value}><input type="radio" name="theme-mode" value={value} checked={themeMode === value} onChange={() => chooseTheme(value)} /><span>{label}</span></label>)}</div><p id="theme-description" className="theme-description">System follows your operating-system appearance.</p></fieldset></section>
-            <section className="settings-panel provider-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Analysis</div><h2>Provider</h2></div><span className={`provider-health ${providerIsActive ? 'ready' : ''}`}>{providerIndicatorLabel}</span></div>{electronMode ? <fieldset className="provider-fieldset"><legend>Choose an installed provider</legend>{providersLoading && <p className="provider-note">Detecting Claude Code, Codex CLI, and Cursor Agent…</p>}{providerError && <p className="provider-note provider-error">{providerError}</p>}{!providersLoading && !providers.length && !providerError && <p className="provider-note">No provider detection result yet.</p>}{providers.map((status) => <label className={`provider-option ${status.installed ? '' : 'unavailable'}`} key={status.provider}><input type="radio" name="analysis-provider" value={status.provider} checked={selectedProvider === status.provider} disabled={!status.installed} onChange={() => chooseProvider(status.provider)} /><span className="provider-option-main"><strong>{status.displayName}</strong><small>{status.executable}</small></span><span className="provider-option-status">{providerStatusLabel(status)}</span></label>)}</fieldset> : <p className="provider-note">Browser demo runtime only; installed provider detection is available in Electron.</p>}</section>
-            <section className="settings-panel run-settings">
+          <header className="settings-page-header">
+            <div className="settings-page-intro">
+              <div className="eyebrow">Workspace</div>
+              <h1 id="workspace-settings-title">Workspace settings</h1>
+              <p>Choose the provider, model, and thinking budget for every analysis run. Changes save locally and apply to the next scan.</p>
+            </div>
+            <div className="settings-page-actions">
+              <button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button>
+            </div>
+          </header>
+          <div className="settings-workbench">
+            <nav className="settings-rail" aria-label="Settings sections">
+              <div className="eyebrow">Configuration</div>
+              <a href="#appearance-settings">Appearance</a>
+              <a href="#provider-settings">Provider</a>
+              <a href="#analysis-settings">Next analysis</a>
+              <a href="#retention-settings">Retention</a>
+              <a href="#guidance-settings">Guidance</a>
+            </nav>
+            <div className="settings-content">
+            <section id="appearance-settings" className="settings-panel interface-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Appearance</div><h2>Interface</h2></div></div><fieldset className="theme-fieldset"><legend>Theme</legend><div className="theme-options">{themeModes.map(({ value, label }) => <label className="theme-option" key={value}><input type="radio" name="theme-mode" value={value} checked={themeMode === value} onChange={() => chooseTheme(value)} /><span>{label}</span></label>)}</div><p id="theme-description" className="theme-description">System follows your operating-system appearance.</p></fieldset></section>
+            <section id="provider-settings" className="settings-panel provider-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Analysis</div><h2>Provider</h2></div><span className={`provider-health ${providerIsActive ? 'ready' : ''}`}>{providerIndicatorLabel}</span></div>{electronMode ? <fieldset className="provider-fieldset"><legend>Choose an installed provider</legend>{providersLoading && <p className="provider-note">Detecting Claude Code, Codex CLI, and Cursor Agent…</p>}{providerError && <p className="provider-note provider-error">{providerError}</p>}{!providersLoading && !providers.length && !providerError && <p className="provider-note">No provider detection result yet.</p>}{providers.map((status) => <label className={`provider-option ${status.installed ? '' : 'unavailable'}`} key={status.provider}><input type="radio" name="analysis-provider" value={status.provider} checked={selectedProvider === status.provider} disabled={!status.installed} onChange={() => chooseProvider(status.provider)} /><span className="provider-option-main"><strong>{status.displayName}</strong><small>{status.executable}</small></span><span className="provider-option-status">{providerStatusLabel(status)}</span></label>)}</fieldset> : <p className="provider-note">Browser demo runtime only; installed provider detection is available in Electron.</p>}</section>
+            <section id="analysis-settings" className="settings-panel run-settings">
               <div className="settings-panel-heading">
                 <div>
                   <div className="eyebrow">Next analysis</div>
@@ -3022,6 +3057,7 @@ function App() {
                           value: model.id,
                           label: model.label,
                         }))}
+                        searchable={selectedProviderStatus.models.length > 12}
                         onChange={(value) =>
                           setSelectedModels((current) => ({
                             ...current,
@@ -3161,7 +3197,7 @@ function App() {
                 </label>
               </fieldset>
             </section>
-            <section className="settings-panel retention-settings">
+            <section id="retention-settings" className="settings-panel retention-settings">
               <div className="settings-panel-heading">
                 <div>
                   <div className="eyebrow">Storage</div>
@@ -3211,9 +3247,10 @@ function App() {
                 />
               </label>
             </section>
-            <section className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
+            <section id="guidance-settings" className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
+              <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
+            </div>
           </div>
-          <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
         </main> : <>
         <section className="pr-list-pane" aria-label="Pull request list">
           <div className="pane-header">

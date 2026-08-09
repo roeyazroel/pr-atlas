@@ -7,7 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, {
   buildEvidenceCodeLines,
   calculateFitZoom,
@@ -16,11 +17,24 @@ import App, {
   routeGraphEdge,
 } from "../src/App";
 import { pullRequests } from "../src/data/demo";
-import type { AnalysisProgressEvent } from "../shared/contracts";
+import type { AgentInstallationStatus, AnalysisProgressEvent } from "../shared/contracts";
 
 describe("PR Atlas desktop workflow", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
   });
 
   it("normalizes source and diff evidence into unified line rows", () => {
@@ -351,6 +365,43 @@ describe("PR Atlas desktop workflow", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shares one in-flight provider discovery during Strict Mode startup", async () => {
+    let resolveProviders: ((value: AgentInstallationStatus[]) => void) | undefined;
+    const capabilities = {
+      structuredOutput: true,
+      streaming: false,
+      sessionContinuation: false,
+      readOnly: true,
+      toolAllowlist: false,
+      modelSelection: true,
+      authenticationState: false,
+    };
+    const api = {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [], warnings: [] })),
+      listProviders: vi.fn(() => new Promise((resolve) => { resolveProviders = resolve; })),
+      listPullRequests: vi.fn(async () => []),
+      subscribeAnalysisProgress: vi.fn(() => () => undefined),
+    };
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: api,
+    });
+
+    render(<StrictMode><App /></StrictMode>);
+
+    await waitFor(() => expect(api.listProviders).toHaveBeenCalledTimes(1));
+    resolveProviders?.([{
+      provider: "cursor",
+      displayName: "Cursor Agent",
+      executable: "cursor-agent",
+      installed: true,
+      capabilities,
+      models: [{ id: "auto", label: "Auto", isDefault: true }],
+    }]);
+    await waitFor(() => expect(screen.queryByText(/detecting claude code/i)).not.toBeInTheDocument());
+  });
+
   it("defaults to the system theme and exposes accessible controls on the sidebar settings page", async () => {
     const user = userEvent.setup();
     const matchMedia = vi.fn().mockImplementation((query: string) => ({
@@ -360,6 +411,10 @@ describe("PR Atlas desktop workflow", () => {
       removeEventListener: vi.fn(),
     }));
     vi.stubGlobal("matchMedia", matchMedia);
+    window.localStorage.setItem(
+      "atlas:custom-prompt",
+      JSON.stringify("Persisted guidance must not become the default."),
+    );
 
     render(<App />);
 
@@ -371,10 +426,25 @@ describe("PR Atlas desktop workflow", () => {
     expect(
       screen.getByRole("button", { name: /back to pull requests/i }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/next analysis profile/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: /settings sections/i }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: /theme/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^system$/i })).toBeChecked();
     expect(screen.getByRole("radio", { name: /^light$/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^dark$/i })).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/supplemental collection guidance/i),
+    ).toHaveValue("");
+    expect(
+      screen.getByLabelText(/supplemental collection guidance/i),
+    ).toHaveAttribute(
+      "placeholder",
+      "Example: collect more migration, rollback, or test evidence",
+    );
   });
 
   it("persists explicit theme choices and applies them to the document", async () => {

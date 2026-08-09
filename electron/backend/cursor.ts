@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage, ProviderAnalysisTask } from '../../shared/contracts.js';
-import { buildAnalysisPrompt, detectProvider, discoverProviderModels, runProviderProcess, READ_ONLY_CAPABILITIES, schemaForProvider, type ProviderSpawn } from './agent.js';
+import { buildAnalysisPrompt, detectProvider, discoverCursorModels, runProviderProcess, READ_ONLY_CAPABILITIES, schemaForProvider, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
 export type CursorSpawn = ProviderSpawn;
@@ -36,7 +36,7 @@ export class CursorAdapter implements AgentAdapter {
 
   getCapabilities(): AgentCapabilities { return { ...CURSOR_CAPABILITIES }; }
   detect(): Promise<AgentInstallationStatus> { return detectProvider(this.runner, this.id, this.displayName, 'cursor-agent', this.getCapabilities()); }
-  listModels(): Promise<AgentModelOption[]> { return discoverProviderModels(this.runner, 'cursor-agent', this.id); }
+  listModels(): Promise<AgentModelOption[]> { return discoverCursorModels(this.runner, 'cursor-agent'); }
   getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
   discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 

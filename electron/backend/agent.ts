@@ -541,6 +541,25 @@ export async function discoverProviderModels(
   }
 }
 
+/** Discover Cursor models without treating a free-form prompt as a model API. */
+export async function discoverCursorModels(
+  runner: CommandRunner,
+  executable = "cursor-agent",
+): Promise<AgentModelOption[]> {
+  try {
+    const result = await runner.run(
+      executable,
+      ["--list-models"],
+      providerCommandOptions("cursor", 10_000),
+    );
+    const models = parseProviderModels(redactProviderOutput(result.stdout));
+    if (models.length) return models;
+  } catch {
+    /* Older Cursor Agent releases expose the models subcommand instead. */
+  }
+  return discoverProviderModels(runner, executable, "cursor");
+}
+
 /** Parse model aliases and full names shown in Claude's own help text. */
 export function parseClaudeModelHelp(raw: string): AgentModelOption[] {
   const models: AgentModelOption[] = [];
@@ -757,8 +776,6 @@ export async function discoverClaudeModels(
   runner: CommandRunner,
   executable = "claude",
 ): Promise<AgentModelOption[]> {
-  const generic = await discoverProviderModels(runner, executable, "claude");
-  if (generic.length) return generic;
   try {
     const result = await runner.run(
       executable,
