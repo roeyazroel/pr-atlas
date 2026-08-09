@@ -423,6 +423,47 @@ describe('live Electron renderer contract', () => {
     })))
   })
 
+  it('uses the selected Cursor model as the effort source without a separate effort control or request field', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    vi.mocked(api.listAnalysisRuns).mockResolvedValue([])
+    vi.mocked(api.listProviders!).mockResolvedValue(providers.map((status) => status.provider === 'cursor'
+      ? {
+          ...status,
+          installed: true,
+          models: [
+            { id: 'gpt-5.6-sol-high', label: 'GPT-5.6 Sol High', isDefault: true },
+            { id: 'gpt-5.6-sol-xhigh', label: 'GPT-5.6 Sol Extra High' },
+          ],
+          error: undefined,
+        }
+      : status))
+
+    render(<App />)
+
+    await waitFor(() => expect(api.listProviders).toHaveBeenCalledTimes(1))
+    await user.click(screen.getByRole('button', { name: /open settings/i }))
+    await user.click(screen.getByRole('radio', { name: /cursor agent/i }))
+    const model = screen.getByRole('button', { name: /model for cursor agent/i })
+    expect(model).toHaveTextContent('GPT-5.6 Sol High')
+    await user.click(model)
+    await user.click(screen.getByRole('option', { name: 'GPT-5.6 Sol Extra High' }))
+    expect(screen.queryByRole('button', { name: /thinking effort for cursor agent/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/cursor models include their effort level/i)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /open settings/i }))
+    await user.click(screen.getByRole('button', { name: /^analyze$/i }))
+    expect(screen.getByText(/selected Cursor model includes the thinking effort/i)).toBeInTheDocument()
+    expect(screen.queryByText(/thinking effort:/i)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+
+    await waitFor(() => expect(api.startAnalysis).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'cursor',
+      model: 'gpt-5.6-sol-xhigh',
+    })))
+    expect(vi.mocked(api.startAnalysis).mock.calls[0]?.[0]).not.toHaveProperty('effort')
+  })
+
   it('keeps live comments available while a first analysis is processing', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()

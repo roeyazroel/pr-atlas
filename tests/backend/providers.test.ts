@@ -503,8 +503,8 @@ describe("coordinator provider bootstrap", () => {
   it("boots Codex and Claude with only the task-scoped Atlas MCP and strict discovery", async () => {
     const codexCalls: SpawnCall[] = [];
     const codex = new CodexAdapter({ run: vi.fn(async () => ({ stdout: "codex 1.2.3" })) }, fakeSpawn("{}", codexCalls));
-    await codex.analyze(requestFor("codex"), "/worktree", "/input", undefined, progress, "gpt-test", task);
-    expect(codexCalls[0].args).toEqual(expect.arrayContaining(["--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--model", "gpt-test"]));
+    await codex.analyze({ ...requestFor("codex"), effort: "high" }, "/worktree", "/input", undefined, progress, "gpt-test", task);
+    expect(codexCalls[0].args).toEqual(expect.arrayContaining(["-c", 'model_reasoning_effort="high"', "--ignore-user-config", "--ignore-rules", "--sandbox", "read-only", "--model", "gpt-test"]));
     expect(codexCalls[0].args.join(" ")).toContain("mcp_servers.atlas.command");
     expect(codexCalls[0].args.join(" ")).toContain("mcp_servers.atlas.env_vars=[\"ATLAS_COORDINATOR_URL\",\"ATLAS_TASK_TOKEN\",\"ELECTRON_RUN_AS_NODE\"]");
     expect(codexCalls[0].options.env).toMatchObject({ ATLAS_COORDINATOR_URL: task.coordinator.url, ATLAS_TASK_TOKEN: task.coordinator.token, ELECTRON_RUN_AS_NODE: "1" });
@@ -516,8 +516,8 @@ describe("coordinator provider bootstrap", () => {
       claudeSettings = readFileSync(args[args.indexOf("--settings") + 1], "utf8");
       return recordClaude(file, args, options);
     }) as typeof recordClaude);
-    await claude.analyze(requestFor("claude"), "/worktree", "/input", undefined, progress, "claude-test", task);
-    expect(claudeCalls[0].args).toEqual(expect.arrayContaining(["--safe-mode", "--setting-sources", "", "--permission-mode", "plan", "--strict-mcp-config", "--mcp-config", "--settings", "--no-session-persistence", "--model", "claude-test"]));
+    await claude.analyze({ ...requestFor("claude"), effort: "xhigh" }, "/worktree", "/input", undefined, progress, "claude-test", task);
+    expect(claudeCalls[0].args).toEqual(expect.arrayContaining(["--safe-mode", "--setting-sources", "", "--permission-mode", "plan", "--strict-mcp-config", "--mcp-config", "--settings", "--no-session-persistence", "--model", "claude-test", "--effort", "xhigh"]));
     expect(claudeCalls[0].args).not.toContain("--bare");
     const claudeTools = claudeCalls[0].args[claudeCalls[0].args.indexOf("--allowedTools") + 1];
     expect(claudeTools).toContain("Read,Grep,Glob,Bash");
@@ -539,9 +539,10 @@ describe("coordinator provider bootstrap", () => {
       shadowMcp = readFileSync(join(workspace, ".cursor", "mcp.json"), "utf8");
       return recordSpawn(file, args, options);
     }) as typeof recordSpawn);
-    await adapter.analyze(requestFor("cursor"), "/worktree", "/input", undefined, progress, "cursor-test", task);
+    await adapter.analyze({ ...requestFor("cursor"), effort: "medium" }, "/worktree", "/input", undefined, progress, "cursor-test", task);
     expect(calls[0].file).toBe("cursor-agent");
     expect(calls[0].args).toEqual(expect.arrayContaining(["--workspace", "--approve-mcps", "--mode", "ask", "--sandbox", "enabled", "--model", "cursor-test"]));
+    expect(calls[0].args.join(" ")).not.toContain("[effort=");
     expect(calls[0].args).not.toContain("--force");
     const workspace = calls[0].args[calls[0].args.indexOf("--workspace") + 1];
     expect(workspace).not.toBe("/worktree");
@@ -1602,7 +1603,6 @@ describe("provider-neutral agent adapters", () => {
   it.each([
     ['codex', CodexAdapter, 'codex', 'high', ['exec', '-c', 'model_reasoning_effort="high"']],
     ['claude', ClaudeAdapter, 'claude', 'xhigh', ['-p', expect.any(String), '--effort', 'xhigh']],
-    ['cursor', CursorAdapter, 'cursor-agent', 'medium', ['-p', expect.any(String), '--model', 'auto[effort=medium]']],
   ] as const)('applies the selected effort to %s using its documented CLI surface', async (provider, Adapter, executable, effort, expectedPrefix) => {
     const calls: SpawnCall[] = []
     const runner = { run: vi.fn(async () => ({ stdout: `${executable} 1.2.3` })) }
@@ -1612,5 +1612,27 @@ describe("provider-neutral agent adapters", () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0].args.slice(0, expectedPrefix.length)).toEqual(expectedPrefix)
+  });
+
+  it("passes the exact selected Cursor model even when a stale effort reaches the adapter", async () => {
+    const calls: SpawnCall[] = [];
+    const runner = { run: vi.fn(async () => ({ stdout: "cursor-agent 1.2.3" })) };
+    const adapter = new CursorAdapter(
+      runner,
+      fakeSpawn('{"not":"a walkthrough"}', calls),
+    );
+
+    await adapter.analyze(
+      { ...requestFor("cursor"), model: "gpt-5.6-sol-high", effort: "medium" },
+      "/worktree",
+      "/input",
+      undefined,
+      progress,
+    );
+
+    expect(calls[0].args).toEqual(
+      expect.arrayContaining(["--model", "gpt-5.6-sol-high"]),
+    );
+    expect(calls[0].args.join(" ")).not.toContain("[effort=");
   });
 });

@@ -85,10 +85,9 @@ export class CursorAdapter implements AgentAdapter {
     }
     const prompt = `${buildAnalysisPrompt(request, inputDirectory, task)}\n\nThe exact JSON Schema follows:\n${JSON.stringify(schemaForProvider(task))}`;
     const selectedModel = model?.trim() || request.model?.trim();
-    const modelWithEffort = request.effort ? `${selectedModel ?? 'auto'}[effort=${request.effort}]` : selectedModel;
     const args = [
       '-p', prompt,
-      ...(modelWithEffort ? ['--model', modelWithEffort] : []),
+      ...(selectedModel ? ['--model', selectedModel] : []),
       '--output-format', 'json',
       '--mode', 'ask',
       '--sandbox', 'enabled',

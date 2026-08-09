@@ -172,16 +172,19 @@ export function validateAnalysisRequest(
         "Analysis configuration contains unsupported values.",
       ),
     };
-  return {
-    valid: true,
-    value: {
-      ...(request as AnalysisRequest),
-      config,
-      ...(request.customPrompt !== undefined
-        ? { customPrompt: request.customPrompt.trim() }
-        : {}),
-    },
+  const normalized: AnalysisRequest = {
+    ...(request as AnalysisRequest),
+    config,
+    ...(request.customPrompt !== undefined
+      ? { customPrompt: request.customPrompt.trim() }
+      : {}),
   };
+  if (normalized.provider === "cursor") {
+    const cursorRequest = { ...normalized };
+    delete cursorRequest.effort;
+    return { valid: true, value: cursorRequest };
+  }
+  return { valid: true, value: normalized };
 }
 
 export function safeExternalUrl(value: unknown): string | null {

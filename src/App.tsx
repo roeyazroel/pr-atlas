@@ -598,9 +598,11 @@ const themeModes: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ];
-const providerEfforts: Record<AgentProvider, readonly AnalysisEffort[]> = {
+const providerEfforts: Record<
+  Exclude<AgentProvider, "cursor">,
+  readonly AnalysisEffort[]
+> = {
   codex: ["low", "medium", "high", "xhigh", "max"],
-  cursor: ["low", "medium", "high", "xhigh", "max"],
   claude: ["low", "medium", "high", "xhigh", "max"],
 };
 const effortLabels: Record<AnalysisEffort, string> = {
@@ -657,22 +659,25 @@ function readProviderPreference(): AgentProvider | null {
 }
 
 function readEffortPreferences(): Partial<
-  Record<AgentProvider, AnalysisEffort>
+  Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>
 > {
   const raw = readStored<unknown>(EFFORT_STORAGE_KEY, {});
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const stored = raw as Record<string, unknown>;
-  return AGENT_PROVIDER_PRIORITY.reduce<
-    Partial<Record<AgentProvider, AnalysisEffort>>
-  >((preferences, provider) => {
-    const effort = stored[provider];
-    if (
-      typeof effort === "string" &&
-      providerEfforts[provider].includes(effort as AnalysisEffort)
-    )
-      preferences[provider] = effort as AnalysisEffort;
-    return preferences;
-  }, {});
+  return (
+    Object.keys(providerEfforts) as Array<keyof typeof providerEfforts>
+  ).reduce<Partial<Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>>>(
+    (preferences, provider) => {
+      const effort = stored[provider];
+      if (
+        typeof effort === "string" &&
+        providerEfforts[provider].includes(effort as AnalysisEffort)
+      )
+        preferences[provider] = effort as AnalysisEffort;
+      return preferences;
+    },
+    {},
+  );
 }
 
 function providerLabel(provider: string | undefined): string {
@@ -1346,7 +1351,7 @@ function App() {
     Partial<Record<AgentProvider, string>>
   >(() => readStored(MODEL_STORAGE_KEY, {}));
   const [selectedEfforts, setSelectedEfforts] = useState<
-    Partial<Record<AgentProvider, AnalysisEffort>>
+    Partial<Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>>
   >(readEffortPreferences);
   const [customPrompt, setCustomPrompt] = useState("");
   const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(readAnalysisConfig);
@@ -2164,7 +2169,6 @@ function App() {
     let result: AnalysisRunResult;
     try {
       const model = selectedModels[provider];
-      const effort = selectedEfforts[provider] ?? DEFAULT_ANALYSIS_EFFORT;
       const supplemental = customPrompt.trim();
       result = await api.startAnalysis({
         repository: selectedPR.repositoryFullName,
@@ -2174,7 +2178,12 @@ function App() {
         provider,
         config: analysisConfig,
         ...(model ? { model } : {}),
-        effort,
+        ...(provider === "cursor"
+          ? {}
+          : {
+              effort:
+                selectedEfforts[provider] ?? DEFAULT_ANALYSIS_EFFORT,
+            }),
         ...(supplemental ? { customPrompt: supplemental } : {}),
       });
     } catch (error) {
@@ -2756,14 +2765,21 @@ function App() {
                 Model: <code>{selectedModels[selectedProvider]}</code>
               </p>
             )}
-            <p className="confirm-detail">
-              Thinking effort: {" "}
-              <code>
-                {effortLabels[
-                  selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT
-                ]}
-              </code>
-            </p>
+            {selectedProvider === "cursor" ? (
+              <p className="confirm-detail">
+                The selected Cursor model includes the thinking effort; no
+                separate effort setting is sent.
+              </p>
+            ) : (
+              <p className="confirm-detail">
+                Thinking effort: {" "}
+                <code>
+                  {effortLabels[
+                    selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT
+                  ]}
+                </code>
+              </p>
+            )}
             <p className="confirm-detail">
               {analysisConfig.depth} depth ·{" "}
               {analysisConfig.scanMode === "coordinator" ? "coordinator engine" : "legacy batching engine"} ·{" "}
@@ -3011,7 +3027,7 @@ function App() {
             <div className="settings-page-intro">
               <div className="eyebrow">Workspace</div>
               <h1 id="workspace-settings-title">Workspace settings</h1>
-              <p>Choose the provider, model, and thinking budget for every analysis run. Changes save locally and apply to the next scan.</p>
+              <p>Choose the provider and model for every analysis run. Codex and Claude also support a separate thinking budget. Changes save locally and apply to the next scan.</p>
             </div>
             <div className="settings-page-actions">
               <button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button>
@@ -3071,38 +3087,46 @@ function App() {
                         configured default will be used.
                       </small>
                     )}
+                    {selectedProvider === "cursor" && (
+                      <small>
+                        Cursor models include their effort level, so no separate
+                        effort setting is needed.
+                      </small>
+                    )}
                   </label>
-                  <label className="model-setting">
-                    <span>Thinking effort</span>
-                    <SelectMenu
-                      ariaLabel={`Thinking effort for ${selectedProviderStatus.displayName}`}
-                      className="model-select-menu"
-                      value={
-                        selectedEfforts[selectedProvider] ??
-                        DEFAULT_ANALYSIS_EFFORT
-                      }
-                      options={providerEfforts[selectedProvider].map((effort) => ({
-                        value: effort,
-                        label: effortLabels[effort],
-                      }))}
-                      onChange={(value) =>
-                        setSelectedEfforts((current) => ({
-                          ...current,
-                          [selectedProvider]: value as AnalysisEffort,
-                        }))
-                      }
-                    />
-                    <small>
-                      Medium balances coverage and cost. Lower effort is faster
-                      and generally less expensive; higher effort may produce a
-                      more thorough scan.
-                    </small>
-                  </label>
+                  {selectedProvider !== "cursor" && (
+                    <label className="model-setting">
+                      <span>Thinking effort</span>
+                      <SelectMenu
+                        ariaLabel={`Thinking effort for ${selectedProviderStatus.displayName}`}
+                        className="model-select-menu"
+                        value={
+                          selectedEfforts[selectedProvider] ??
+                          DEFAULT_ANALYSIS_EFFORT
+                        }
+                        options={providerEfforts[selectedProvider].map((effort) => ({
+                          value: effort,
+                          label: effortLabels[effort],
+                        }))}
+                        onChange={(value) =>
+                          setSelectedEfforts((current) => ({
+                            ...current,
+                            [selectedProvider]: value as AnalysisEffort,
+                          }))
+                        }
+                      />
+                      <small>
+                        Medium balances coverage and cost. Lower effort is faster
+                        and generally less expensive; higher effort may produce a
+                        more thorough scan.
+                      </small>
+                    </label>
+                  )}
                 </>
               ) : (
                 <p className="provider-note">
                   Select an installed provider to configure its model and
-                  thinking budget.
+                  supported thinking budget.
                 </p>
               )}
               <fieldset className="provider-fieldset">
@@ -3248,7 +3272,7 @@ function App() {
               </label>
             </section>
             <section id="guidance-settings" className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
-              <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
+              <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? selectedProvider === "cursor" ? <>The next run will use {activeProviderName}; the selected Cursor model includes its effort. Repository context is sent only to that provider’s configured model service.</> : <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
             </div>
           </div>
         </main> : <>
