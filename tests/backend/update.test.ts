@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { checkForUpdate, compareVersions } from '../../electron/backend/update'
+import { checkForUpdate, compareVersions, DEFAULT_UPDATE_API_PATH } from '../../electron/backend/update'
 import { downloadUpdateArtifact, openDownloadedArtifact } from '../../electron/backend/update-download'
+import type { CommandRunner } from '../../electron/backend/github'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -8,6 +9,18 @@ import { join } from 'node:path'
 
 const digestFor = (body: string): string => `sha256:${createHash('sha256').update(body).digest('hex')}`
 const VALID_DIGEST = `sha256:${'a'.repeat(64)}`
+
+/** Builds a CommandRunner that returns a fixed `gh api` release payload. */
+function ghReleaseRunner(payload: unknown, options: { throwMessage?: string; stdout?: string } = {}): CommandRunner {
+  return {
+    run: vi.fn(async (file, args) => {
+      expect(file).toBe('gh')
+      expect(args).toEqual(['api', DEFAULT_UPDATE_API_PATH])
+      if (options.throwMessage) throw new Error(options.throwMessage)
+      return { stdout: options.stdout ?? JSON.stringify(payload) }
+    }),
+  }
+}
 
 describe('desktop release update checks', () => {
   it('compares semantic versions including prereleases without lexical mistakes', () => {
@@ -18,15 +31,15 @@ describe('desktop release update checks', () => {
     expect(compareVersions('not-a-version', '2.0.0')).toBeNull()
   })
 
-  it('reports a newer GitHub release with a safe release URL', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+  it('reports a newer GitHub release with a safe release URL through gh api', async () => {
+    const runner = ghReleaseRunner({
       tag_name: 'v9.4.0',
       html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0',
       draft: false,
       prerelease: false,
-    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
 
-    const result = await checkForUpdate('0.1.0', { fetcher })
+    const result = await checkForUpdate('0.1.0', { runner })
 
     expect(result).toMatchObject({
       currentVersion: '0.1.0',
@@ -34,11 +47,11 @@ describe('desktop release update checks', () => {
       available: true,
       releaseUrl: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0',
     })
-    expect(fetcher).toHaveBeenCalledWith(expect.stringMatching(/api\.github\.com\/repos\/roeyazroel\/pr-atlas\/releases\/latest/), expect.objectContaining({ method: 'GET' }))
+    expect(runner.run).toHaveBeenCalledWith('gh', ['api', DEFAULT_UPDATE_API_PATH], expect.objectContaining({ timeout: 5_000 }))
   })
 
   it('selects the platform installer and returns only a safe GitHub download URL', async () => {
-    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+    const runner = ghReleaseRunner({
       tag_name: 'v9.4.0',
       html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0',
       draft: false,
@@ -48,9 +61,9 @@ describe('desktop release update checks', () => {
         { name: 'PR-Atlas-9.4.0-mac-x64.dmg', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-mac-x64.dmg', digest: VALID_DIGEST },
         { name: 'PR-Atlas-9.4.0-win-x64.exe', browser_download_url: 'https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/PR-Atlas-9.4.0-win-x64.exe', digest: VALID_DIGEST },
       ],
-    }), { status: 200 }))
+    })
 
-    const result = await checkForUpdate('0.1.0', { fetcher, platform: 'darwin', arch: 'arm64' })
+    const result = await checkForUpdate('0.1.0', { runner, platform: 'darwin', arch: 'arm64' })
 
     expect(result).toMatchObject({
       available: true,
@@ -60,39 +73,47 @@ describe('desktop release update checks', () => {
     })
   })
 
-  it('fails closed for malformed versions, unsafe links, and remote errors', async () => {
+  it('fails closed for malformed versions, unsafe links, and gh errors without leaking stdout', async () => {
     const unsafe = await checkForUpdate('0.1.0', {
-      fetcher: async () => new Response(JSON.stringify({ tag_name: 'v9.4.0', html_url: 'https://attacker.example/release' }), { status: 200 }),
+      runner: ghReleaseRunner({ tag_name: 'v9.4.0', html_url: 'https://attacker.example/release' }),
     })
     expect(unsafe).toMatchObject({ currentVersion: '0.1.0', available: false, error: expect.any(String) })
     expect(unsafe).not.toHaveProperty('releaseUrl')
 
-    const failed = await checkForUpdate('0.1.0', { fetcher: async () => new Response('token=do-not-return', { status: 503 }) })
+    const failed = await checkForUpdate('0.1.0', {
+      runner: ghReleaseRunner(null, { throwMessage: 'token=do-not-return HTTP 403' }),
+    })
     expect(failed).toMatchObject({ currentVersion: '0.1.0', available: false, error: 'Could not check for a newer release.' })
     expect(JSON.stringify(failed)).not.toContain('do-not-return')
   })
 
+  it('fails closed when gh returns an oversized release payload', async () => {
+    const oversized = `${'{"tag_name":"v9.4.0","html_url":"https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0","draft":false,"assets":['}${'0'.repeat(1_000_001)}`
+    const result = await checkForUpdate('0.1.0', { runner: ghReleaseRunner(null, { stdout: oversized }) })
+    expect(result).toMatchObject({ available: false, error: 'Could not check for a newer release.' })
+  })
+
   it('selects the release-matrix Linux x86_64 AppImage for x64', async () => {
     const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
-    const fetcher = async () => new Response(JSON.stringify({
+    const runner = ghReleaseRunner({
       tag_name: 'v9.4.0', html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', draft: false,
       assets: [{ name: artifactName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, digest: VALID_DIGEST }],
-    }), { status: 200 })
-    await expect(checkForUpdate('0.1.0', { fetcher, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: true, artifactName, digest: VALID_DIGEST })
+    })
+    await expect(checkForUpdate('0.1.0', { runner, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: true, artifactName, digest: VALID_DIGEST })
   })
 
   it('fails closed when the selected asset digest is missing or malformed', async () => {
     const artifactName = 'PR-Atlas-9.4.0-linux-x86_64.AppImage'
     const fallbackName = 'PR-Atlas-9.4.0-linux-amd64.deb'
     for (const digest of [undefined, 'sha256:ABC', `sha256:${'a'.repeat(63)}g`]) {
-      const fetcher = async () => new Response(JSON.stringify({
+      const runner = ghReleaseRunner({
         tag_name: 'v9.4.0', html_url: 'https://github.com/roeyazroel/pr-atlas/releases/tag/v9.4.0', draft: false,
         assets: [
           { name: artifactName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${artifactName}`, ...(digest === undefined ? {} : { digest }) },
           { name: fallbackName, browser_download_url: `https://github.com/roeyazroel/pr-atlas/releases/download/v9.4.0/${fallbackName}`, digest: VALID_DIGEST },
         ],
-      }), { status: 200 })
-      await expect(checkForUpdate('0.1.0', { fetcher, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: false, error: expect.any(String) })
+      })
+      await expect(checkForUpdate('0.1.0', { runner, platform: 'linux', arch: 'x64' })).resolves.toMatchObject({ available: false, error: expect.any(String) })
     }
   })
 
