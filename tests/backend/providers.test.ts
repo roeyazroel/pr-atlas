@@ -15,12 +15,17 @@ import { CodexAdapter } from "../../electron/backend/codex";
 import { CursorAdapter } from "../../electron/backend/cursor";
 import {
   buildAnalysisPrompt,
+  captureProviderOutputToFile,
   discoverCodexModels,
+  discoverClaudeModels,
+  discoverCursorModels,
+  MAX_PROVIDER_OUTPUT,
   parseClaudeModelHelp,
   parseProviderModels,
   parseProviderOutput,
   runProviderProcess,
   schemaForProvider,
+  type ProviderMetadataSpawn,
 } from "../../electron/backend/agent";
 import { validateWalkthroughDocument } from "../../shared/schema";
 import { AnalysisService } from "../../electron/backend/service";
@@ -225,6 +230,132 @@ Tip: Use --model <model> to select a model.
       { id: "auto", label: "Auto", isDefault: true },
       { id: "gpt-5.6-sol-high", label: "GPT-5.6 Sol 1M High" },
     ]);
+  });
+
+  it("parses ANSI-styled Cursor model listings emitted by color-forced Electron environments", () => {
+    const raw = `\u001b[2mAvailable models\u001b[22m
+
+\u001b[36mauto\u001b[39m \u001b[2m- Auto\u001b[22m\u001b[2m (default)\u001b[22m
+\u001b[36mgpt-5.6-sol-high\u001b[39m \u001b[2m- GPT-5.6 Sol 1M High\u001b[22m
+`;
+
+    expect(parseProviderModels(raw)).toEqual([
+      { id: "auto", label: "Auto", isDefault: true },
+      { id: "gpt-5.6-sol-high", label: "GPT-5.6 Sol 1M High" },
+    ]);
+  });
+
+  it("recaptures a truncated ANSI Cursor listing so late models remain discoverable", async () => {
+    const fillerRows = Array.from({ length: 180 }, (_, index) =>
+      `\u001b[36mfiller-model-${index}\u001b[39m \u001b[2m- Filler model ${index}\u001b[22m\n`,
+    ).join("");
+    const fullListing = `\u001b[2mAvailable models\u001b[22m\n\n${fillerRows}\u001b[36mgpt-5.6-luna\u001b[39m \u001b[2m- GPT-5.6 Luna\u001b[22m\n\u001b[36mgpt-5.6-luna-high\u001b[39m \u001b[2m- GPT-5.6 Luna High\u001b[22m\n\u001b[2mTip: Use --model <model> to select a model.\u001b[22m\n`;
+    expect(fullListing.length).toBeGreaterThan(8_192);
+    expect(fullListing.indexOf("gpt-5.6-luna")).toBeGreaterThan(8_192);
+    const runner = {
+      run: vi.fn(async () => ({ stdout: fullListing.slice(0, 8_192) })),
+    };
+    const capture = vi.fn(async () => fullListing);
+
+    const models = await discoverCursorModels(runner, "cursor-agent", capture);
+
+    expect(models).toContainEqual({ id: "gpt-5.6-luna", label: "GPT-5.6 Luna" });
+    expect(models).toContainEqual({ id: "gpt-5.6-luna-high", label: "GPT-5.6 Luna High" });
+    expect(capture).toHaveBeenCalledWith("cursor-agent", ["--list-models"], "cursor", 10_000);
+  });
+
+  it("parses ANSI-styled Claude model help", () => {
+    expect(parseClaudeModelHelp(`Options:
+  \u001b[1m--model\u001b[22m <model>                Model for the current session. Aliases:
+                                        \u001b[36m\`fable\`\u001b[39m, \`opus\`, and \`sonnet\`.
+  --next-option                         Another option
+`)).toEqual([
+      { id: "fable", label: "fable" },
+      { id: "opus", label: "opus" },
+      { id: "sonnet", label: "sonnet" },
+    ]);
+  });
+
+  it("retries a successful but incomplete Claude help response through file-backed capture", async () => {
+    const runner = {
+      run: vi.fn(async () => ({ stdout: "Usage: claude [options]", stderr: "" })),
+    };
+    const capture = vi.fn(async () => `Options:
+  --model <model>                       Model aliases (e.g. 'fable', 'opus', or 'sonnet').
+  --next-option                         Another option
+`);
+
+    await expect(discoverClaudeModels(runner, "claude", capture)).resolves.toEqual([
+      { id: "fable", label: "fable" },
+      { id: "opus", label: "opus" },
+      { id: "sonnet", label: "sonnet" },
+    ]);
+    expect(capture).toHaveBeenCalledWith("claude", ["--help"], "claude", 10_000);
+  });
+
+  it("captures provider metadata through a private file descriptor", async () => {
+    await expect(captureProviderOutputToFile(
+      process.execPath,
+      ["-e", "process.stdout.write('provider metadata')"],
+      "claude",
+      10_000,
+    )).resolves.toBe("provider metadata");
+  });
+
+  it("force-terminates and settles when provider metadata capture never closes", async () => {
+    const child = new EventEmitter() as unknown as ChildProcess;
+    child.kill = vi.fn(() => true);
+    const spawnNeverCloses = vi.fn(() => child) as unknown as ProviderMetadataSpawn;
+
+    await expect(captureProviderOutputToFile(
+      process.execPath,
+      ["--version"],
+      "claude",
+      5,
+      spawnNeverCloses,
+      5,
+    )).rejects.toThrow(/timed out/i);
+    expect(child.kill).toHaveBeenNthCalledWith(1);
+    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
+  it("rejects and terminates while an oversized provider metadata process is still running", async () => {
+    const startedAt = Date.now();
+
+    await expect(captureProviderOutputToFile(
+      process.execPath,
+      [
+        "-e",
+        `process.stdout.write(Buffer.alloc(${MAX_PROVIDER_OUTPUT + 1}, 120)); setInterval(() => {}, 1000);`,
+      ],
+      "claude",
+      10_000,
+      undefined,
+      25,
+    )).rejects.toThrow(/exceeded/i);
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  }, 5_000);
+
+  it("removes the temporary directory when the metadata output file cannot be opened", async () => {
+    let attemptedTarget = "";
+    const openFile = vi.fn(async (target: string) => {
+      attemptedTarget = target;
+      throw new Error("open failed");
+    });
+    const spawn = vi.fn() as unknown as ProviderMetadataSpawn;
+
+    await expect(captureProviderOutputToFile(
+      process.execPath,
+      ["--version"],
+      "claude",
+      10_000,
+      spawn,
+      25,
+      openFile,
+    )).rejects.toThrow("open failed");
+    expect(attemptedTarget).not.toBe("");
+    expect(existsSync(resolve(attemptedTarget, ".."))).toBe(false);
   });
 });
 

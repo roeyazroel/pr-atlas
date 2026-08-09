@@ -1,8 +1,9 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type {
   AgentAdapter,
   AgentAnalysisResult,
@@ -267,6 +268,25 @@ export interface ProviderSpawn {
   ): ChildProcess;
 }
 
+export interface ProviderMetadataSpawn {
+  (
+    file: string,
+    args: string[],
+    options: {
+      env: NodeJS.ProcessEnv;
+      stdio: ["ignore", number, "ignore"];
+      windowsHide: boolean;
+    },
+  ): ChildProcess;
+}
+
+export type ProviderOutputCapture = (
+  executable: string,
+  args: string[],
+  provider: AgentProvider,
+  timeoutMs: number,
+) => Promise<string>;
+
 export const READ_ONLY_CAPABILITIES: AgentCapabilities = {
   structuredOutput: true,
   streaming: false,
@@ -418,6 +438,7 @@ function providerCommandOptions(
 
 /** Parse a provider's own model listing without maintaining an app model list. */
 export function parseProviderModels(raw: string): AgentModelOption[] {
+  const normalizedRaw = stripVTControlCharacters(raw);
   const models: AgentModelOption[] = [];
   const seen = new Set<string>();
   const add = (
@@ -485,7 +506,7 @@ export function parseProviderModels(raw: string): AgentModelOption[] {
           walk(entry);
       });
   };
-  const lines = raw.split(/\r?\n/);
+  const lines = normalizedRaw.split(/\r?\n/);
   const hasPlainListingHeader = lines.some((line) =>
     /^\s*Available models\s*:?\s*$/i.test(line),
   );
@@ -501,7 +522,7 @@ export function parseProviderModels(raw: string): AgentModelOption[] {
     return true;
   };
   try {
-    walk(JSON.parse(raw));
+    walk(JSON.parse(normalizedRaw));
   } catch {
     /* provider may return one model per line */
   }
@@ -541,10 +562,23 @@ export async function discoverProviderModels(
   }
 }
 
+function isCursorAvailableModelsListing(raw: string): boolean {
+  return stripVTControlCharacters(raw).split(/\r?\n/).some((line) =>
+    /^\s*Available models\s*:?[ \t]*$/i.test(line),
+  );
+}
+
+function isCursorListingComplete(raw: string): boolean {
+  return /(?:^|\r?\n)\s*Tip:\s*Use\s+--model\b/i.test(
+    stripVTControlCharacters(raw),
+  );
+}
+
 /** Discover Cursor models without treating a free-form prompt as a model API. */
 export async function discoverCursorModels(
   runner: CommandRunner,
   executable = "cursor-agent",
+  captureOutput: ProviderOutputCapture = captureProviderOutputToFile,
 ): Promise<AgentModelOption[]> {
   try {
     const result = await runner.run(
@@ -552,7 +586,22 @@ export async function discoverCursorModels(
       ["--list-models"],
       providerCommandOptions("cursor", 10_000),
     );
-    const models = parseProviderModels(redactProviderOutput(result.stdout));
+    const raw = redactProviderOutput(result.stdout);
+    const models = parseProviderModels(raw);
+    if (isCursorAvailableModelsListing(raw) && !isCursorListingComplete(raw)) {
+      try {
+        const captured = await captureOutput(
+          executable,
+          ["--list-models"],
+          "cursor",
+          10_000,
+        );
+        const capturedModels = parseProviderModels(redactProviderOutput(captured));
+        if (capturedModels.length) return capturedModels;
+      } catch {
+        /* Keep the pipe result as a fallback when file capture is unavailable. */
+      }
+    }
     if (models.length) return models;
   } catch {
     /* Older Cursor Agent releases expose the models subcommand instead. */
@@ -562,6 +611,7 @@ export async function discoverCursorModels(
 
 /** Parse model aliases and full names shown in Claude's own help text. */
 export function parseClaudeModelHelp(raw: string): AgentModelOption[] {
+  const normalizedRaw = stripVTControlCharacters(raw);
   const models: AgentModelOption[] = [];
   const seen = new Set<string>();
   const ignored = new Set([
@@ -604,7 +654,7 @@ export function parseClaudeModelHelp(raw: string): AgentModelOption[] {
     ))
       add(match[0]);
   };
-  const lines = raw.split(/\r?\n/);
+  const lines = normalizedRaw.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
     if (!/(?:^|\s)--model(?:[=\s]|$)/i.test(lines[index])) continue;
     const block = [lines[index]];
@@ -771,10 +821,125 @@ export function discoverCodexModels(
   });
 }
 
+/**
+ * Capture provider metadata through a private file descriptor. Some native
+ * CLIs truncate long help output when their stdout pipe is owned by Electron,
+ * even though they exit successfully. A regular file avoids that provider
+ * behavior without invoking a shell or hard-coding model choices.
+ */
+export async function captureProviderOutputToFile(
+  executable: string,
+  args: string[],
+  provider: AgentProvider,
+  timeoutMs: number,
+  spawn: ProviderMetadataSpawn = nodeSpawn as ProviderMetadataSpawn,
+  terminationGraceMs = 250,
+  openFile: (
+    target: string,
+    flags: "wx",
+    mode: number,
+  ) => ReturnType<typeof open> = open,
+): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "pr-atlas-provider-metadata-"));
+  const target = join(directory, "stdout.txt");
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    const outputHandle = await openFile(target, "wx", 0o600);
+    handle = outputHandle;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let failure: Error | undefined;
+      let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      let sizeTimer: ReturnType<typeof setInterval> | undefined;
+      let sizeCheckPending = false;
+      let child: ChildProcess | undefined;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (forceTimer) clearTimeout(forceTimer);
+        if (sizeTimer) clearInterval(sizeTimer);
+        if (error) reject(error);
+        else resolve();
+      };
+      const terminate = (error: Error) => {
+        if (settled) return;
+        failure ??= error;
+        if (!child) return finish(failure);
+        try {
+          child.kill();
+        } catch {
+          finish(failure);
+          return;
+        }
+        if (!forceTimer) {
+          forceTimer = setTimeout(() => {
+            try {
+              child?.kill("SIGKILL");
+            } finally {
+              finish(failure);
+            }
+          }, terminationGraceMs);
+          forceTimer.unref?.();
+        }
+      };
+      const checkOutputSize = async () => {
+        if (settled || failure || sizeCheckPending) return;
+        sizeCheckPending = true;
+        try {
+          const metadata = await stat(target);
+          if (metadata.size > MAX_PROVIDER_OUTPUT)
+            terminate(new Error("Provider metadata output exceeded the limit."));
+        } catch {
+          /* the child may have exited while the file was being checked */
+        } finally {
+          sizeCheckPending = false;
+        }
+      };
+      try {
+        child = spawn(executable, args, {
+          env: buildProviderEnvironment(provider),
+          stdio: ["ignore", outputHandle.fd, "ignore"],
+          windowsHide: true,
+        });
+      } catch {
+        finish(new Error("Provider metadata command failed."));
+        return;
+      }
+      child.once("error", () => finish(failure ?? new Error("Provider metadata command failed.")));
+      child.once("close", (code) => {
+        if (failure) finish(failure);
+        else if (code !== 0)
+          finish(new Error("Provider metadata command failed."));
+        else finish();
+      });
+      timeoutTimer = setTimeout(() => {
+        terminate(new Error("Provider metadata command timed out."));
+      }, timeoutMs);
+      timeoutTimer.unref?.();
+      sizeTimer = setInterval(() => {
+        void checkOutputSize();
+      }, 10);
+      sizeTimer.unref?.();
+    });
+    await outputHandle.close();
+    handle = undefined;
+    const metadata = await stat(target);
+    if (metadata.size > MAX_PROVIDER_OUTPUT)
+      throw new Error("Provider metadata output exceeded the limit.");
+    return await readFile(target, "utf8");
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 /** Discover Claude models from its CLI help when no models subcommand exists. */
 export async function discoverClaudeModels(
   runner: CommandRunner,
   executable = "claude",
+  captureOutput: ProviderOutputCapture = captureProviderOutputToFile,
 ): Promise<AgentModelOption[]> {
   try {
     const result = await runner.run(
@@ -782,9 +947,17 @@ export async function discoverClaudeModels(
       ["--help"],
       providerCommandOptions("claude", 10_000),
     );
-    return parseClaudeModelHelp(
+    const models = parseClaudeModelHelp(
       redactProviderOutput(`${result.stdout}\n${result.stderr ?? ""}`),
     );
+    if (models.length) return models;
+    const captured = await captureOutput(
+      executable,
+      ["--help"],
+      "claude",
+      10_000,
+    );
+    return parseClaudeModelHelp(redactProviderOutput(captured));
   } catch {
     return [];
   }
