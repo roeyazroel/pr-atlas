@@ -269,9 +269,10 @@ npm run package:linux
 
 ### In-app update workflow
 
-At startup, Electron checks the public GitHub Releases API at
-`https://api.github.com/repos/roeyazroel/pr-atlas/releases/latest`. The update
-path is deliberately narrow:
+At startup, Electron asks authenticated GitHub CLI for the latest release via
+`gh api repos/roeyazroel/pr-atlas/releases/latest`. Using `gh` keeps the check
+on the signed-in GitHub quota instead of the anonymous API rate limit. The
+update path is deliberately narrow:
 
 1. Accept only a newer, non-draft semantic version.
 2. Require the release page to be the exact HTTPS URL

@@ -470,7 +470,6 @@ function registerIpc(): void {
     const downloadGenerationAtStart = updateDownloadGeneration;
     const startedDuringDownload = activeUpdateDownload !== null;
     const result = await checkForUpdate(app.getVersion(), {
-      feedUrl: process.env.PR_ATLAS_UPDATE_FEED_URL,
       platform: process.platform,
       arch: process.arch,
     });

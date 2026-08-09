@@ -1,10 +1,14 @@
 import type { UpdateCheckResult } from '../../shared/contracts.js'
+import { commandRunner, type CommandRunner } from './github.js'
 
-const DEFAULT_UPDATE_FEED_URL = 'https://api.github.com/repos/roeyazroel/pr-atlas/releases/latest'
+/** Authenticated GitHub API path resolved through `gh` (avoids anonymous rate limits). */
+export const DEFAULT_UPDATE_API_PATH = 'repos/roeyazroel/pr-atlas/releases/latest'
 const RELEASE_PATH_PREFIX = '/roeyazroel/pr-atlas/releases/tag/'
+const MAX_RELEASE_BODY_BYTES = 1_000_000
 
 type ParsedVersion = { core: [number, number, number]; prerelease: string[] }
 
+/** Parses a strict semver-ish version string used by PR Atlas release tags. */
 function parseVersion(value: string): ParsedVersion | null {
   const match = value.trim().match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/)
   if (!match) return null
@@ -14,6 +18,7 @@ function parseVersion(value: string): ParsedVersion | null {
   }
 }
 
+/** Compares a single prerelease identifier per semver rules. */
 function compareIdentifier(left: string, right: string): number {
   const leftNumber = /^\d+$/.test(left) ? Number(left) : null
   const rightNumber = /^\d+$/.test(right) ? Number(right) : null
@@ -23,6 +28,7 @@ function compareIdentifier(left: string, right: string): number {
   return left === right ? 0 : left < right ? -1 : 1
 }
 
+/** Compares two version strings; returns null when either side is unparsable. */
 export function compareVersions(left: string, right: string): number | null {
   const a = parseVersion(left)
   const b = parseVersion(right)
@@ -43,10 +49,12 @@ export function compareVersions(left: string, right: string): number | null {
   return 0
 }
 
+/** Strips a leading `v` and build metadata while keeping a parseable core version. */
 function normalizedVersion(value: string): string | null {
   return parseVersion(value) ? value.trim().replace(/^v/, '').replace(/\+.*/, '') : null
 }
 
+/** Accepts only the canonical HTTPS release page for this repository and tag. */
 function safeReleaseUrl(value: unknown, tagName: string): string | null {
   if (typeof value !== 'string') return null
   try {
@@ -56,17 +64,9 @@ function safeReleaseUrl(value: unknown, tagName: string): string | null {
   } catch { return null }
 }
 
-function allowedFeedUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    if (url.toString() === DEFAULT_UPDATE_FEED_URL) return true
-    return url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
-  } catch { return false }
-}
-
-interface UpdateCheckOptions {
-  fetcher?: typeof fetch
-  feedUrl?: string
+export interface UpdateCheckOptions {
+  /** Injectable command runner; production uses authenticated `gh`. */
+  runner?: CommandRunner
   timeoutMs?: number
   /** The target runtime is explicit so checks can be tested without mutating process globals. */
   platform?: NodeJS.Platform
@@ -82,14 +82,17 @@ interface ReleaseAsset {
 const ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/
 const REPOSITORY_PATH = '/roeyazroel/pr-atlas'
 
+/** Validates installer file names before using them in download paths. */
 export function safeArtifactName(value: unknown): value is string {
   return typeof value === 'string' && ARTIFACT_NAME.test(value) && value !== '.' && value !== '..' && !value.includes('..\\')
 }
 
+/** Validates GitHub release asset digests in the `sha256:<hex>` form. */
 export function isSha256Digest(value: unknown): value is string {
   return typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value)
 }
 
+/** Builds the exact release-matrix artifact name for a platform/arch pair. */
 export function expectedAssetName(version: string, platform: NodeJS.Platform, arch: string, fallbackDeb = false): string | null {
   const os = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : platform === 'linux' ? 'linux' : null
   if (!os) return null
@@ -103,6 +106,7 @@ export function expectedAssetName(version: string, platform: NodeJS.Platform, ar
   return `PR-Atlas-${version}-${os}-${arch}.${extension}`
 }
 
+/** Accepts only the canonical HTTPS GitHub release download URL for an artifact. */
 export function safeArtifactUrl(value: unknown, version: string, name: string): string | null {
   if (typeof value !== 'string' || !safeArtifactName(name)) return null
   try {
@@ -113,6 +117,7 @@ export function safeArtifactUrl(value: unknown, version: string, name: string): 
   } catch { return null }
 }
 
+/** Picks the matching platform installer when name, URL, and digest are all safe. */
 function selectAsset(assets: unknown, version: string, platform: NodeJS.Platform, arch: string): { name: string; downloadUrl: string; digest: string } | null {
   if (!Array.isArray(assets)) return null
   const candidates = assets.filter((asset): asset is ReleaseAsset => Boolean(asset && typeof asset === 'object'))
@@ -131,25 +136,22 @@ function selectAsset(assets: unknown, version: string, platform: NodeJS.Platform
   return null
 }
 
+/**
+ * Checks for a newer desktop release through authenticated `gh api`.
+ * Fails closed on auth/CLI errors, malformed payloads, or unsafe asset metadata.
+ */
 export async function checkForUpdate(currentVersion: string, options: UpdateCheckOptions = {}): Promise<UpdateCheckResult> {
   const checkedAt = new Date().toISOString()
   const current = normalizedVersion(currentVersion)
-  const feedUrl = options.feedUrl ?? DEFAULT_UPDATE_FEED_URL
   const failed = (): UpdateCheckResult => ({ currentVersion: current ?? currentVersion, available: false, checkedAt, error: 'Could not check for a newer release.' })
-  if (!current || !allowedFeedUrl(feedUrl)) return failed()
+  if (!current) return failed()
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 5_000)
   try {
-    const response = await (options.fetcher ?? fetch)(feedUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `PR-Atlas/${current}` },
-      signal: controller.signal,
+    const { stdout } = await (options.runner ?? commandRunner).run('gh', ['api', DEFAULT_UPDATE_API_PATH], {
+      timeout: options.timeoutMs ?? 5_000,
     })
-    if (!response.ok) return failed()
-    const body = await response.text()
-    if (body.length > 1_000_000) return failed()
-    const release = JSON.parse(body) as { tag_name?: unknown; html_url?: unknown; draft?: unknown; prerelease?: unknown; assets?: unknown }
+    if (typeof stdout !== 'string' || stdout.length > MAX_RELEASE_BODY_BYTES) return failed()
+    const release = JSON.parse(stdout) as { tag_name?: unknown; html_url?: unknown; draft?: unknown; prerelease?: unknown; assets?: unknown }
     const rawTag = typeof release.tag_name === 'string' ? release.tag_name.trim() : null
     const latest = rawTag ? normalizedVersion(rawTag) : null
     const releaseUrl = rawTag ? safeReleaseUrl(release.html_url, rawTag) : null
@@ -167,5 +169,4 @@ export async function checkForUpdate(currentVersion: string, options: UpdateChec
       checkedAt,
     }
   } catch { return failed() }
-  finally { clearTimeout(timer) }
 }
