@@ -2974,16 +2974,18 @@ function App() {
                 )}
               </div>
             )}
-            <button className="help-button">
-              <CircleHelp size={14} /> Keyboard shortcuts
-            </button>
-            <button
-              className={`workspace-settings-link ${settingsOpen ? "active" : ""}`}
-              aria-label="Open settings"
-              onClick={() => setSettingsOpen((open) => !open)}
-            >
-              <Settings size={14} /> Workspace settings
-            </button>
+            <div className="sidebar-utilities" aria-label="Workspace utilities">
+              <button className="sidebar-utility-button help-button">
+                <CircleHelp size={14} /> Keyboard shortcuts
+              </button>
+              <button
+                className={`sidebar-utility-button workspace-settings-link ${settingsOpen ? "active" : ""}`}
+                aria-label="Open settings"
+                onClick={() => setSettingsOpen((open) => !open)}
+              >
+                <Settings size={14} /> Workspace settings
+              </button>
+            </div>
           </div>
         </aside>
 

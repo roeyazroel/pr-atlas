@@ -357,6 +357,10 @@ button:disabled {
   flex-direction: column;
   gap: 9px;
 }
+.sidebar-utilities {
+  display: grid;
+  gap: 3px;
+}
 .footer-line {
   display: flex;
   align-items: center;
@@ -367,19 +371,26 @@ button:disabled {
 .muted {
   color: var(--faint) !important;
 }
-.help-button {
+.sidebar-utility-button {
+  width: 100%;
+  min-height: 32px;
   display: flex;
   align-items: center;
   gap: 7px;
-  border: 0;
-  padding: 5px 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 7px;
   background: transparent;
   color: var(--muted);
   font-size: 10px;
+  font-weight: 600;
   cursor: pointer;
   text-align: left;
 }
-.help-button:hover {
+.sidebar-utility-button:hover,
+.sidebar-utility-button:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface-raised);
   color: var(--ink);
 }
 .pr-list-pane {
@@ -3328,8 +3339,7 @@ button:disabled {
 }
 
 /* Workspace settings is a full detail page, intentionally separate from the compact PR workspace. */
-.workspace-settings-link { display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 2px; padding: 8px 7px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); font-size: 10px; font-weight: 600; cursor: pointer; text-align: left; }
-.workspace-settings-link:hover,.workspace-settings-link.active { border-color: #b7d7d1; background: var(--surface-raised); color: var(--teal); }
+.workspace-settings-link.active { border-color: #b7d7d1; background: var(--surface-raised); color: var(--teal); }
 .settings-page { grid-column: 2 / -1; min-width: 0; padding: 38px clamp(34px, 6vw, 86px) 56px; overflow: auto; background: var(--paper); }
 .settings-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; max-width: 1120px; padding-bottom: 28px; border-bottom: 1px solid var(--line); }
 .settings-page-header h1 { margin: 7px 0 8px; font-size: 28px; letter-spacing: -.04em; }

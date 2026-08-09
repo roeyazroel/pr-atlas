@@ -474,6 +474,12 @@ describe("PR Atlas desktop workflow", () => {
     expect(
       document.querySelector(".pr-list-pane .list-footer"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /keyboard shortcuts/i }),
+    ).toHaveClass("sidebar-utility-button");
+    expect(screen.getByRole("button", { name: /open settings/i })).toHaveClass(
+      "sidebar-utility-button",
+    );
   });
 
   it("filters the pull-request list without losing the selected item", async () => {
