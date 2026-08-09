@@ -40,6 +40,7 @@ export class CursorAdapter implements AgentAdapter {
   async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<AgentAnalysisResult> {
     if (task?.coordinator) {
       const root = await mkdtemp(join(tmpdir(), "pr-atlas-cursor-")); const shadow = join(root, "exact-head");
+      let response: AgentAnalysisResult | undefined;
       try {
         const head = (await this.runner.run("git", ["rev-parse", "HEAD"], { cwd: worktree, timeout: 30_000, signal })).stdout.trim();
         if (!head) throw new Error(CURSOR_COORDINATOR_ISOLATION_FAILED);
@@ -68,10 +69,23 @@ export class CursorAdapter implements AgentAdapter {
         const baseline = (await this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: shadow, timeout: 30_000, signal })).stdout;
         const selectedModel = model?.trim() || request.model?.trim();
         const args = ["-p", buildAnalysisPrompt(request, undefined, task), ...(selectedModel ? ["--model", selectedModel] : []), "--output-format", "stream-json", "--sandbox", "enabled", "--workspace", shadow, "--trust", "--approve-mcps", "--force"];
-        const response = await runProviderProcess(this, this.runner, this.spawn, "cursor-agent", args, request, shadow, signal, progress, task, { CURSOR_CONFIG_DIR: root, ELECTRON_RUN_AS_NODE: "1" });
-        const after = (await this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: shadow, timeout: 30_000, signal })).stdout;
+        response = await runProviderProcess(this, this.runner, this.spawn, "cursor-agent", args, request, shadow, signal, progress, task, { CURSOR_CONFIG_DIR: root, ELECTRON_RUN_AS_NODE: "1" });
+        // This integrity check must still run after provider cancellation. The
+        // shared signal has already fired, so do not pass it to this bounded,
+        // local-only status command or it would turn cancellation into an
+        // unrelated coordinator-isolation failure.
+        const after = (await this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: shadow, timeout: 30_000 })).stdout;
         return after === baseline ? response : { ...response, status: "invalid", errors: ["Cursor modified the disposable exact-head worktree; output was rejected."], document: undefined, taskOutput: undefined, mapOutput: undefined };
       } catch {
+        if (response) return {
+          ...response,
+          status: response.status === "cancelled" ? "cancelled" : "failed",
+          errors: [...(response.errors ?? []), "Cursor disposable exact-head worktree integrity check could not be completed; output was rejected."],
+          document: undefined,
+          taskOutput: undefined,
+          mapOutput: undefined,
+        };
+        if (signal?.aborted) return { status: "cancelled", rawOutput: "", logs: [] };
         return { status: "failed", rawOutput: "", logs: [], errors: [CURSOR_COORDINATOR_ISOLATION_FAILED] };
       } finally {
         await this.runner.run("git", ["reset", "--hard", "HEAD"], { cwd: shadow, timeout: 30_000 }).catch(() => undefined);

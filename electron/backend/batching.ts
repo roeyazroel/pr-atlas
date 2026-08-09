@@ -124,28 +124,33 @@ function validate(document) {
   const tests = ids(document.tests);
   const reviewThreads = ids(document.reviewThreads);
   const reviewInsights = ids(document.reviewInsights);
-  duplicateIds([["changeGroups", document.changeGroups], ["walkthrough", document.walkthrough], ["tests", document.tests], ["reviewThreads", document.reviewThreads], ["reviewInsights", document.reviewInsights], ["evidence", document.evidence]]);
+  if (!["risks", "dependencies", "unchangedInteractions"].every((key) => Array.isArray(document[key]))) fail("risks, dependencies, and unchangedInteractions must be canonical arrays.");
   const graphs = object(document.graphs);
   const graphDefinitions = [["systemOverview", "system-overview"], ["dataFlow", "data-flow"], ["codeDependency", "code-dependency"], ["userAction", "user-action"]];
   const graphNodes = [];
   graphDefinitions.forEach(([key, id]) => graphNodes.push(...array(object(graphs[key]).nodes)));
+  duplicateIds([["changeGroups", document.changeGroups], ["stories", document.stories], ["tests", document.tests], ["reviewThreads", document.reviewThreads], ["reviewInsights", document.reviewInsights], ["risks", document.risks], ["dependencies", document.dependencies], ["unchangedInteractions", document.unchangedInteractions], ["evidence", document.evidence], ...graphDefinitions.flatMap(([key]) => { const graph = object(graphs[key]); return [["graphs." + key + ".nodes", graph.nodes], ["graphs." + key + ".edges", graph.edges], ["graphs." + key + ".guidedTours", graph.guidedTours]]; })]);
   const allNodes = ids(graphNodes);
   graphDefinitions.forEach(([key, id]) => validateGraph(object(graphs[key]), "graphs." + key, id, changeGroups, tests, reviewThreads, reviewInsights));
-  const steps = array(document.walkthrough);
-  const stepIds = ids(steps);
-  steps.forEach((step, index) => {
-    const value = object(step); const path = "walkthrough[" + index + "]";
-    array(value.dependsOnStepIds).forEach((dependency) => {
-      if (!stepIds.has(dependency)) fail("walkthrough '" + value.id + "' depends on unknown step '" + dependency + "'.");
-      else if (dependency === value.id) fail("walkthrough '" + value.id + "' cannot depend on itself.");
-      else if (steps.findIndex((candidate) => object(candidate).id === dependency) >= index) fail("walkthrough '" + value.id + "' must depend only on an earlier step.");
-    });
-    if (!changeGroups.has(value.changeGroupId)) fail("walkthrough '" + value.id + "' references unknown change group '" + value.changeGroupId + "'.");
-    unresolved(value, path, "flowNodeId", "flowNodeIds", allNodes);
-    unresolved(value, path, "testId", "testIds", tests);
-    unresolved(value, path, "reviewInsightId", "reviewInsightIds", reviewInsights);
+  const stories = array(document.stories);
+  const storyIds = ids(stories);
+  const plan = array(document.reviewPlan);
+  if (plan.length !== stories.length || new Set(plan).size !== plan.length || plan.some((id) => !storyIds.has(id))) fail("reviewPlan must contain every story exactly once.");
+  else if (plan[0] !== document.primaryStoryId) fail("reviewPlan must begin with primaryStoryId.");
+  const owners = new Set(); let primary = 0;
+  stories.forEach((story) => {
+    const value = object(story);
+    if (value.relationshipToPrimary === "primary") primary++;
+    array(value.changeGroupIds).forEach((groupId) => { if (!changeGroups.has(groupId)) fail("story '" + value.id + "' references unknown change group '" + groupId + "'."); else if (owners.has(groupId)) fail("change group '" + groupId + "' belongs to more than one story."); else owners.add(groupId); });
+    array(value.dependsOnStoryIds).forEach((dependency) => { const current = plan.indexOf(value.id); const previous = plan.indexOf(dependency); if (!storyIds.has(dependency)) fail("story '" + value.id + "' depends on unknown story '" + dependency + "'."); else if (dependency === value.id || previous >= current) fail("story '" + value.id + "' must depend only on an earlier reviewPlan story."); });
   });
-  array(document.tests).forEach((test, index) => unresolved(object(test), "tests[" + index + "]", "changeGroupId", "changeGroupIds", changeGroups));
+  if (primary !== 1 || document.primaryStoryId === undefined || !stories.some((story) => object(story).id === document.primaryStoryId && object(story).relationshipToPrimary === "primary")) fail("exactly one primary story must match primaryStoryId.");
+  changeGroups.forEach((groupId) => { if (!owners.has(groupId)) fail("change group '" + groupId + "' must belong to exactly one story."); });
+  array(document.tests).forEach((test, index) => {
+    const value = object(test); const path = "tests[" + index + "]";
+    if (array(value.changeGroupIds).length === 0) fail(path + ".changeGroupIds must not be empty.");
+    unresolved(value, path, "changeGroupId", "changeGroupIds", changeGroups);
+  });
   array(document.reviewThreads).forEach((thread, index) => {
     const value = object(thread); const path = "reviewThreads[" + index + "]";
     unresolved(value, path, "changeGroupId", "changeGroupIds", changeGroups);
@@ -159,16 +164,15 @@ function validate(document) {
     unresolved(value, path, "changeGroupId", "changeGroupIds", changeGroups);
     unresolved(value, path, "graphNodeId", "graphNodeIds", allNodes);
   });
+  ["risks", "dependencies", "unchangedInteractions"].forEach((name) => array(document[name]).forEach((item, index) => { const value = object(item); if (array(value.changeGroupIds).length === 0) fail(name + "[" + index + "].changeGroupIds must not be empty."); if (array(value.evidenceIds).length === 0) fail(name + "[" + index + "].evidenceIds must not be empty."); unresolved(value, name + "[" + index + "]", "changeGroupId", "changeGroupIds", changeGroups); }));
+  const dependencies = array(document.dependencies); const dependencyIds = ids(dependencies); const dependencyById = new Map(dependencies.map((dependency) => [object(dependency).id, object(dependency)]));
+  dependencies.forEach((dependency, index) => array(object(dependency).dependsOnIds).forEach((target) => { if (!dependencyIds.has(target)) fail("dependencies[" + index + "].dependsOnIds references unknown dependency '" + target + "'."); else if (target === object(dependency).id) fail("dependency '" + target + "' cannot depend on itself."); }));
+  const visiting = new Set(); const visited = new Set(); const visitDependency = (id) => { if (visiting.has(id)) { fail("dependencies contain a cycle through '" + id + "'."); return; } if (visited.has(id)) return; visiting.add(id); array(dependencyById.get(id)?.dependsOnIds).forEach((target) => { if (dependencyById.has(target)) visitDependency(target); }); visiting.delete(id); visited.add(id); }; dependencyIds.forEach(visitDependency);
 }
 function validateGraph(graph, path, expectedId, changeGroups, tests, reviewThreads, reviewInsights) {
   if (graph.id !== expectedId) fail(path + ".id must be '" + expectedId + "'.");
   const nodes = array(graph.nodes); const edges = array(graph.edges); const tours = array(graph.guidedTours);
   const nodeIds = ids(nodes); const edgeIds = ids(edges); const tourIds = ids(tours);
-  const graphIds = new Map();
-  [["nodes", nodes], ["edges", edges], ["guidedTours", tours]].forEach(([kind, values]) => array(values).forEach((item, index) => {
-    const id = object(item).id; if (typeof id !== "string") return;
-    const previous = graphIds.get(id); if (previous) fail("duplicate graph id '" + id + "' in " + path + "." + kind + "[" + index + "] and " + previous + "."); else graphIds.set(id, path + "." + kind + "[" + index + "]");
-  }));
   edges.forEach((edge, index) => { const value = object(edge); if (!nodeIds.has(value.source) || !nodeIds.has(value.target)) fail(path + ".edges[" + index + "] has an edge with an unknown node: source='" + value.source + "', target='" + value.target + "'."); });
   tours.forEach((tour, tourIndex) => array(object(tour).steps).forEach((step, stepIndex) => { if (!nodeIds.has(object(step).nodeId)) fail(path + ".guidedTours[" + tourIndex + "].steps[" + stepIndex + "] references unknown node '" + object(step).nodeId + "'."); }));
   [["nodes", nodes], ["edges", edges], ["guidedTours", tours]].forEach(([kind, values]) => array(values).forEach((item, index) => {

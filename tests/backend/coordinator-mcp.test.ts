@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -50,12 +51,38 @@ describe("coordinator MCP stdio bridge", () => {
       const preflight = tools.find((tool) => tool.name === "preflight_result");
       const progress = tools.find((tool) => tool.name === "report_progress");
       expect(tools.find((tool) => tool.name === "get_pr_context")?.inputSchema).toMatchObject({ additionalProperties: false });
-      expect(submit?.inputSchema).toMatchObject({ additionalProperties: false, properties: { idempotencyKey: { type: "string", minLength: 1, maxLength: 200 }, result: { additionalProperties: false, properties: { taskId: { const: "anchor" } } } } });
+      expect(submit?.inputSchema).toEqual({ type: "object", additionalProperties: false, required: ["idempotencyKey", "preflightId"], properties: { idempotencyKey: { type: "string", minLength: 1, maxLength: 200 }, preflightId: { type: "string", minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]+$" } } });
       expect(preflight?.inputSchema).toMatchObject({ additionalProperties: false, properties: { result: { additionalProperties: false, properties: { taskId: { const: "anchor" } } } } });
       expect(progress?.inputSchema).toMatchObject({ additionalProperties: false, properties: { state: { enum: ["pending", "running", "complete", "failed"] }, detail: { type: "string", maxLength: 1000 } } });
       expect(JSON.parse(((((byId.get(3)?.result as { content: Array<{ text: string }> }).content[0]).text)))).toEqual({ pullRequest: { title: "Atlas PR" }, reviewThreads: [], reviews: [], issueComments: [], reviewComments: [] });
       expect(JSON.parse(((((byId.get(4)?.result as { content: Array<{ text: string }> }).content[0]).text)))).toMatchObject({ valid: false, errors: [expect.any(String)] });
     } finally { await server.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("projects submit_result to its receipt fields before forwarding oversized extra model arguments", async () => {
+    const received: unknown[] = [];
+    const server = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ accepted: true }));
+      });
+    });
+    await new Promise<void>((resolveServer) => server.listen(0, "127.0.0.1", resolveServer));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
+    const child = spawn(process.execPath, [bridgePath], { env: { ...process.env, ATLAS_COORDINATOR_URL: `http://127.0.0.1:${address.port}`, ATLAS_TASK_TOKEN: "test-token" }, stdio: ["pipe", "pipe", "pipe"] });
+    try {
+      const reply = new Promise<Record<string, unknown>>((resolveReply, reject) => { child.stdout.setEncoding("utf8"); let buffer = ""; child.stdout.on("data", (chunk) => { buffer += chunk; const index = buffer.indexOf("\n"); if (index >= 0) resolveReply(JSON.parse(buffer.slice(0, index))); }); child.once("error", reject); });
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "submit_result", arguments: { idempotencyKey: "receipt-only", preflightId: "a".repeat(43), result: { hugeCandidate: "x".repeat(2 * 1024 * 1024) }, unexpected: "discard-me" } } })}\n`);
+      await expect(reply).resolves.toMatchObject({ result: { content: [expect.objectContaining({ type: "text" })] } });
+      expect(received).toEqual([{ idempotencyKey: "receipt-only", preflightId: "a".repeat(43) }]);
+    } finally {
+      child.kill();
+      await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
+    }
   });
 
   it("terminates rather than retaining an oversized unterminated JSONL frame", async () => {

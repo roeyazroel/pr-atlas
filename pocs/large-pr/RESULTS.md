@@ -20,7 +20,7 @@ The deterministic planner produced five complete-file chunks. It preserved all
 70.69%, and estimated a 2.92x map-stage speedup at four workers. The five real
 provider maps completed in about 93 seconds and yielded 17 pre-merge groups and
 72 exact evidence items. A canonical reducer then generated a complete
-walkthrough that passed the production `validateWalkthroughDocument` validator.
+review document that passed the production `validateReviewDocument` validator.
 
 One 252,153-byte `src/App.tsx` diff exceeded the nominal chunk ceiling and was
 kept whole. A production implementation should support hunk splitting with

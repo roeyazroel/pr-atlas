@@ -114,7 +114,7 @@ function compareCanonicalFields(
   errors: string[],
 ): void {
   for (const [name, value] of Object.entries(expected)) {
-    if (!Object.is(output[name], value)) errors.push(`Generated walkthrough review ${kind} '${safeId(id)}' altered GitHub ${name}.`);
+    if (!Object.is(output[name], value)) errors.push(`Generated review document ${kind} '${safeId(id)}' altered GitHub ${name}.`);
   }
 }
 
@@ -189,14 +189,14 @@ export function validateReviewCoverage(rawInput: unknown, document: unknown): Re
   if (parsed.errors.length) return invalid(...parsed.errors);
 
   const output = asObject(document);
-  if (!Array.isArray(output.reviewThreads)) return invalid('Generated walkthrough review-thread coverage is missing.');
+  if (!Array.isArray(output.reviewThreads)) return invalid('Generated review-document thread coverage is missing.');
   const outputThreads = output.reviewThreads.map(asObject);
   const outputById = new Map<string, Record<string, unknown>>();
   const errors: string[] = [];
   for (const thread of outputThreads) {
     const id = text(thread.id);
     if (!id) {
-      errors.push('Generated walkthrough contains a review thread without an id.');
+      errors.push('Generated review document contains a review thread without an id.');
       continue;
     }
     if (outputById.has(id)) errors.push(`Duplicate generated review thread id '${safeId(id)}'.`);
@@ -204,27 +204,27 @@ export function validateReviewCoverage(rawInput: unknown, document: unknown): Re
   }
 
   const rawIds = new Set(parsed.threads.map((thread) => thread.id));
-  for (const id of outputById.keys()) if (!rawIds.has(id)) errors.push(`Generated walkthrough contains an unknown review thread id '${safeId(id)}'.`);
+  for (const id of outputById.keys()) if (!rawIds.has(id)) errors.push(`Generated review document contains an unknown review thread id '${safeId(id)}'.`);
 
   for (const rawThread of parsed.threads) {
     const outputThread = outputById.get(rawThread.id);
     if (!outputThread) {
-      errors.push(`Generated walkthrough omitted GitHub review thread '${safeId(rawThread.id)}'.`);
+      errors.push(`Generated review document omitted GitHub review thread '${safeId(rawThread.id)}'.`);
       continue;
     }
     compareCanonicalFields(outputThread, canonicalThreadFields(rawThread), 'thread', rawThread.id, errors);
     const replies = outputThread.replies;
     if (!Array.isArray(replies)) {
-      errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' has no replies array.`);
+      errors.push(`Generated review document thread '${safeId(rawThread.id)}' has no replies array.`);
       continue;
     }
     const replyCount = outputThread.replyCount;
     if (!Number.isInteger(replyCount) || replyCount !== replies.length) {
-      errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' has inconsistent replyCount.`);
+      errors.push(`Generated review document thread '${safeId(rawThread.id)}' has inconsistent replyCount.`);
     }
     const requiredReplyCount = Math.max(0, rawThread.commentIds.length - 1);
     if (replies.length < requiredReplyCount) {
-      errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' truncated review comments.`);
+      errors.push(`Generated review document thread '${safeId(rawThread.id)}' truncated review comments.`);
     }
 
     const replyIds = new Set<string>();
@@ -233,17 +233,17 @@ export function validateReviewCoverage(rawInput: unknown, document: unknown): Re
       const replyObject = asObject(reply);
       const replyId = text(replyObject.id);
       if (!replyId) {
-        errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' contains a reply without an id.`);
+        errors.push(`Generated review document thread '${safeId(rawThread.id)}' contains a reply without an id.`);
         continue;
       }
       if (replyIds.has(replyId)) errors.push(`Duplicate generated review reply id '${safeId(replyId)}'.`);
-      if (!rawReplyIds.has(replyId)) errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' contains an unknown reply id '${safeId(replyId)}'.`);
+      if (!rawReplyIds.has(replyId)) errors.push(`Generated review document thread '${safeId(rawThread.id)}' contains an unknown reply id '${safeId(replyId)}'.`);
       const rawReply = rawThread.comments.find((comment) => text(comment.id) === replyId);
       if (rawReply) compareCanonicalFields(replyObject, canonicalReplyFields(rawReply, rawThread.source), 'reply', replyId, errors);
       replyIds.add(replyId);
     }
     for (const commentId of rawThread.commentIds.slice(1)) {
-      if (!replyIds.has(commentId)) errors.push(`Generated walkthrough review thread '${safeId(rawThread.id)}' omitted GitHub reply '${safeId(commentId)}'.`);
+      if (!replyIds.has(commentId)) errors.push(`Generated review document thread '${safeId(rawThread.id)}' omitted GitHub reply '${safeId(commentId)}'.`);
     }
   }
 

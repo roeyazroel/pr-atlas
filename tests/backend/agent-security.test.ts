@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type { ChildProcess } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
-import type { AgentAdapter, AgentCapabilities, AgentInstallationStatus, AnalysisRequest, AnalysisStage, WalkthroughDocument } from '../../shared/contracts'
+import type { AgentAdapter, AgentCapabilities, AgentInstallationStatus, AnalysisRequest, AnalysisStage, ReviewDocument } from '../../shared/contracts'
 import { buildProviderEnvironment, detectProvider, redactProviderDocument, redactProviderOutput, redactProviderStderr, runProviderProcess } from '../../electron/backend/agent'
 
 const capabilities: AgentCapabilities = {
@@ -218,7 +218,7 @@ describe('provider process security boundary', () => {
   })
 
   it('redacts validated document string leaves without changing their types', () => {
-    const document = { summary: { intent: 'OPENAI_API_KEY=openai-secret' } } as unknown as WalkthroughDocument
+    const document = { summary: { intent: 'OPENAI_API_KEY=openai-secret' } } as unknown as ReviewDocument
     const safe = redactProviderDocument(document)
     expect(safe.summary.intent).toContain('[REDACTED]')
     expect(typeof safe.summary.intent).toBe('string')

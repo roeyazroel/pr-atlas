@@ -13,7 +13,7 @@ import type {
   PrAtlasApi,
   PullRequestDTO,
   RepositoryDTO,
-  WalkthroughDocument,
+  ReviewDocument,
 } from '../../shared/contracts'
 import App from '../../src/App'
 
@@ -86,8 +86,8 @@ function graph(id: Graph['id'], title: string, nodeId: string): Graph {
   }
 }
 
-const document: WalkthroughDocument = {
-  schemaVersion: '1.1.0',
+const document: ReviewDocument = {
+  schemaVersion: '2.0.0',
   run: {
     id: 'run-42',
     createdAt: '2026-08-04T08:35:00.000Z',
@@ -109,7 +109,9 @@ const document: WalkthroughDocument = {
     limitations: [],
   },
   changeGroups: [{ id: 'group-history', title: 'History persistence', summary: 'Persist local walkthrough history.', motivation: 'Keep prior runs available.', previousBehavior: 'History was discarded.', newBehavior: 'History is stored locally.', attention: 'high', evidenceIds: ['evidence-store'] }],
-  walkthrough: [{ id: 'walkthrough-history', title: 'Persist history', reason: 'Persistent runs must remain reviewable.', summary: 'Inspect the stored run and its evidence.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-history', flowNodeIds: ['data-node'], evidenceIds: ['evidence-store'], testIds: ['test-history'], reviewInsightIds: [] }],
+  stories: [{ id: 'story-history', title: 'Persist history', summary: 'Inspect the stored run and its evidence.', relationshipToPrimary: 'primary', relationshipRationale: 'This is the central behavior change.', reviewReason: 'Persistent runs must remain reviewable.', changeGroupIds: ['group-history'], dependsOnStoryIds: [] }],
+  primaryStoryId: 'story-history',
+  reviewPlan: ['story-history'],
   graphs: {
     systemOverview: graph('system-overview', 'System overview node', 'system-node'),
     dataFlow: graph('data-flow', 'Data flow node', 'data-node'),
@@ -123,6 +125,9 @@ const document: WalkthroughDocument = {
     replyCount: 1, url: 'https://github.com/runway/atlas/pull/42#discussion_r1', resolvedBy: null, authorAssociation: 'CONTRIBUTOR', path: 'electron/backend/store.ts', line: 45, originalLine: 44, side: 'RIGHT', startLine: null, originalStartLine: null, commitSha: 'head-sha-42', originalCommitSha: 'base-sha-42', createdAt: '2026-08-04T08:35:10.000Z', updatedAt: '2026-08-04T08:35:10.000Z', changeGroupIds: ['group-history'], graphNodeIds: ['data-node'], reviewInsightIds: [],
   }],
   reviewInsights: [],
+  risks: [],
+  dependencies: [],
+  unchangedInteractions: [],
   evidence: [{ id: 'evidence-store', kind: 'file', title: 'store.ts', path: 'electron/backend/store.ts', line: null, url: 'https://github.com/runway/atlas/blob/head/electron/backend/store.ts' }],
 }
 
@@ -136,7 +141,7 @@ const runSummary: AnalysisRunSummary = {
   status: 'ready',
   createdAt: '2026-08-04T08:35:00.000Z',
   completedAt: '2026-08-04T08:37:00.000Z',
-  schemaVersion: '1.1.0',
+  schemaVersion: '2.0.0',
   model: 'claude-test',
   artifactDirectory: '/tmp/pr-atlas/run-42',
 }
@@ -534,8 +539,8 @@ describe('live Electron renderer contract', () => {
     render(<App />)
 
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalledWith(repository.fullName, pullRequest.number, manifest.runId))
-    expect(await screen.findByText('Validated Codex CLI walkthrough')).toBeInTheDocument()
-    expect(screen.queryByText('Validated Claude Code walkthrough')).not.toBeInTheDocument()
+    expect(await screen.findByText('Validated Codex CLI review')).toBeInTheDocument()
+    expect(screen.queryByText('Validated Claude Code review')).not.toBeInTheDocument()
   })
 
   it('shows each run provider and exact model separately and opens a historical Ready artifact', async () => {
@@ -551,7 +556,7 @@ describe('live Electron renderer contract', () => {
       outdated: true,
       artifactDirectory: '/tmp/pr-atlas/run-historical',
     }
-    const historicalDocument: WalkthroughDocument = {
+    const historicalDocument: ReviewDocument = {
       ...document,
       run: { ...document.run, id: historicalSummary.runId, provider: 'codex', model: 'gpt-historical' },
       pullRequest: { ...document.pullRequest, headSha: historicalSummary.headSha },
@@ -574,7 +579,7 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /open historical run.*codex cli.*gpt-historical/i }))
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalledWith(repository.fullName, pullRequest.number, historicalSummary.runId))
     expect(await screen.findByText('Loaded the selected historical walkthrough.')).toBeInTheDocument()
-    expect(screen.getByText('Validated Codex CLI walkthrough')).toBeInTheDocument()
+    expect(screen.getByText('Validated Codex CLI review')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /analysis details/i }))
     await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
     expect(api.openEvidence).toHaveBeenLastCalledWith(repository.fullName, historicalSummary.headSha, 'electron/backend/store.ts', undefined)
@@ -632,8 +637,8 @@ describe('live Electron renderer contract', () => {
     }))
     render(<App />)
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
-    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
-    await user.click(screen.getByRole('button', { name: /open evidence electron\/backend\/store\.ts/i }))
+    await user.click(screen.getByRole('button', { name: /^review$/i }))
+    await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
     expect(api.getEvidenceDetail).toHaveBeenCalledWith(
       repository.fullName,
       pullRequest.headSha,
@@ -645,7 +650,7 @@ describe('live Electron renderer contract', () => {
   it('preserves evidence identity when a change group links repeated file paths', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
-    const duplicateDocument: WalkthroughDocument = {
+    const duplicateDocument: ReviewDocument = {
       ...document,
       changeGroups: [{
         ...document.changeGroups[0],
@@ -661,8 +666,8 @@ describe('live Electron renderer contract', () => {
 
     render(<App />)
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
-    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
-    const chips = screen.getAllByRole('button', { name: /open evidence electron\/backend\/store\.ts:/i })
+    await user.click(screen.getByRole('button', { name: /^review$/i }))
+    const chips = screen.getAllByRole('button', { name: /electron\/backend\/store\.ts:/i })
     expect(chips).toHaveLength(2)
     await user.click(chips[1])
     expect(api.getEvidenceDetail).toHaveBeenCalledWith(
@@ -676,7 +681,7 @@ describe('live Electron renderer contract', () => {
   it('associates the evidence drawer by path and line for repeated file records', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
-    const associatedDocument: WalkthroughDocument = {
+    const associatedDocument: ReviewDocument = {
       ...document,
       evidence: [
         { ...document.evidence[0], id: 'evidence-first', line: 44, url: 'https://github.com/runway/atlas/blob/head/electron/backend/store.ts#L44' },
@@ -686,6 +691,7 @@ describe('live Electron renderer contract', () => {
         { ...document.changeGroups[0], id: 'group-first', title: 'First group', evidenceIds: ['evidence-first'] },
         { ...document.changeGroups[0], id: 'group-second', title: 'Second group', evidenceIds: ['evidence-second'] },
       ],
+      stories: [{ ...document.stories[0]!, changeGroupIds: ['group-first', 'group-second'] }],
       tests: [
         { ...document.tests[0], id: 'test-first', title: 'first test', evidenceIds: ['evidence-first'] },
         { ...document.tests[0], id: 'test-second', title: 'second test', evidenceIds: ['evidence-second'] },
@@ -706,8 +712,9 @@ describe('live Electron renderer contract', () => {
 
     render(<App />)
     await waitFor(() => expect(api.loadAnalysisRun).toHaveBeenCalled())
-    await user.click(screen.getByRole('button', { name: /^change groups$/i }))
-    await user.click(screen.getByRole('button', { name: /open evidence electron\/backend\/store\.ts:45/i }))
+    await user.click(screen.getByRole('button', { name: /^review$/i }))
+    await user.click(screen.getByRole('button', { name: /change group: second group/i }))
+    await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts:45/i }))
     expect(await screen.findByRole('dialog', { name: /evidence details/i })).toBeInTheDocument()
     expect(screen.getByText('Groups: Second group')).toBeInTheDocument()
     expect(screen.queryByText('Groups: First group')).not.toBeInTheDocument()
@@ -809,7 +816,7 @@ describe('live Electron renderer contract', () => {
     expect(screen.queryByLabelText(/active provider:/i)).not.toBeInTheDocument()
   })
 
-  it('exposes four graph views with changed/context filters, group highlighting, comments, search, pan, zoom, and tours', async () => {
+  it('exposes four graph views with changed/context filters, story scoping, comments, search, pan, zoom, and tours', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()
     render(<App />)
@@ -833,9 +840,9 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /changed nodes/i }))
     expect(screen.queryByRole('button', { name: /data flow node context:/i })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /all nodes/i }))
-    await user.click(screen.getByRole('button', { name: /highlight change group/i }))
-    await user.click(screen.getByRole('option', { name: 'History persistence' }))
-    expect(screen.getByRole('region', { name: /data flow graph/i }).querySelector('[data-change-group-highlight="true"]')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: /filter by story/i }))
+    await user.click(screen.getByRole('option', { name: 'Persist history' }))
+    expect(screen.getByRole('button', { name: /data flow node:/i })).toBeInTheDocument()
     await user.click(screen.getByText('Data flow node', { selector: 'button' }))
     expect(screen.getByText(/keep the history write atomic/i)).toBeInTheDocument()
 
@@ -874,6 +881,13 @@ describe('live Electron renderer contract', () => {
     expect(tour.getByRole('button', { name: /restart tour/i })).toBeInTheDocument()
     await user.click(tour.getByRole('button', { name: /next tour/i }))
     await user.click(tour.getByRole('button', { name: /restart tour/i }))
+
+    await user.click(screen.getByRole('tab', { name: 'System overview' }))
+    expect(screen.getByRole('status', { name: 'Story filter status' })).toHaveTextContent('Story-neutral')
+    expect(screen.queryByRole('button', { name: /data flow node:/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /system overview node:/i })).toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: 'Data flow' }))
+    expect(screen.getByRole('button', { name: /filter by story/i })).toHaveTextContent('Persist history')
   })
 
   it('sizes directed-edge geometry to the full surface for large graphs', async () => {
@@ -890,7 +904,7 @@ describe('live Electron renderer contract', () => {
       reviewThreadIds: [],
       reviewInsightIds: [],
     }))
-    const largeDocument: WalkthroughDocument = {
+    const largeDocument: ReviewDocument = {
       ...document,
       graphs: {
         ...document.graphs,

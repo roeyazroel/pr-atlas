@@ -36,7 +36,7 @@ import {
 } from "./validation.js";
 import { normalizeDocumentEvidencePaths } from "./evidence.js";
 import { validateReviewCoverageFile } from "./review-coverage.js";
-import { validateWalkthroughDocument } from "../../shared/schema.js";
+import { validateReviewDocument } from "../../shared/schema.js";
 import { assembleAnchoredDocument, shouldUseAnchoredAnalysis, taskOutputFrom, validateAnchoredTaskOutput } from "./anchored-analysis.js";
 import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidatorScript, MAX_BATCH_CONCURRENCY, parseGitDiffSections as parseLegacyDiffSections, shouldBatchAnalysis, validateBatchMapOutput } from "./batching.js";
 import { buildBundledValidatorCommand, buildWindowsValidatorLauncher, validatorLauncherName } from "./validator-command.js";
@@ -372,12 +372,12 @@ export class AnalysisService {
       ) {
         response.status = "invalid";
         response.errors = [
-          "Generated walkthrough does not match the requested pull request revisions.",
+          "Generated review document does not match the requested pull request revisions.",
         ];
         delete response.document;
       }
       if (response.status === "ready" && response.document) {
-        const validation = validateWalkthroughDocument(response.document);
+        const validation = validateReviewDocument(response.document);
         if (!validation.valid) {
           response.status = "invalid";
           response.errors = validation.errors;
@@ -430,17 +430,17 @@ export class AnalysisService {
       if (response.errors?.length)
         manifest.error = safeError(
           response.status === "invalid"
-            ? "INVALID_WALKTHROUGH"
+            ? "INVALID_REVIEW_DOCUMENT"
             : `${request.provider.toUpperCase()}_FAILED`,
           response.status === "invalid"
-            ? "Generated walkthrough failed validation."
+            ? "Generated review document failed validation."
             : response.errors[0],
           response.status === "invalid"
             ? response.errors.slice(0, 20)
             : undefined,
         );
       if (response.status === "ready")
-        progress("complete", "Walkthrough is ready.");
+        progress("complete", "Review document is ready.");
       log("info", "analysis.completed", `Analysis run completed with status ${manifest.status}.`, {
         durationMs: Date.now() - startedAt,
         metadata: { status: manifest.status, schemaVersion: manifest.schemaVersion },
@@ -448,7 +448,7 @@ export class AnalysisService {
       await diagnosticWrite;
       await this.store.writeManifest(directory, manifest);
       if (response.document)
-        await this.store.writeWalkthrough(directory, response.document);
+        await this.store.writeReview(directory, response.document);
       return {
         runId,
         status: response.status,
@@ -695,23 +695,30 @@ export class AnalysisService {
         return { valid: true, errors: [] };
       } catch { return { valid: false, errors: ["evidence does not name a readable UTF-8 exact-head file"] }; }
     }, (value) => redactProviderValue(value), prContext, changedLineHunks(files));
-    const coordinatorStage = { anchor: "anchoring", walkthrough: "walkthrough", "tests-risks": "tests-risks", flows: "flows" } as const;
-    /** Forward agent report_progress / submit outcomes into the live activity stream. */
-    coordinator.onProgress((update) => {
-      const stage = coordinatorStage[update.taskId];
-      const message = update.detail?.trim() || `${update.taskId} is ${update.state}.`;
-      progress(stage, message, update.state);
-    });
-    const coordinatorServer = await startAtlasCoordinator(coordinator);
+    const coordinatorStage = { anchor: "anchoring", review: "review", "tests-risks": "tests-risks", flows: "flows" } as const;
     const execution = new AbortController(); let timedOut = false;
     const abort = () => execution.abort();
     if (signal.aborted) execution.abort(); else signal.addEventListener("abort", abort, { once: true });
+    /** Forward agent report_progress / submit outcomes into the live activity stream. */
+    coordinator.onProgress((update) => {
+      const stage = coordinatorStage[update.taskId];
+      const message = execution.signal.aborted && update.state !== "complete"
+        ? timedOut ? `${update.taskId} task timed out before it completed.` : `${update.taskId} task was cancelled.`
+        : update.detail?.trim() || `${update.taskId} is ${update.state}.`;
+      progress(stage, message, update.state);
+    });
+    const coordinatorServer = await startAtlasCoordinator(coordinator);
     const timeout = request.config?.timeoutMinutes ? setTimeout(() => { timedOut = true; execution.abort(); }, request.config.timeoutMinutes * 60_000) : undefined;
     try {
     if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
     progress("anchoring", "Semantic anchor started · classifying the PR once.", "running");
     if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: "", logs: [], errors: timedOut ? ["Analysis timed out before semantic anchor started."] : ["Analysis was cancelled before semantic anchor started."] };
-    const coordinatorTask = <T extends "anchor" | "walkthrough" | "tests-risks" | "flows">(kind: T) => ({ url: coordinatorServer.url, token: coordinator.task(kind).token, shimPath: resolve(__dirname, "coordinator-mcp.cjs"), submitted: () => coordinator.result(kind), submitForHarness: (key: string, result: AnchoredTaskOutput) => coordinator.submit(coordinator.task(kind).token, key, result) });
+    const coordinatorTask = <T extends "anchor" | "review" | "tests-risks" | "flows">(kind: T) => ({ url: coordinatorServer.url, token: coordinator.task(kind).token, shimPath: resolve(__dirname, "coordinator-mcp.cjs"), submitted: () => coordinator.result(kind), submitForHarness: async (key: string, result: AnchoredTaskOutput) => {
+      const token = coordinator.task(kind).token;
+      const preflight = await coordinator.preflight(token, result);
+      if (!preflight.valid) throw new Error(preflight.errors.join("; "));
+      return coordinator.submit(token, key, preflight.preflightId);
+    } });
     const anchorTask = { kind: "anchor", id: "anchor", total: 1, coordinator: coordinatorTask("anchor") } as const;
     const anchorResponse = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, anchorTask);
     if (adapter.id === "cursor" && !signal.aborted && !timedOut && !execution.signal.aborted && anchorResponse.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)) {
@@ -725,17 +732,21 @@ export class AnalysisService {
     if (!anchor) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (anchorResponse.status === "ready" ? "invalid" : anchorResponse.status), rawOutput: anchorResponse.rawOutput, logs: anchorResponse.logs, errors: timedOut ? ["Analysis timed out before semantic anchor completed."] : anchorResponse.errors ?? anchorValidation?.errors ?? ["Semantic anchor was missing."] };
     await writeAnchoredJson(directory, "anchor.output.json", anchor);
     progress("anchoring", "Semantic anchor completed and validated.", "complete");
-    const tasks = ["walkthrough", "tests-risks", "flows"] as const;
-    const stage = { walkthrough: "walkthrough", "tests-risks": "tests-risks", flows: "flows" } as const;
-    progress("walkthrough", "Walkthrough and reviews specialist started.", "running"); progress("tests-risks", "Tests and risks specialist started.", "running"); progress("flows", "Flows specialist started.", "running");
+    const tasks = ["review", "tests-risks", "flows"] as const;
+    const stage = { review: "review", "tests-risks": "tests-risks", flows: "flows" } as const;
+    progress("review", "Review specialist started.", "running"); progress("tests-risks", "Tests and risks specialist started.", "running"); progress("flows", "Flows specialist started.", "running");
     const responses = await Promise.all(tasks.map(async (kind) => {
       const task = { kind, id: kind, total: 3, anchor, coordinator: coordinatorTask(kind) } as const;
       let response = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, task);
       const attempts = [response];
       let checked = response.status === "ready" && taskOutputFrom(response) ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(response)), task) : undefined;
       let output = checked?.valid ? checked.output as AnchoredSpecialistOutput : undefined;
-      if (!output && response.status === "invalid" && coordinator.submissionStats(kind).atomicSubmissionAttempts === 1 && !execution.signal.aborted) {
-        progress(stage[kind], `${kind} submitted one rejected result; running the single bounded correction.`, "running");
+      const submission = coordinator.submissionStats(kind);
+      const preflightRejected = submission.atomicSubmissionAttempts === 0
+        && submission.preflightChecks > 0
+        && !!coordinator.getTask(coordinator.task(kind).token).lastValidationFailure;
+      if (!output && response.status === "invalid" && (submission.atomicSubmissionAttempts === 1 || preflightRejected) && !execution.signal.aborted) {
+        progress(stage[kind], `${kind} needs one bounded correction after a rejected ${preflightRejected ? "preflight" : "atomic submission"}.`, "running");
         response = await adapter.analyze(request, worktree, inputDirectory, execution.signal, () => undefined, request.model, task);
         attempts.push(response);
         checked = response.status === "ready" && taskOutputFrom(response) ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(response)), task) : undefined;
@@ -747,7 +758,16 @@ export class AnalysisService {
         : !output && response.errors?.length
           ? `: ${response.errors.slice(0, 3).join("; ").slice(0, 800)}`
           : ".";
-      progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation${failureDetail}`, output ? "complete" : "failed");
+      const interrupted = execution.signal.aborted;
+      progress(
+        stage[kind],
+        output && !interrupted
+          ? `${kind} specialist completed and validated.`
+          : interrupted
+            ? timedOut ? `${kind} specialist timed out before it completed.` : `${kind} specialist was cancelled before it completed.`
+            : `${kind} specialist failed validation${failureDetail}`,
+        output && !interrupted ? "complete" : "failed",
+      );
       return { kind, response, attempts, output, errors: checked?.errors };
     }));
     const cursorIsolationFailure = adapter.id === "cursor"
@@ -762,12 +782,12 @@ export class AnalysisService {
     const allResponses = [anchorResponse, ...responses.flatMap((item) => item.attempts)];
     if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
     progress("assembling", "Deterministically assembling anchored specialist output.", "running");
-    const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"walkthrough" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
+    const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"review" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
     const reportedModel = [request.model, ...allResponses.map((item) => item.model)].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim();
     const assembled = assembleAnchoredDocument(request, anchor, specialistMap, reportedModel);
     if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel, errors: assembled.errors };
     progress("assembling", "Deterministic assembly completed.", "complete");
-    progress("validating", "Validating deterministic anchored walkthrough assembly.", "running");
+    progress("validating", "Validating deterministic anchored review assembly.", "running");
     return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel };
     } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); await coordinatorServer.close(); }
   }
@@ -858,7 +878,7 @@ export class AnalysisService {
     progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
     if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
-    progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
+    progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final review document." : `Reducer ${reduced.status}.`);
     const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs], diagnosticEvents: [...responses.flatMap((response) => response.diagnosticEvents ?? []), ...(reduced.diagnosticEvents ?? [])] };
     return timedOut
       ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }

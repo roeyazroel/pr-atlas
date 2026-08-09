@@ -190,7 +190,7 @@ describe('review coverage gate', () => {
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude' })
 
       expect(result.status).toBe('invalid')
-      expect(result.error).toMatchObject({ code: 'INVALID_WALKTHROUGH', message: expect.stringMatching(/walkthrough|review/i) })
+      expect(result.error).toMatchObject({ code: 'INVALID_REVIEW_DOCUMENT', message: expect.stringMatching(/review/i) })
       expect(JSON.stringify(result)).not.toContain('PRIVATE REVIEW COMMENT SHOULD NOT LEAK')
       expect(analyze).toHaveBeenCalledOnce()
       const manifest = JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))

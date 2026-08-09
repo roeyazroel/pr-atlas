@@ -8,17 +8,84 @@ import { AtlasApiCoordinator, startAtlasCoordinator } from "../../electron/backe
 const anchor = {
   taskId: "anchor",
   changeGroups: [{ id: "group-1", title: "Change", summary: "Summary.", motivation: "Reason.", previousBehavior: "Before.", newBehavior: "After.", attention: "medium", evidence: [{ path: "src/a.ts", line: 1, role: "changed" }] }],
+  stories: [{ id: "story-1", title: "Change story", summary: "One change.", relationshipToPrimary: "primary", relationshipRationale: "It owns the only change.", reviewReason: "Review it first.", changeGroupIds: ["group-1"], dependsOnStoryIds: [] }],
+  primaryStoryId: "story-1",
+  reviewPlan: ["story-1"],
   domains: ["production-path", "experimental-pocs", "migration-rollback", "updater-installer", "runtime-packaging", "reviewer-workflow"].map((id, index) => ({ id, status: index === 0 ? "changed" : "not-evidenced", rationale: "Grounded.", evidence: index === 0 ? [{ path: "src/a.ts", line: 1, role: "changed" }] : [], changeGroupIds: index === 0 ? ["group-1"] : [] })),
 } as const;
 
+async function preflightId(coordinator: AtlasApiCoordinator, token: string, candidate: unknown): Promise<string> {
+  const response = await coordinator.preflight(token, candidate);
+  if (!response.valid) throw new Error(`expected a valid preflight: ${response.errors.join("; ")}`);
+  return response.preflightId;
+}
+
 describe("Atlas API coordinator", () => {
+  it("promotes only the exact sanitized candidate cached behind a task-scoped preflight receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(
+      directory,
+      { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) },
+      new Set(),
+      undefined,
+      (value) => JSON.parse(JSON.stringify(value).replaceAll("secret-token", "[REDACTED]")),
+    );
+    try {
+      const task = coordinator.task("anchor");
+      const candidate = { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: "validated secret-token candidate" }] };
+      const first = await coordinator.preflight(task.token, candidate);
+      expect(first).toMatchObject({ valid: true, errors: [], preflightId: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+      if (!first.valid) throw new Error("expected valid receipt");
+
+      candidate.changeGroups[0].summary = "mutated after preflight";
+      const replacement = await coordinator.preflight(task.token, anchor);
+      expect(replacement).toMatchObject({ valid: true, preflightId: expect.any(String) });
+      if (!replacement.valid) throw new Error("expected replacement receipt");
+      expect(replacement.preflightId).not.toBe(first.preflightId);
+
+      await expect(coordinator.submit(task.token, "stale", first.preflightId)).rejects.toThrow(/receipt.*stale|stale.*receipt/i);
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      await expect(coordinator.submit(coordinator.task("review").token, "wrong-task", replacement.preflightId)).rejects.toThrow(/receipt.*task|task.*receipt/i);
+      expect(coordinator.submissionStats("review")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+
+      await expect(coordinator.submit(task.token, "accepted", replacement.preflightId)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+      await expect(coordinator.submit(task.token, "accepted", replacement.preflightId)).resolves.toMatchObject({ accepted: true, idempotent: true });
+      const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
+      expect(audit).not.toContain("validated secret-token candidate");
+      expect(audit).not.toContain("candidate");
+      expect(await readFile(join(directory, "coordinator", "results", "anchor.json"), "utf8")).not.toContain("mutated after preflight");
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("expires an unsubmitted receipt without spending an atomic attempt", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T00:00:00.000Z"));
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
+    try {
+      const task = coordinator.task("anchor");
+      const receipt = await preflightId(coordinator, task.token, anchor);
+      vi.setSystemTime(new Date("2026-08-09T00:10:00.001Z"));
+      await expect(coordinator.submit(task.token, "expired", receipt)).rejects.toThrow(/receipt.*expired|expired.*receipt/i);
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      expect((coordinator as unknown as { preflightReceipts: Map<string, unknown> }).preflightReceipts.has(receipt)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("accepts a legal submission above 256 KiB, bounds overflow, and remains healthy afterward", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
     const server = await startAtlasCoordinator(coordinator);
     try {
       const token = coordinator.task("anchor").token;
-      const legal = JSON.stringify({ idempotencyKey: "large-legal", result: { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: "x".repeat(300 * 1024) }] } });
+      const preflightResponse = await fetch(`${server.url}/v1/preflight_result`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ result: { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: "x".repeat(300 * 1024) }] } }) });
+      expect(preflightResponse.status).toBe(200);
+      const preflight = await preflightResponse.json() as { valid: boolean; preflightId?: string };
+      expect(preflight).toMatchObject({ valid: true, preflightId: expect.any(String) });
+      const legal = JSON.stringify({ idempotencyKey: "large-legal", preflightId: preflight.preflightId });
       const accepted = await new Promise<number>((resolve, reject) => {
         const request = httpRequest(`${server.url}/v1/submit_result`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } }, (response) => { response.resume(); response.on("end", () => resolve(response.statusCode ?? 0)); });
         request.on("error", reject); request.end(legal);
@@ -44,18 +111,19 @@ describe("Atlas API coordinator", () => {
     try {
       const anchorTask = coordinator.task("anchor");
       expect(() => coordinator.getTask("wrong-token")).toThrow(/token/i);
-      await expect(coordinator.submit(anchorTask.token, "bad", { taskId: "anchor" })).rejects.toThrow(/required|invalid/i);
-      expect(coordinator.getTask(anchorTask.token)).toMatchObject({ lastValidationFailure: { result: { taskId: "anchor" } } });
+      await expect(coordinator.preflight(anchorTask.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false, errors: [expect.any(String)] });
+      expect(coordinator.getTask(anchorTask.token)).toMatchObject({ lastValidationFailure: { errors: [expect.any(String)] } });
       expect(coordinator.result("anchor")).toBeNull();
+      const acceptedReceipt = await preflightId(coordinator, anchorTask.token, anchor);
       const [first, replay] = await Promise.all([
-        coordinator.submit(anchorTask.token, "accepted", anchor),
-        coordinator.submit(anchorTask.token, "accepted", anchor),
+        coordinator.submit(anchorTask.token, "accepted", acceptedReceipt),
+        coordinator.submit(anchorTask.token, "accepted", acceptedReceipt),
       ]);
       expect(first.accepted).toBe(true);
       expect(replay).toMatchObject({ accepted: true, idempotent: true });
-      expect(coordinator.getAnchor(coordinator.task("walkthrough").token)?.taskId).toBe("anchor");
+      expect(coordinator.getAnchor(coordinator.task("review").token)?.taskId).toBe("anchor");
       const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
-      expect(audit).toMatch(/submit_result_rejected/);
+      expect(audit).toMatch(/preflight_result/);
       expect(audit).toMatch(/submit_result/);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -83,12 +151,12 @@ describe("Atlas API coordinator", () => {
         domains: anchor.domains.map((domain) => domain.id === "production-path" ? { ...domain, evidence: [...domain.evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] } : domain),
       };
       await expect(coordinator.preflight(task.token, domainOnly)).resolves.toMatchObject({ valid: false, errors: [expect.stringMatching(/missing changed evidence.*src\/b\.ts/i), expect.stringMatching(/changed hunk.*src\/a\.ts:10/i)] });
-      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2, preflightChecks: 1, remainingPreflightChecks: 2 });
       const complete = {
         ...anchor,
         changeGroups: [{ ...anchor.changeGroups[0], evidence: [...anchor.changeGroups[0].evidence, { path: "src/a.ts", line: 10, role: "changed" as const }, { path: "src/b.ts", line: 1, role: "changed" as const }] }],
       };
-      await expect(coordinator.submit(task.token, "complete", complete)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+      await expect(coordinator.submit(task.token, "complete", await preflightId(coordinator, task.token, complete))).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
       expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 1, remainingAtomicSubmissionAttempts: 1 });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -124,7 +192,7 @@ describe("Atlas API coordinator", () => {
         "src/c.ts:3 (unchanged-context): evidence line is outside exact-head file",
       ];
       await expect(coordinator.preflight(task.token, invalid)).resolves.toEqual({ valid: false, errors: expected });
-      await expect(coordinator.submit(task.token, "invalid-locators", invalid)).rejects.toThrow(expected.join("; "));
+      await expect(coordinator.submit(task.token, "invalid-locators", "x".repeat(43))).rejects.toThrow(/invalid.*receipt/i);
       const audit = (await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
       expect(audit.at(-1)?.payload.errors).toEqual(expected);
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -133,10 +201,11 @@ describe("Atlas API coordinator", () => {
   it("keeps a durably accepted result accepted when post-settlement telemetry fails", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
-    vi.spyOn(coordinator as unknown as { persistProgress: () => Promise<void> }, "persistProgress").mockRejectedValueOnce(new Error("progress write failed"));
     try {
       const task = coordinator.task("anchor");
-      await expect(coordinator.submit(task.token, "accepted", anchor)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
+      const receipt = await preflightId(coordinator, task.token, anchor);
+      vi.spyOn(coordinator as unknown as { persistProgress: () => Promise<void> }, "persistProgress").mockRejectedValueOnce(new Error("progress write failed"));
+      await expect(coordinator.submit(task.token, "accepted", receipt)).resolves.toMatchObject({ accepted: true, taskId: "anchor" });
       expect(coordinator.result("anchor")).toEqual(anchor);
       expect(coordinator.submissionStats("anchor").lastDiagnostic).toMatchObject({ code: "post-settlement-telemetry-failed" });
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -147,35 +216,41 @@ describe("Atlas API coordinator", () => {
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
     try {
       const task = coordinator.task("anchor");
-      await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      const settling = await preflightId(coordinator, task.token, anchor);
       expect(JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8")).preflightChecks.anchor).toEqual({ checks: 1, remainingChecks: 2 });
+      await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      const audit = (await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(audit.at(-1)).toMatchObject({ event: "preflight_result", payload: { taskId: "anchor", valid: false, errors: [expect.any(String)] } });
+      expect(audit.at(-1)?.payload).not.toHaveProperty("candidate");
       expect(coordinator.result("anchor")).toBeNull();
-      for (let index = 1; index < 3; index += 1) await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      await expect(coordinator.preflight(task.token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
       await expect(coordinator.preflight(task.token, { taskId: "anchor" })).rejects.toThrow(/preflight check limit/i);
-      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2, preflightChecks: 3, remainingPreflightChecks: 0 });
       expect(coordinator.getTask(task.token)).toMatchObject({ preflight: { checks: 3, remainingChecks: 0 } });
+      // A previously valid receipt remains promotable after later rejected preflights.
+      await coordinator.submit(task.token, "anchor", settling);
+      const specialist = coordinator.task("review");
+      for (let index = 0; index < 5; index += 1) await expect(coordinator.preflight(specialist.token, { taskId: "review" })).resolves.toMatchObject({ valid: false });
+      await expect(coordinator.preflight(specialist.token, { taskId: "review" })).rejects.toThrow(/preflight check limit/i);
+      expect(coordinator.getTask(specialist.token)).toMatchObject({ preflight: { checks: 5, remainingChecks: 0 } });
+      expect(coordinator.submissionStats("review")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2, preflightChecks: 5, remainingPreflightChecks: 0 });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("compares an in-flight idempotency key payload before joining its accepted result", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
-    let enterEvidenceValidation!: () => void;
-    let releaseEvidenceValidation!: () => void;
-    const entered = new Promise<void>((resolve) => { enterEvidenceValidation = resolve; });
-    const release = new Promise<void>((resolve) => { releaseEvidenceValidation = resolve; });
-    const coordinator = new AtlasApiCoordinator(
-      directory,
-      { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) },
-      new Set(["src/a.ts"]),
-      async () => { enterEvidenceValidation(); await release; return { valid: true, errors: [] }; },
-    );
+    let releasePersistence!: () => void;
+    const persisted = new Promise<void>((resolve) => { releasePersistence = resolve; });
+    const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
     try {
       const task = coordinator.task("anchor");
-      const first = coordinator.submit(task.token, "same-key", anchor);
-      await entered;
-      const identical = coordinator.submit(task.token, "same-key", anchor);
-      const different = coordinator.submit(task.token, "same-key", { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: "Different payload." }] });
-      releaseEvidenceValidation();
+      const receipt = await preflightId(coordinator, task.token, anchor);
+      const original = (coordinator as unknown as { persistResult: (taskId: string, result: unknown) => Promise<void> }).persistResult.bind(coordinator);
+      vi.spyOn(coordinator as unknown as { persistResult: (taskId: string, result: unknown) => Promise<void> }, "persistResult").mockImplementation(async (taskId, result) => { await persisted; return original(taskId, result); });
+      const first = coordinator.submit(task.token, "same-key", receipt);
+      const identical = coordinator.submit(task.token, "same-key", receipt);
+      const different = coordinator.submit(task.token, "same-key", "z".repeat(43));
+      releasePersistence();
       await expect(different).rejects.toThrow(/idempotency key reused with different payload/i);
       const [accepted, replay] = await Promise.all([first, identical]);
       expect(accepted).toMatchObject({ accepted: true, taskId: "anchor" });
@@ -194,45 +269,39 @@ describe("Atlas API coordinator", () => {
       guidedTours: [{ id: `${id}-tour`, title: "Tour", steps: [{ nodeId: `${id}-node`, title: "Inspect", explanation: "Inspect this node." }] }],
     });
     try {
-      await coordinator.submit(coordinator.task("anchor").token, "anchor", anchor);
+      const anchorTask = coordinator.task("anchor");
+      await coordinator.submit(anchorTask.token, "anchor", await preflightId(coordinator, anchorTask.token, anchor));
       const flows = coordinator.task("flows");
       const result = { taskId: "flows", coverage, content: { graphs: { systemOverview: { ...graph("system-overview", true), nodes: [{ ...graph("system-overview", true).nodes[0], evidence: [{ path: "src/a.ts", line: 2, role: "unchanged-context" }] }] }, dataFlow: graph("data-flow"), codeDependency: graph("code-dependency"), userAction: graph("user-action") } } };
-      await expect(coordinator.submit(flows.token, "invalid-system", result)).rejects.toThrow(/Flow nodes violate changed\/unchanged anchor evidence semantics/i);
+      await expect(coordinator.preflight(flows.token, result)).resolves.toMatchObject({ valid: false, errors: [expect.stringMatching(/Flow nodes violate changed\/unchanged anchor evidence semantics/i)] });
       expect(coordinator.result("flows")).toBeNull();
       expect(coordinator.getTask(flows.token)).toMatchObject({ lastValidationFailure: { errors: [expect.stringMatching(/Flow nodes violate/)] } });
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it("enforces the two-attempt budget without retaining or auditing unlimited exhausted keys", async () => {
+  it("rejects arbitrary receipts without retaining, auditing, or spending atomic attempts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
     try {
       const task = coordinator.task("anchor");
-      await expect(coordinator.submit(task.token, "one", { taskId: "anchor" })).rejects.toThrow();
-      await expect(coordinator.submit(task.token, "two", { taskId: "anchor", domains: [] })).rejects.toThrow();
-      for (let index = 0; index < 20; index += 1) await expect(coordinator.submit(task.token, `fresh-${index}`, anchor)).rejects.toThrow(/attempt budget/i);
-      await expect(coordinator.submit(task.token, "one", { taskId: "anchor" })).rejects.toThrow();
-      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 2, remainingAtomicSubmissionAttempts: 0, lastDiagnostic: { code: "atomic-submission-attempt-budget-exhausted" } });
-      expect(coordinator.getTask(task.token)).toMatchObject({ atomicSubmission: { atomicSubmissionAttempts: 2, remainingAtomicSubmissionAttempts: 0 } });
-      const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
-      const events = audit.trim().split("\n").map((line) => JSON.parse(line));
-      expect(events).toHaveLength(2);
-      expect(events.every((entry) => entry.event === "submit_result_rejected")).toBe(true);
-      expect((coordinator as unknown as { submissions: Map<string, unknown>; inflight: Map<string, unknown> }).submissions.size).toBe(2);
+      for (let index = 0; index < 20; index += 1) await expect(coordinator.submit(task.token, `fresh-${index}`, "x".repeat(42) + index.toString(36).slice(-1))).rejects.toThrow(/receipt/i);
+      expect(coordinator.submissionStats("anchor")).toMatchObject({ atomicSubmissionAttempts: 0, remainingAtomicSubmissionAttempts: 2 });
+      await expect(readFile(join(directory, "coordinator", "audit.jsonl"), "utf8")).rejects.toThrow();
+      expect((coordinator as unknown as { submissions: Map<string, unknown>; inflight: Map<string, unknown> }).submissions.size).toBe(0);
       expect((coordinator as unknown as { submissions: Map<string, unknown>; inflight: Map<string, unknown> }).inflight.size).toBe(0);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it("requires a role for exact-head evidence and sanitizes rejected submissions before persistence", async () => {
+  it("requires a role for exact-head evidence and keeps rejected preflight candidates out of task state", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) }, new Set(["src/a.ts"]), async () => ({ valid: true, errors: [] }), (value) => JSON.parse(JSON.stringify(value).replaceAll("secret-token", "[REDACTED]")));
     try {
       const task = coordinator.task("anchor");
       await expect(coordinator.validateEvidence(task.token, { path: "src/a.ts", line: 1 } as never)).resolves.toMatchObject({ valid: false });
-      await expect(coordinator.submit(task.token, "redacted", { taskId: "anchor", secret: "secret-token" })).rejects.toThrow();
-      expect(coordinator.getTask(task.token)).toMatchObject({ lastValidationFailure: { result: { secret: "[REDACTED]" } } });
+      await expect(coordinator.preflight(task.token, { taskId: "anchor", secret: "secret-token" })).resolves.toMatchObject({ valid: false });
+      expect(coordinator.getTask(task.token)).toMatchObject({ lastValidationFailure: { errors: [expect.any(String)] } });
       const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
       expect(audit).not.toContain("secret-token");
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -265,18 +334,18 @@ describe("Atlas API coordinator", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it("streams rejected submission details into failed task progress for live UI and bundle logs", async () => {
+  it("keeps preflight correction progress running for live UI and bundle logs", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
     try {
       const live: Array<{ taskId: string; state: string; detail?: string }> = [];
       coordinator.onProgress((update) => live.push(update));
       const token = coordinator.task("anchor").token;
-      await expect(coordinator.submit(token, "bad", { taskId: "anchor" })).rejects.toThrow();
-      expect(live.at(-1)).toMatchObject({ taskId: "anchor", state: "failed" });
+      await expect(coordinator.preflight(token, { taskId: "anchor" })).resolves.toMatchObject({ valid: false });
+      expect(live.at(-1)).toMatchObject({ taskId: "anchor", state: "running" });
       expect(live.at(-1)?.detail).toMatch(/required|schema|invalid|domains/i);
       const progress = JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8"));
-      expect(progress.tasks.anchor.state).toBe("failed");
+      expect(progress.tasks.anchor.state).toBe("running");
       expect(progress.tasks.anchor.detail).toMatch(/required|schema|invalid|domains/i);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
@@ -291,7 +360,7 @@ describe("Atlas API coordinator", () => {
       const task = coordinator.task("anchor");
       const token = task.token;
       await coordinator.reportProgress(token, { state: "running", detail: `token ${token} ${server.url} paths /private/worktree C:\\Users\\atlas\\secret \\\\server\\share\\secret src\\feature.ts` });
-      await coordinator.submit(token, "redacted-anchor", { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: `submitted ${token} ${server.url}` }] });
+      await coordinator.submit(token, "redacted-anchor", await preflightId(coordinator, token, { ...anchor, changeGroups: [{ ...anchor.changeGroups[0], summary: `submitted ${token} ${server.url}` }] }));
       const context = coordinator.getPrContext(token);
       expect(context).toMatchObject({ pullRequest: { posix: {}, windows: {}, unc: {}, relative: { path: "src\\feature.ts" } }, reviewThreads: [{}, {}, { path: "src\\thread.ts" }] });
       const persisted = await readFile(join(directory, "coordinator", "results", "anchor.json"), "utf8");

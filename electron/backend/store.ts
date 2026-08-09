@@ -23,9 +23,9 @@ import {
   type ReviewProgress,
   type ReviewProgressStatus,
   type RunRetentionSettings,
-  type WalkthroughDocument,
+  type ReviewDocument,
 } from "../../shared/contracts.js";
-import { validateWalkthroughDocument } from "../../shared/schema.js";
+import { validateReviewDocument } from "../../shared/schema.js";
 import { validateRepository } from "./validation.js";
 
 function safeSegment(value: string): string {
@@ -48,7 +48,7 @@ const analysisStageSet = new Set<AnalysisProgressEvent["stage"]>([
   "inspecting",
   "generating",
   "anchoring",
-  "walkthrough",
+  "review",
   "tests-risks",
   "flows",
   "assembling",
@@ -120,11 +120,11 @@ export class AnalysisStore {
   ): Promise<void> {
     await this.writeJson(directory, "manifest.json", manifest);
   }
-  async writeWalkthrough(
+  async writeReview(
     directory: string,
-    document: WalkthroughDocument,
+    document: ReviewDocument,
   ): Promise<void> {
-    await this.writeJson(directory, "walkthrough.json", document);
+    await this.writeJson(directory, "review.json", document);
   }
   async writeInput(
     directory: string,
@@ -277,9 +277,9 @@ export class AnalysisStore {
         if (manifest.status !== "ready") return null;
         try {
           const parsed: unknown = JSON.parse(
-            await readFile(resolve(directory, "walkthrough.json"), "utf8"),
+            await readFile(resolve(directory, "review.json"), "utf8"),
           );
-          const validation = validateWalkthroughDocument(parsed);
+          const validation = validateReviewDocument(parsed);
           if (
             !validation.valid ||
             !validation.document ||
@@ -517,14 +517,14 @@ export class AnalysisStore {
         if (!item || typeof item !== "object") return [];
         const progress = item as Partial<ReviewProgress>;
         return progress.runId === runId &&
-          typeof progress.stepId === "string" &&
+          typeof progress.changeGroupId === "string" &&
           isProgressStatus(progress.status) &&
           typeof progress.note === "string" &&
           typeof progress.updatedAt === "string"
           ? [
               {
                 runId,
-                stepId: progress.stepId,
+                changeGroupId: progress.changeGroupId,
                 status: progress.status,
                 note: progress.note.slice(0, 4_000),
                 updatedAt: progress.updatedAt,
@@ -543,7 +543,8 @@ export class AnalysisStore {
   ): Promise<ReviewProgress | null> {
     if (
       !isProgressStatus(progress.status) ||
-      !/^[A-Za-z0-9._:-]{1,200}$/.test(progress.stepId) ||
+      typeof progress.changeGroupId !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,200}$/.test(progress.changeGroupId) ||
       typeof progress.note !== "string" ||
       progress.note.length > 4_000
     )
@@ -551,14 +552,12 @@ export class AnalysisStore {
     const key = `${repository}:${pullNumber}:${progress.runId}`;
     return this.serializeProgressWrite(key, async () => {
       const loaded = await this.loadRun(repository, pullNumber, progress.runId);
-      if (
-        !loaded?.document ||
-        !loaded.document.walkthrough.some((step) => step.id === progress.stepId)
-      )
-        return null;
+      if (!loaded?.document) return null;
+      const changeGroupId = progress.changeGroupId;
+      if (!loaded.document.changeGroups.some((group) => group.id === changeGroupId)) return null;
       const safe: ReviewProgress = {
         runId: progress.runId,
-        stepId: progress.stepId,
+        changeGroupId,
         status: progress.status,
         note: progress.note.trim(),
         updatedAt: new Date().toISOString(),
@@ -569,7 +568,7 @@ export class AnalysisStore {
         progress.runId,
       );
       const next = [
-        ...current.filter((item) => item.stepId !== safe.stepId),
+        ...current.filter((item) => item.changeGroupId !== safe.changeGroupId),
         safe,
       ];
       await this.writeJson(

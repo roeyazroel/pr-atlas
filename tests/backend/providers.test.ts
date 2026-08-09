@@ -26,8 +26,9 @@ import {
   runProviderProcess,
   schemaForProvider,
   type ProviderMetadataSpawn,
+  type ProviderSpawn,
 } from "../../electron/backend/agent";
-import { validateWalkthroughDocument } from "../../shared/schema";
+import { validateReviewDocument } from "../../shared/schema";
 import { AnalysisService } from "../../electron/backend/service";
 
 type SpawnCall = {
@@ -142,7 +143,7 @@ describe("provider structured-output schema", () => {
     }
   });
 
-  it("requires rich walkthrough fields in provider output while keeping historical documents valid", () => {
+  it("requires canonical stories in schema 2 provider output", () => {
     const schema = schemaForProvider() as Record<string, unknown>;
     const propertiesAt = (path: string[]): Record<string, unknown> => {
       let node: Record<string, unknown> = schema;
@@ -172,10 +173,24 @@ describe("provider structured-output schema", () => {
       ["changeGroups"],
       ["summary", "motivation", "previousBehavior", "newBehavior", "attention"],
     );
+    expectRich(
+      ["stories"],
+      ["summary", "relationshipToPrimary", "relationshipRationale", "reviewReason", "changeGroupIds", "dependsOnStoryIds"],
+    );
     expectRich(["evidence"], ["path"]);
     expectRich(["tests"], ["title", "behavior"]);
     expectRich(["reviewThreads"], ["author", "body"]);
     expectRich(["reviewInsights"], ["detail", "status", "provenance"]);
+    expectRich(["risks"], ["title", "detail", "changeGroupIds", "evidenceIds"]);
+    expectRich(["dependencies"], ["title", "detail", "dependsOnIds", "changeGroupIds", "evidenceIds"]);
+    expectRich(["unchangedInteractions"], ["title", "detail", "changeGroupIds", "evidenceIds"]);
+    expect(schema.required).toEqual(expect.arrayContaining(["risks", "dependencies", "unchangedInteractions"]));
+    for (const collection of ["risks", "dependencies", "unchangedInteractions"]) {
+      const item = ((schema.properties as Record<string, Record<string, unknown>>)[collection].items as Record<string, unknown>);
+      const properties = item.properties as Record<string, Record<string, unknown>>;
+      expect(properties.changeGroupIds.minItems).toBe(1);
+      expect(properties.evidenceIds.minItems).toBe(1);
+    }
     expectRich(["graphs", "systemOverview"], ["description"]);
     expectRich(["graphs", "systemOverview", "nodes"], ["label", "evidenceIds"]);
     expectRich(
@@ -183,7 +198,7 @@ describe("provider structured-output schema", () => {
       ["title", "explanation"],
     );
 
-    expect(validateWalkthroughDocument(minimalWalkthrough()).valid).toBe(true);
+    expect(validateReviewDocument(minimalWalkthrough()).valid).toBe(true);
   });
 });
 
@@ -380,7 +395,7 @@ describe("provider analysis prompt", () => {
     expect(prompt).toMatch(/attach exact evidence IDs for changed-file\/diff facts.*tests.*review comments/i);
     expect(prompt).toMatch(/system-overview.*zero edges.*changed=false.*no PR-specific associations or evidence/i);
     expect(prompt).toMatch(/every graph node needs explanatory text.*change-group.*test.*review-thread.*review-insight.*evidence id arrays/i);
-    expect(prompt).toMatch(/dependencies on earlier step IDs only/i);
+    expect(prompt).toMatch(/dependencies may target only earlier plan entries/i);
     expect(prompt).toMatch(/verify all evidence files exist.*required relationship links/i);
   });
 
@@ -449,8 +464,16 @@ describe("coordinator provider bootstrap", () => {
 
   it("directs anchor and walkthrough tasks to read untrusted deterministic PR context", () => {
     expect(buildAnalysisPrompt(requestFor("codex"), undefined, task)).toMatch(/get_pr_context.*untrusted data/i);
-    expect(buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "walkthrough", id: "walkthrough", total: 3 })).toMatch(/get_pr_context.*untrusted data/i);
+    expect(buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "review", id: "review", total: 3 })).toMatch(/get_pr_context.*untrusted data/i);
     expect(buildAnalysisPrompt(requestFor("codex"), undefined, { ...task, kind: "flows", id: "flows", total: 3 })).not.toMatch(/get_pr_context/i);
+  });
+
+  it.each(["codex", "claude", "cursor"] as const)("directs %s to submit only the valid preflight receipt", (provider) => {
+    const prompt = buildAnalysisPrompt(requestFor(provider), undefined, task);
+    expect(prompt).toMatch(/preflight_result.*complete exact candidate/i);
+    expect(prompt).toMatch(/valid preflight returns an opaque preflightId/i);
+    expect(prompt).toMatch(/submit_result.*idempotencyKey.*preflightId only/i);
+    expect(prompt).toMatch(/never resend.*result document/i);
   });
 
   it("keeps specialist role and final relationship invariants in coordinator prompts", () => {
@@ -494,7 +517,7 @@ describe("coordinator provider bootstrap", () => {
     const envelope = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(walkthrough) } });
     const ready = await runProviderProcess(adapter, { run: vi.fn() }, fakeSpawn(envelope, []), "test", [], requestFor("codex"), "/worktree", undefined, progress, { kind: "reduce", id: "reduce-001", total: 1 });
     expect(ready.status).toBe("ready");
-    expect(validateWalkthroughDocument(ready.document).valid).toBe(true);
+    expect(validateReviewDocument(ready.document).valid).toBe(true);
     const malformed = await runProviderProcess(adapter, { run: vi.fn() }, fakeSpawn('{"taskId":"reduce-001"}', []), "test", [], requestFor("codex"), "/worktree", undefined, progress, { kind: "reduce", id: "reduce-001", total: 1 });
     expect(malformed.status).toBe("invalid");
     expect(malformed.document).toBeUndefined();
@@ -625,6 +648,37 @@ describe("coordinator provider bootstrap", () => {
     expect(response.errors).toEqual(["Cursor modified the disposable exact-head worktree; output was rejected."]);
     expect(calls[0].file).toBe("cursor-agent");
   });
+
+  it("preserves partial Cursor coordinator output when the shared execution signal aborts", async () => {
+    const calls: SpawnCall[] = [];
+    const runner = { run: vi.fn(async (_file: string, args: string[]) => {
+      if (args[0] === "worktree" && args[1] === "add") await mkdir(args[3], { recursive: true });
+      if (args[0] === "rev-parse") return { stdout: "b".repeat(40), stderr: "" };
+      return { stdout: "", stderr: "" };
+    }) };
+    const controller = new AbortController();
+    let providerStarted!: () => void;
+    const started = new Promise<void>((resolveStarted) => { providerStarted = resolveStarted; });
+    const spawn: ProviderSpawn = (file, args, options) => {
+      const child = new EventEmitter() as FakeChild;
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      child.stdin = { write: vi.fn(), end: vi.fn() }; child.kill = vi.fn();
+      calls.push({ file, args, options, stdinEnd: child.stdin.end });
+      queueMicrotask(() => child.stdout.emit("data", Buffer.from("partial Cursor receipt")));
+      providerStarted();
+      return child as unknown as ChildProcess;
+    };
+    const responsePromise = new CursorAdapter(runner, spawn).analyze(requestFor("cursor"), "/worktree", "/input", controller.signal, progress, undefined, task);
+    await started;
+    await Promise.resolve();
+    controller.abort();
+    const response = await responsePromise;
+    expect(response.status).toBe("cancelled");
+    expect(response.rawOutput).toContain("partial Cursor receipt");
+    expect(response.errors ?? []).not.toContain("Cursor coordinator instruction isolation was unavailable.");
+    expect(response.diagnosticEvents).toEqual(expect.arrayContaining([expect.objectContaining({ event: "provider.process.cancelled" })]));
+    expect(calls).toHaveLength(1);
+  });
 });
 
 function minimalWalkthrough(): Record<string, unknown> {
@@ -673,7 +727,7 @@ function minimalWalkthrough(): Record<string, unknown> {
     ],
   });
   return {
-    schemaVersion: "1.1.0",
+    schemaVersion: "2.0.0",
     run: {
       id: "run-1",
       createdAt: "2026-08-05T00:00:00.000Z",
@@ -706,21 +760,20 @@ function minimalWalkthrough(): Record<string, unknown> {
         evidenceIds: ["evidence-1"],
       },
     ],
-    walkthrough: [
+    stories: [
       {
-        id: "step-1",
-        title: "Inspect evidence",
-        reason: "It anchors the review in source evidence.",
-        summary: "Inspect the changed agent source.",
-        limitations: [],
-        dependsOnStepIds: [],
-        changeGroupId: "group-1",
-        flowNodeIds: ["data-flow-node"],
-        evidenceIds: ["evidence-1"],
-        testIds: [],
-        reviewInsightIds: [],
+        id: "story-1",
+        title: "Trace evidence",
+        summary: "Connects changed behavior to evidence.",
+        relationshipToPrimary: "primary",
+        relationshipRationale: "It is the review's main change.",
+        reviewReason: "Review the evidence boundary first.",
+        changeGroupIds: ["group-1"],
+        dependsOnStoryIds: [],
       },
     ],
+    primaryStoryId: "story-1",
+    reviewPlan: ["story-1"],
     graphs: {
       systemOverview: graph("system-overview"),
       dataFlow: graph("data-flow"),
@@ -730,6 +783,9 @@ function minimalWalkthrough(): Record<string, unknown> {
     tests: [],
     reviewThreads: [],
     reviewInsights: [],
+    risks: [],
+    dependencies: [],
+    unchangedInteractions: [],
     evidence: [
       {
         id: "evidence-1",

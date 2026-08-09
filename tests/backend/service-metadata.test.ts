@@ -48,37 +48,34 @@ function providerDocument() {
     }],
   })
   return {
-    schemaVersion: '1.1.0',
+    schemaVersion: '2.0.0',
     run: { id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented', model: 'provider-document-model', skillVersion: 'provider-skill-version' },
     pullRequest: { host: 'github.com', repository: 'example/backend', number: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40) },
     summary: { intent: 'intent', behavioralChanges: [], architecturalImpact: [], limitations: [] },
     changeGroups: [{ id: 'group-1', title: 'Trace evidence', summary: 'Connects behavior to code.', motivation: 'Reviewers need exact evidence.', previousBehavior: 'Evidence was implicit.', newBehavior: 'Evidence is linked.', attention: 'medium', evidenceIds: ['evidence-1'] }],
-    walkthrough: [{ id: 'step-1', title: 'Inspect evidence', reason: 'It anchors the review in source evidence.', summary: 'Inspect the changed input.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-1', flowNodeIds: ['data-flow-node'], evidenceIds: ['evidence-1'], testIds: [], reviewInsightIds: [] }],
+    stories: [{ id: 'story-1', title: 'Trace evidence', summary: 'Connects changed behavior to evidence.', relationshipToPrimary: 'primary', relationshipRationale: 'It is the review\'s main change.', reviewReason: 'Review the evidence boundary first.', changeGroupIds: ['group-1'], dependsOnStoryIds: [] }],
+    primaryStoryId: 'story-1',
+    reviewPlan: ['story-1'],
     graphs: { systemOverview: graph('system-overview'), dataFlow: graph('data-flow'), codeDependency: graph('code-dependency'), userAction: graph('user-action') },
-    tests: [], reviewThreads: [], reviewInsights: [], evidence: [{ id: 'evidence-1', kind: 'file', title: 'Input diff', path: 'diff.patch', line: null, url: null }],
+    tests: [], reviewThreads: [], reviewInsights: [], risks: [], dependencies: [], unchangedInteractions: [], evidence: [{ id: 'evidence-1', kind: 'file', title: 'Input diff', path: 'diff.patch', line: null, url: null }],
   }
 }
 
-function legacyProviderDocument() {
+function rejectedProviderDocument() {
   const document = providerDocument() as Record<string, unknown>
-  document.schemaVersion = '1.0.0'
-  for (const step of document.walkthrough as Array<Record<string, unknown>>) {
-    delete step.reason
-    delete step.summary
-    delete step.limitations
-    delete step.dependsOnStepIds
-    delete step.flowNodeIds
-    delete step.testIds
-    delete step.reviewInsightIds
-  }
+  document.schemaVersion = '1.1.0'
+  delete document.stories
+  delete document.primaryStoryId
+  delete document.reviewPlan
+  document.walkthrough = [{ id: 'step-1', changeGroupId: 'group-1' }]
   return document
 }
 
 describe('analysis service reproducibility metadata', () => {
-  it('rejects a provider-returned 1.0 walkthrough for a fresh run', async () => {
+  it('rejects a provider-returned 1.1 document for a fresh run', async () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-schema-version-`)
     try {
-      const legacy = legacyProviderDocument()
+      const legacy = rejectedProviderDocument()
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
       const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
         const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
@@ -97,9 +94,9 @@ describe('analysis service reproducibility metadata', () => {
 
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude' })
 
-      expect(result).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+      expect(result).toMatchObject({ status: 'invalid', error: { code: 'INVALID_REVIEW_DOCUMENT' } })
       expect(result.document).toBeUndefined()
-      expect(JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+      expect(JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))).toMatchObject({ status: 'invalid', error: { code: 'INVALID_REVIEW_DOCUMENT' } })
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -184,7 +181,7 @@ describe('analysis service reproducibility metadata', () => {
       expect(result.manifest).toMatchObject({ runId: result.runId, provider: 'claude', model: selectedModel })
       expect(result.manifest).not.toHaveProperty('skillContractVersion')
 
-      const persistedDocument = JSON.parse(await readFile(`${result.artifactDirectory}/walkthrough.json`, 'utf8'))
+      const persistedDocument = JSON.parse(await readFile(`${result.artifactDirectory}/review.json`, 'utf8'))
       const persistedManifest = JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))
       expect(persistedDocument.run).toEqual(result.document?.run)
       expect(persistedManifest).toMatchObject({ runId: result.runId, createdAt: result.manifest.createdAt, provider: 'claude', model: selectedModel })

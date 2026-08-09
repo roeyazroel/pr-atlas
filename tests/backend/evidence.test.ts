@@ -7,7 +7,7 @@ import {
   readEvidenceDetail,
   resolveEvidencePath,
 } from "../../electron/backend/evidence";
-import type { WalkthroughDocument } from "../../shared/contracts";
+import type { ReviewDocument } from "../../shared/contracts";
 
 describe("local evidence path resolution", () => {
   it("resolves an existing file inside the exact managed worktree", async () => {
@@ -126,7 +126,7 @@ describe("local evidence path resolution", () => {
           url: null,
         },
       ],
-    } as WalkthroughDocument;
+    } as ReviewDocument;
 
     const normalized = await normalizeDocumentEvidencePaths(
       root,
