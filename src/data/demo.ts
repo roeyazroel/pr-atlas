@@ -5,7 +5,7 @@ import {
   ReviewThread,
   TestMapping,
 } from "../types";
-import type { WalkthroughDocument } from "../../shared/contracts";
+import type { ReviewDocument } from "../../shared/contracts";
 
 const graph = (
   id: "system-overview" | "data-flow" | "code-dependency" | "user-action",
@@ -442,8 +442,8 @@ const tests: TestMapping[] = [
   },
 ];
 
-const atlasWalkthrough: WalkthroughDocument = {
-  schemaVersion: "1.1.0",
+const atlasWalkthrough: ReviewDocument = {
+  schemaVersion: "2.0.0",
   run: {
     id: "demo-atlas-482-v1-1",
     createdAt: "2026-08-04T10:14:00.000Z",
@@ -452,6 +452,7 @@ const atlasWalkthrough: WalkthroughDocument = {
     skillVersion: "1.1.0",
     config: {
       depth: "deep",
+      scanMode: "coordinator",
       includeReviewComments: true,
       maxGraphNodes: 80,
       timeoutMinutes: 20,
@@ -490,80 +491,50 @@ const atlasWalkthrough: WalkthroughDocument = {
     attention: group.attention,
     evidenceIds: group.evidenceIds ?? [],
   })),
-  walkthrough: [
+  stories: [
     {
-      id: "step-session-boundary",
-      title: "Review server-side token rotation",
-      reason:
-        "Review the credential boundary first because every callback and refresh path depends on it.",
-      summary:
-        "Trace how the session service hashes, rotates, and rejects stale refresh credentials.",
-      limitations: [
-        "The fixture does not model a provider-side token revocation event.",
-      ],
-      dependsOnStepIds: [],
-      changeGroupId: "session",
-      flowNodeIds: ["data-flow-2", "data-flow-3"],
-      evidenceIds: ["demo-session-file", "demo-rotate-symbol"],
-      testIds: ["test1", "test3"],
-      reviewInsightIds: ["i1"],
+      id: "story-session",
+      title: "Session-owned rotation",
+      summary: "Refresh tokens rotate at the server boundary before a workspace request can reuse the old credential.",
+      relationshipToPrimary: "primary",
+      relationshipRationale: "This is the central behavior change.",
+      reviewReason: "Start at the credential boundary because every callback and refresh path depends on it.",
+      changeGroupIds: ["session"],
+      dependsOnStoryIds: [],
     },
     {
-      id: "step-callback-handoff",
-      title: "Review callback handoff ordering",
-      reason:
-        "Verify the handoff after the credential boundary so callback state is interpreted against the new session contract.",
-      summary:
-        "Confirm that navigation follows durable handoff storage and a hydrated session.",
-      limitations: [
-        "The fixture models the callback ordering but not browser cookie policy differences.",
-      ],
-      dependsOnStepIds: ["step-session-boundary"],
-      changeGroupId: "callback",
-      flowNodeIds: ["user-action-3", "user-action-4"],
-      evidenceIds: ["demo-auth-spec"],
-      testIds: ["test2"],
-      reviewInsightIds: ["i3", "i4"],
+      id: "story-callback",
+      title: "Callback handoff ordering",
+      summary: "OAuth callbacks persist a short-lived handoff before navigation.",
+      relationshipToPrimary: "supporting",
+      relationshipRationale: "The callback consumes the new session contract.",
+      reviewReason: "Verify redirect ordering after the session owner moves.",
+      changeGroupIds: ["callback"],
+      dependsOnStoryIds: ["story-session"],
     },
     {
-      id: "step-storage-migration",
-      title: "Review the staged token migration",
-      reason:
-        "Check persistence after its producing session behavior and consuming callback are understood.",
-      summary:
-        "Inspect nullable hash storage and the expiry index used by cleanup.",
-      limitations: [
-        "The fixture does not include production backfill volume measurements.",
-      ],
-      dependsOnStepIds: ["step-session-boundary"],
-      changeGroupId: "schema",
-      flowNodeIds: ["data-flow-4", "data-flow-5"],
-      evidenceIds: ["demo-migration-commit"],
-      testIds: ["test4"],
-      reviewInsightIds: ["i2"],
+      id: "story-migration",
+      title: "Staged token migration",
+      summary: "Nullable hash storage and an expiry index support gradual rollout.",
+      relationshipToPrimary: "adjacent",
+      relationshipRationale: "Persistence enables the primary rotation behavior without changing its ownership.",
+      reviewReason: "Check persistence after the producing session behavior is understood.",
+      changeGroupIds: ["schema"],
+      dependsOnStoryIds: ["story-session"],
     },
     {
-      id: "step-regression-tests",
-      title: "Review executable regression coverage",
-      reason:
-        "Finish by checking that the intended contract is encoded in focused tests.",
-      summary:
-        "Map rotation, callback ordering, and expiry behavior to the changed test coverage.",
-      limitations: [
-        "Expiry cleanup is intentionally marked missing until a direct assertion is added.",
-      ],
-      dependsOnStepIds: [
-        "step-session-boundary",
-        "step-callback-handoff",
-        "step-storage-migration",
-      ],
-      changeGroupId: "coverage",
-      flowNodeIds: ["code-dependency-1"],
-      evidenceIds: ["demo-auth-spec", "demo-rotate-symbol"],
-      testIds: ["test1", "test2", "test3", "test4"],
-      reviewInsightIds: ["i1", "i2"],
+      id: "story-coverage",
+      title: "Executable regression coverage",
+      summary: "Focused tests encode rotation, callback ordering, and expiry behavior.",
+      relationshipToPrimary: "independent",
+      relationshipRationale: "Coverage is a verification surface rather than a runtime dependency.",
+      reviewReason: "Finish by checking that the intended contract is executable.",
+      changeGroupIds: ["coverage"],
+      dependsOnStoryIds: ["story-callback", "story-migration"],
     },
   ],
+  primaryStoryId: "story-session",
+  reviewPlan: ["story-session", "story-callback", "story-migration", "story-coverage"],
   graphs: {
     systemOverview: flows[0]!,
     dataFlow: flows[1]!,
@@ -628,6 +599,15 @@ const atlasWalkthrough: WalkthroughDocument = {
             ? ["user-action-3"]
             : ["code-dependency-2"],
   })),
+  risks: [
+    { id: "risk-rotation", title: "Concurrent token rotation", detail: "Parallel refresh remains a bounded retry rather than a distributed lock proof.", changeGroupIds: ["session"], evidenceIds: ["demo-session-file"] },
+  ],
+  dependencies: [
+    { id: "dependency-callback", title: "Callback consumes the session contract", detail: "The callback handoff must follow session ownership and token rotation.", dependsOnIds: [], changeGroupIds: ["callback"], evidenceIds: ["demo-session-file"] },
+  ],
+  unchangedInteractions: [
+    { id: "unchanged-provider-revocation", title: "Provider revocation remains external", detail: "Provider-side token revocation is unchanged by this pull request.", changeGroupIds: ["session"], evidenceIds: ["demo-auth-spec"] },
+  ],
   evidence: [
     {
       id: "demo-session-file",
@@ -776,8 +756,7 @@ export const pullRequests: PullRequest[] = [
         status: "completed" as const,
         provider: "demo",
         model: "Codex local fixture",
-        schemaVersion: "1.1.0",
-        skillVersion: "1.1.0",
+        schemaVersion: "2.0.0",
       },
       {
         id: "run2",

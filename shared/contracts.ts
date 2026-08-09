@@ -123,6 +123,8 @@ export interface AnalysisRequest {
 
 export interface AnalysisRunConfig {
   depth: "quick" | "standard" | "deep";
+  /** Coordinator is the current architecture; legacy preserves the established map/reduce flow. */
+  scanMode: "coordinator" | "legacy";
   includeReviewComments: boolean;
   maxGraphNodes: number;
   timeoutMinutes: number;
@@ -130,9 +132,10 @@ export interface AnalysisRunConfig {
 
 export const DEFAULT_ANALYSIS_RUN_CONFIG: AnalysisRunConfig = {
   depth: "standard",
+  scanMode: "coordinator",
   includeReviewComments: true,
   maxGraphNodes: 80,
-  timeoutMinutes: 20,
+  timeoutMinutes: 40,
 };
 
 export interface RunRetentionSettings {
@@ -150,6 +153,11 @@ export type AnalysisStage =
   | "collecting"
   | "inspecting"
   | "generating"
+  | "anchoring"
+  | "review"
+  | "tests-risks"
+  | "flows"
+  | "assembling"
   | "validating"
   | "complete";
 
@@ -158,29 +166,72 @@ export interface AnalysisProgressEvent {
   stage: AnalysisStage;
   message: string;
   timestamp: string;
+  taskState?: "pending" | "running" | "complete" | "failed";
 }
 
 export interface AgentAnalysisResult {
   status: AnalysisRunStatus;
-  document?: WalkthroughDocument;
+  document?: ReviewDocument;
   rawOutput: string;
   logs: string[];
+  /** Redacted provider lifecycle telemetry; never includes model reasoning. */
+  diagnosticEvents?: AnalysisDiagnosticEvent[];
   model?: string;
   errors?: string[];
-  /** Validated, provider-neutral intermediate result for a batched map task. */
-  mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
+  /** Validated, provider-neutral intermediate result for anchored large-PR work. */
+  taskOutput?: AnchoredTaskOutput;
+  /** Legacy map-stage result. Kept so the selectable compatibility engine remains executable. */
+  mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: ProviderEvidenceReference[]; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
 }
 
+export type AnchoredTaskKind = "anchor" | "review" | "tests-risks" | "flows";
+export type LegacyBatchTaskKind = "map" | "reduce";
+export type AnchorDomainId = "production-path" | "experimental-pocs" | "migration-rollback" | "updater-installer" | "runtime-packaging" | "reviewer-workflow";
+export type AnchorDomainStatus = "changed" | "unchanged-relevant" | "not-evidenced";
+export interface ProviderEvidenceReference { path: string; line: number | null; role?: "changed" | "unchanged-context"; }
+/** Coordinator evidence is always line-specific and declares why the line is usable. */
+export interface CoordinatorEvidenceReference { path: string; line: number; role: "changed" | "unchanged-context"; }
+export interface SemanticAnchorGroup {
+  id: string; title: string; summary: string; motivation: string;
+  previousBehavior: string; newBehavior: string; attention: "low" | "medium" | "high";
+  evidence: CoordinatorEvidenceReference[];
+}
+export interface SemanticAnchorDomain {
+  id: AnchorDomainId; status: AnchorDomainStatus; rationale: string;
+  evidence: CoordinatorEvidenceReference[]; changeGroupIds: string[];
+}
+export interface SemanticAnchorStory {
+  id: string; title: string; summary: string;
+  relationshipToPrimary: StoryRelationship;
+  relationshipRationale: string; reviewReason: string;
+  changeGroupIds: string[]; dependsOnStoryIds: string[];
+}
+/** Authoritative semantic spine; specialists may only reference its group ids. */
+export interface SemanticAnchor {
+  taskId: string; domains: SemanticAnchorDomain[]; changeGroups: SemanticAnchorGroup[];
+  stories: SemanticAnchorStory[]; primaryStoryId: string; reviewPlan: string[];
+}
+export interface SpecialistCoverage { domainId: AnchorDomainId; status: "covered" | "not-applicable"; rationale: string; }
+export interface AnchoredSpecialistOutput {
+  taskId: string; coverage: SpecialistCoverage[];
+  /** Task-specific payload. It is deliberately not a complete ReviewDocument. */
+  content: Record<string, unknown>;
+}
+export type AnchoredTaskOutput = SemanticAnchor | AnchoredSpecialistOutput;
+
 export interface ProviderAnalysisTask {
-  kind: "map" | "reduce";
+  kind: AnchoredTaskKind | LegacyBatchTaskKind;
   id: string;
   total: number;
-  /** Trusted, platform-specific command for the bundled Electron Node runtime. */
+  /** The accepted semantic source of truth supplied verbatim to every specialist. */
+  anchor?: SemanticAnchor;
+  /** Trusted task-local validator command/runtime for the retained legacy engine only. */
   validatorCommand?: string;
-  /** Trusted bundled Electron executable injected only into the provider child environment. */
   validatorRuntime?: string;
   assignedPaths?: string[];
   assignedUnits?: Array<{ path: string; segment: number }>;
+  /** Host-owned MCP bootstrap for the coordinator lane; never contains repository input. */
+  coordinator?: { url: string; token: string; shimPath: string; submitted: () => AnchoredTaskOutput | null; submitForHarness?: (key: string, result: AnchoredTaskOutput) => Promise<unknown> };
 }
 
 /** Provider-neutral process boundary used by the main-process orchestration. */
@@ -265,20 +316,6 @@ export interface ChangeGroup {
   evidenceIds: string[];
   [key: string]: unknown;
 }
-export interface WalkthroughStep {
-  id: string;
-  title: string;
-  changeGroupId: string;
-  evidenceIds: string[];
-  reason: string;
-  summary: string;
-  limitations: string[];
-  dependsOnStepIds: string[];
-  flowNodeIds: string[];
-  testIds: string[];
-  reviewInsightIds: string[];
-  [key: string]: unknown;
-}
 export interface TestMapping {
   id: string;
   title: string;
@@ -351,8 +388,35 @@ export interface ReviewInsight {
   graphNodeIds: string[];
   [key: string]: unknown;
 }
-export interface WalkthroughDocument {
-  schemaVersion: "1.1.0";
+/** A grounded concern associated with one or more atomic change groups. */
+export interface ReviewRisk {
+  id: string;
+  title: string;
+  detail: string;
+  changeGroupIds: string[];
+  evidenceIds: string[];
+  [key: string]: unknown;
+}
+/** An ordered relationship between review concerns; ids target this collection. */
+export interface ReviewDependency {
+  id: string;
+  title: string;
+  detail: string;
+  dependsOnIds: string[];
+  changeGroupIds: string[];
+  evidenceIds: string[];
+  [key: string]: unknown;
+}
+/** Relevant behavior that remains stable around a changed group. */
+export interface UnchangedInteraction {
+  id: string;
+  title: string;
+  detail: string;
+  changeGroupIds: string[];
+  evidenceIds: string[];
+  [key: string]: unknown;
+}
+export interface DocumentCore {
   run: {
     id: string;
     createdAt: string;
@@ -377,7 +441,6 @@ export interface WalkthroughDocument {
     [key: string]: unknown;
   };
   changeGroups: ChangeGroup[];
-  walkthrough: WalkthroughStep[];
   graphs: {
     systemOverview: Graph;
     dataFlow: Graph;
@@ -388,8 +451,30 @@ export interface WalkthroughDocument {
   tests: TestMapping[];
   reviewThreads: ReviewThread[];
   reviewInsights: ReviewInsight[];
+  risks: ReviewRisk[];
+  dependencies: ReviewDependency[];
+  unchangedInteractions: UnchangedInteraction[];
   evidence: EvidenceItem[];
+}
+export type StoryRelationship = "primary" | "supporting" | "adjacent" | "independent";
+export interface Story {
+  id: string;
+  title: string;
+  summary: string;
+  relationshipToPrimary: StoryRelationship;
+  relationshipRationale: string;
+  reviewReason: string;
+  changeGroupIds: string[];
+  dependsOnStoryIds: string[];
   [key: string]: unknown;
+}
+/** Canonical review document. Stories own groups; joins stay on the shared collections. */
+export interface ReviewDocument extends DocumentCore {
+  schemaVersion: "2.0.0";
+  stories: Story[];
+  primaryStoryId: string;
+  /** Story ids exactly once, in their required review order. */
+  reviewPlan: string[];
 }
 
 export interface AnalysisManifest {
@@ -408,8 +493,6 @@ export interface AnalysisManifest {
   lastProgress?: AnalysisProgressEvent;
   activity?: AnalysisProgressEvent[];
   effort?: AnalysisEffort;
-  skillContractVersion?: string;
-  skillReferenceUrl?: string;
   config?: AnalysisRunConfig;
   preferred?: boolean;
   error?: SafeDiagnostic;
@@ -424,7 +507,9 @@ export interface SafeDiagnostic {
 export interface AnalysisRunResult {
   runId: string;
   status: AnalysisRunStatus;
-  document?: WalkthroughDocument;
+  /** Redacted lifecycle events from this run for immediate UI inspection. */
+  diagnosticEvents?: AnalysisDiagnosticEvent[];
+  document?: ReviewDocument;
   error?: SafeDiagnostic;
   manifest: AnalysisManifest;
   artifactDirectory: string;
@@ -439,6 +524,21 @@ export interface AnalysisDiagnostics {
   error?: SafeDiagnostic;
   logExcerpt: string[];
   rawOutputExcerpt: string;
+  /** Structured operational events, bounded and redacted before crossing IPC. */
+  events?: AnalysisDiagnosticEvent[];
+}
+export type AnalysisDiagnosticLevel = "debug" | "info" | "warn" | "error";
+export interface AnalysisDiagnosticEvent {
+  timestamp: string;
+  level: AnalysisDiagnosticLevel;
+  event: string;
+  message: string;
+  runId?: string;
+  provider?: AgentProvider;
+  stage?: AnalysisStage;
+  taskId?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
 }
 export interface DiagnosticExportResult {
   saved: boolean;
@@ -450,7 +550,7 @@ export type ReviewProgressStatus =
   "pending" | "reviewed" | "follow-up" | "skipped";
 export interface ReviewProgress {
   runId: string;
-  stepId: string;
+  changeGroupId: string;
   status: ReviewProgressStatus;
   note: string;
   updatedAt: string;

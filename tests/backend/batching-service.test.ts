@@ -6,12 +6,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentAdapter, AgentAnalysisResult, AnalysisProgressEvent, AnalysisRequest, ProviderAnalysisTask } from "../../shared/contracts";
 import { AnalysisService } from "../../electron/backend/service";
 
-const request: AnalysisRequest = { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40), provider: "codex" };
+const request: AnalysisRequest = { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40), provider: "codex", config: { depth: "standard", scanMode: "legacy", includeReviewComments: true, maxGraphNodes: 80, timeoutMinutes: 20 } };
 const caps = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: false, authenticationState: false };
 
 function diff(files: number, bytes: number) { return Array.from({ length: files }, (_, index) => `diff --git a/src/f${index}.ts b/src/f${index}.ts\n--- a/src/f${index}.ts\n+++ b/src/f${index}.ts\n@@ -1 +1 @@\n+${"x".repeat(bytes)}`).join("\n"); }
 function runner(files: number, bytes: number) {
-  return { run: vi.fn(async (file: string, args: string[]) => {
+  return { run: vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+    if (file === "git" && args[0] === "rev-parse") return { stdout: args[1] === "--show-toplevel" ? options?.cwd ?? "" : options?.cwd?.split(/[\\/]/).at(-1) ?? "", stderr: "" };
+    if (file === "git" && args[0] === "status") return { stdout: "", stderr: "" };
     if (file === "git" && args[0] === "diff") return { stdout: diff(files, bytes), stderr: "" };
     if (file === "gh" && args[0] === "api" && args[1] === "graphql") return { stdout: JSON.stringify([{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]), stderr: "" };
     if (file === "gh" && args[0] === "api" && String(args.at(-1)).includes("/files")) return { stdout: JSON.stringify(Array.from({ length: files }, (_, index) => ({ filename: `src/f${index}.ts`, additions: 1, deletions: 0 }))), stderr: "" };
@@ -41,13 +43,13 @@ function completeMap(task: ProviderAnalysisTask): NonNullable<AgentAnalysisResul
 function reducerDocument() {
   const graph = (id: string) => ({ id, description: `Review ${id}.`, nodes: [{ id: `${id}-node`, label: "Relevant node", explanation: "A relevant node.", changed: id !== "system-overview", changeGroupIds: id === "system-overview" ? [] : ["group-1"], testIds: [], reviewThreadIds: [], reviewInsightIds: [], evidenceIds: id === "system-overview" ? [] : ["evidence-1"] }], edges: id === "system-overview" ? [] : [{ id: `${id}-edge`, source: `${id}-node`, target: `${id}-node`, label: "continues", evidenceIds: ["evidence-1"], changeGroupIds: ["group-1"], reviewThreadIds: [] }], guidedTours: [{ id: `${id}-tour`, title: "Review this graph", steps: [{ nodeId: `${id}-node`, title: "Inspect node", explanation: "Verify exact evidence." }] }] });
   return {
-    schemaVersion: "1.1.0", run: { id: "provider-run", createdAt: "2026-08-05T00:00:00.000Z", provider: "codex", model: "test-model", skillVersion: "1.0.0" },
+    schemaVersion: "2.0.0", run: { id: "provider-run", createdAt: "2026-08-05T00:00:00.000Z", provider: "codex", model: "test-model", skillVersion: "2.0.0" },
     pullRequest: { host: "github.com", repository: request.repository, number: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha },
     summary: { intent: "Explain the batched change.", behavioralChanges: [], architecturalImpact: [], limitations: [] },
     changeGroups: [{ id: "group-1", title: "Batched change", summary: "Connects behavior to code.", motivation: "Reviewers need exact evidence.", previousBehavior: "Evidence was implicit.", newBehavior: "Evidence is linked.", attention: "medium", evidenceIds: ["evidence-1"] }],
-    walkthrough: [{ id: "step-1", title: "Inspect evidence", reason: "It anchors the review in source evidence.", summary: "Inspect the changed input.", limitations: [], dependsOnStepIds: [], changeGroupId: "group-1", flowNodeIds: ["data-flow-node"], evidenceIds: ["evidence-1"], testIds: [], reviewInsightIds: [] }],
+    stories: [{ id: "story-1", title: "Batched evidence review", summary: "Review the batched behavioral change.", relationshipToPrimary: "primary", relationshipRationale: "It is the only behavioral story.", reviewReason: "It anchors source evidence.", changeGroupIds: ["group-1"], dependsOnStoryIds: [] }], primaryStoryId: "story-1", reviewPlan: ["story-1"],
     graphs: { systemOverview: graph("system-overview"), dataFlow: graph("data-flow"), codeDependency: graph("code-dependency"), userAction: graph("user-action") },
-    tests: [], reviewThreads: [], reviewInsights: [], evidence: [{ id: "evidence-1", kind: "file", title: "Changed input", path: "src/f0.ts", line: null, url: null }],
+    tests: [], reviewThreads: [], reviewInsights: [], risks: [], dependencies: [], unchangedInteractions: [], evidence: [{ id: "evidence-1", kind: "file", title: "Changed input", path: "src/f0.ts", line: null, url: null }],
   };
 }
 
@@ -122,6 +124,22 @@ describe("batched service orchestration", () => {
     finally { await rm(env.root, { recursive: true, force: true }); }
   });
 
+  it("does not invoke the reducer when cancellation lands on reducer-start progress", async () => {
+    const tasks: string[] = []; let service: AnalysisService;
+    const env = await setup(20, 50_000, async (_r, _w, _i, _signal, _progress, _model, task) => {
+      tasks.push(task?.kind ?? "single");
+      return task?.kind === "map"
+        ? { status: "ready", rawOutput: "{}", logs: [], mapOutput: completeMap(task) }
+        : { status: "ready", rawOutput: "{}", logs: [], document: reducerDocument() as never };
+    }, (event) => { if (event.message.includes("Reducer started")) service.cancelAnalysis(event.runId); });
+    service = env.service;
+    try {
+      const result = await service.startAnalysis(request);
+      expect(result.status).toBe("cancelled");
+      expect(tasks).not.toContain("reduce");
+    } finally { await rm(env.root, { recursive: true, force: true }); }
+  });
+
   it("installs Ready only after a successful final reducer document", async () => {
     let reduceScope = ""; const mapScopes: string[] = []; const isolated: boolean[] = []; const env = await setup(20, 50_000, async (_r, providerRoot, input, _s, _p, _m, task) => { isolated.push(providerRoot === input); if (task?.kind === "map") { mapScopes.push(input); return { status: "ready", rawOutput: "", logs: [], mapOutput: completeMap(task) }; } reduceScope = input; return { status: "ready", rawOutput: "", logs: [], document: reducerDocument() as never }; });
     try { await mkdir(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src"), { recursive: true }); await writeFile(resolve(env.root, "worktrees/github.com/acme/atlas", request.headSha, "src/f0.ts"), "export {};\n"); expect((await env.service.startAnalysis(request)).status).toBe("ready"); expect(isolated.every(Boolean)).toBe(true); expect(mapScopes.length).toBeGreaterThan(0); for (const scope of mapScopes) expect(await readFile(resolve(scope, "validate-map-output.mjs"), "utf8")).toContain("Map output validation"); expect(JSON.parse(await readFile(resolve(reduceScope, "request.json"), "utf8"))).toMatchObject({ repository: request.repository, baseSha: request.baseSha, headSha: request.headSha }); const reducerPlanText = await readFile(resolve(reduceScope, "plan.json"), "utf8"); const reducerPlan = JSON.parse(reducerPlanText); expect(reducerPlan.coverage.complete).toBe(true); expect(reducerPlan.chunks[0].units[0]).toMatchObject({ path: expect.any(String), segment: 0 }); expect(reducerPlanText).not.toContain('"diff"'); expect(await readFile(resolve(reduceScope, "review-threads.json"), "utf8")).toBeTruthy(); }
@@ -146,6 +164,21 @@ describe("batched service orchestration", () => {
       await expect(runJsonValidator(script, liveFailure)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/must be contextual and unchanged.*changeGroupIds must be empty.*testIds must be empty.*reviewInsightIds must be empty.*evidenceIds must be empty/is) });
       const brokenRelation = reducerDocument(); brokenRelation.graphs.dataFlow.edges[0].source = "unknown-node";
       await expect(runJsonValidator(script, brokenRelation)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/edge.*unknown node.*unknown-node/i) });
+      const missingRelationships = reducerDocument(); delete (missingRelationships as Record<string, unknown>).risks;
+      await expect(runJsonValidator(script, missingRelationships)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/risks, dependencies, and unchangedInteractions/i) });
+      const invalidDependency = reducerDocument(); (invalidDependency as { dependencies: unknown[] }).dependencies = [{ id: "dependency-1", title: "Dependency", detail: "Invalid relation.", dependsOnIds: ["unknown-dependency"], changeGroupIds: ["group-1"], evidenceIds: ["evidence-1"] }];
+      await expect(runJsonValidator(script, invalidDependency)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/unknown dependency/i) });
+      const ungroupedTest = reducerDocument(); (ungroupedTest as { tests: unknown[] }).tests = [{ id: "test-1", title: "Test", behavior: "Covers the changed behavior.", status: "covered", changeGroupIds: [], evidenceIds: ["evidence-1"] }];
+      await expect(runJsonValidator(script, ungroupedTest)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/tests\[0\]\.changeGroupIds must not be empty/i) });
+      const crossGraphDuplicate = reducerDocument();
+      crossGraphDuplicate.graphs.codeDependency.nodes[0].id = crossGraphDuplicate.graphs.dataFlow.nodes[0].id;
+      crossGraphDuplicate.graphs.codeDependency.edges[0].source = crossGraphDuplicate.graphs.codeDependency.nodes[0].id;
+      crossGraphDuplicate.graphs.codeDependency.edges[0].target = crossGraphDuplicate.graphs.codeDependency.nodes[0].id;
+      crossGraphDuplicate.graphs.codeDependency.guidedTours[0].steps[0].nodeId = crossGraphDuplicate.graphs.codeDependency.nodes[0].id;
+      await expect(runJsonValidator(script, crossGraphDuplicate)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/duplicate semantic id 'data-flow-node'/i) });
+      const graphTopLevelCollision = reducerDocument();
+      (graphTopLevelCollision as { tests: unknown[] }).tests = [{ id: graphTopLevelCollision.graphs.dataFlow.nodes[0].id, title: "Test", behavior: "Covers the changed behavior.", status: "covered", changeGroupIds: ["group-1"], evidenceIds: ["evidence-1"] }];
+      await expect(runJsonValidator(script, graphTopLevelCollision)).resolves.toMatchObject({ code: 1, stderr: expect.stringMatching(/duplicate semantic id 'data-flow-node'/i) });
     } finally { await rm(env.root, { recursive: true, force: true }); }
   });
 

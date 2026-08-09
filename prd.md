@@ -100,7 +100,7 @@ The product should allow a reviewer to:
 2. Select a pull request.
 3. Trigger local analysis through an installed coding agent.
 4. Observe analysis progress.
-5. Open a generated walkthrough.
+5. Open the generated Review surface.
 6. Review the pull request by logical change groups.
 7. Explore system, data, dependency, and user-action flows.
 8. Understand tests associated with each behavior.
@@ -261,7 +261,7 @@ The MVP includes:
 - Analysis history.
 - Stale-analysis detection.
 - Analysis reruns.
-- Guided walkthrough.
+- Guided Review surface.
 - Logical change groups.
 - Four graph views.
 - Test-to-behavior mapping.
@@ -577,7 +577,7 @@ Outdated walkthrough
 Generated for commit 4f18c2a.
 Current pull-request head is 97ab083.
 
-[Update walkthrough]
+[Update review]
 ```
 
 The product must not silently present stale analysis as current.
@@ -612,7 +612,7 @@ While processing, the application displays high-level stages:
 7. Mapping tests.
 8. Building logical change groups.
 9. Clustering review comments.
-10. Generating walkthrough.
+10. Generating the Review document.
 11. Validating output.
 12. Saving analysis.
 
@@ -642,7 +642,7 @@ An analysis run is uniquely identified by:
 - Pull-request number.
 - Base SHA.
 - Head SHA.
-- Walkthrough schema version.
+- Review-document schema version.
 - Skill version.
 - Agent provider.
 - Agent runtime version.
@@ -652,7 +652,7 @@ An analysis run is uniquely identified by:
 
 ## 14.2 Rerun actions
 
-### Update walkthrough
+### Update review
 
 Used when the pull-request head SHA changed.
 
@@ -722,7 +722,7 @@ The header displays:
 - Head SHA.
 - Analysis creation time.
 - Agent and model.
-- Walkthrough freshness.
+- Review freshness.
 - Open on GitHub.
 - Rerun menu.
 
@@ -731,14 +731,13 @@ The header displays:
 The processed view includes:
 
 1. Overview.
-2. Walkthrough.
-3. Change groups.
-4. Insights.
-5. Flows.
-6. Files.
-7. Tests.
-8. Review threads.
-9. Analysis details.
+2. Review.
+3. Insights.
+4. Flows.
+5. Files.
+6. Tests.
+7. Review threads.
+8. Analysis details.
 
 ---
 
@@ -789,7 +788,7 @@ This should be called “Review attention” or “Change impact,” not definit
 
 ### Recommended review order
 
-A short ordered list linking into the walkthrough.
+A short ordered list linking into the Review surface.
 
 ## 16.2 Confidence and uncertainty
 
@@ -804,34 +803,26 @@ The UI should avoid false precision.
 
 ---
 
-# 17. Guided Walkthrough
+# 17. Guided Review
 
-The Walkthrough is the recommended sequence for reviewing the pull request.
-
-Each walkthrough step contains:
-
-- Title.
-- Reason for its position in the review order.
-- Summary.
-- Relevant change group.
-- Relevant flow nodes.
-- Files and symbols.
-- Diff evidence.
-- Tests.
-- Review insights.
-- Previous and next navigation.
-- Mark-as-reviewed state.
+The Review surface is the recommended sequence for reviewing the pull request.
+It starts with the primary story, then shows supporting, adjacent, or
+independent stories in canonical review-plan order. Each chapter contains its
+ordered atomic Change inventory; selecting a group reveals its before/after,
+motivation, evidence, tests, insights, dependencies, risks, unchanged
+interactions, and a compact flow trace. There are no persisted walkthrough
+steps and no previous/next step model.
 
 Example:
 
 ```text
-Step 2 of 6
+Primary story · Group 2 of 6
 
 Server-side token exchange
 
 Why review this now:
-This flow depends on the session model introduced in step 1 and is
-used by the frontend integration reviewed in step 3.
+This group depends on the session model in the primary story and is used by
+the frontend integration in a later supporting story.
 
 What changed:
 The browser no longer owns refresh-token rotation. The authentication
@@ -851,12 +842,12 @@ Active insights:
 
 The user may mark:
 
-- Step reviewed.
-- Change group reviewed.
+- Group reviewed.
 - Needs follow-up.
 - Skipped.
 
-This progress is local in the MVP.
+Progress and notes are keyed by `changeGroupId`; chapter completion is derived
+from its groups. This progress is local in the MVP.
 
 ---
 
@@ -1333,13 +1324,13 @@ The UI should visually distinguish factual metadata from generated interpretatio
 
 ---
 
-# 26. Walkthrough Data Schema
+# 26. Review Data Schema
 
-The top-level walkthrough document should resemble:
+The top-level `ReviewDocument` should resemble:
 
 ```json
 {
-  "schemaVersion": "1.1.0",
+  "schemaVersion": "2.0.0",
   "run": {
     "id": "run_123",
     "createdAt": "2026-08-04T19:00:00Z",
@@ -1366,7 +1357,20 @@ The top-level walkthrough document should resemble:
     "limitations": []
   },
   "changeGroups": [],
-  "walkthrough": [],
+  "stories": [
+    {
+      "id": "story-session",
+      "title": "Move session ownership",
+      "summary": "The session service becomes the owner.",
+      "relationshipToPrimary": "primary",
+      "relationshipRationale": "This is the central behavioral change.",
+      "reviewReason": "Review this boundary before dependent changes.",
+      "changeGroupIds": ["group-session"],
+      "dependsOnStoryIds": []
+    }
+  ],
+  "primaryStoryId": "story-session",
+  "reviewPlan": ["story-session"],
   "graphs": {
     "systemOverview": {
       "nodes": [],
@@ -1388,6 +1392,9 @@ The top-level walkthrough document should resemble:
   "tests": [],
   "reviewThreads": [],
   "reviewInsights": [],
+  "risks": [],
+  "dependencies": [],
+  "unchangedInteractions": [],
   "evidence": []
 }
 ```
@@ -1396,25 +1403,38 @@ The top-level walkthrough document should resemble:
 
 - Versioned using semantic versioning.
 - Validated before display.
-- Backward compatibility for supported schema versions.
+- Schema 2.0 is the only accepted persisted document version.
 - Unknown fields tolerated where safe.
 - Missing required sections rejected.
 - Invalid evidence references surfaced clearly.
 - Original raw agent output preserved for diagnostics.
 
-## 26.2 Walkthrough-step requirements
+## 26.2 Canonical stories and review requirements
 
-The current schema must make review order executable rather than using the
-walkthrough only to sort change groups. Each step includes:
+Schema 2.0 is the only output format for new analysis. `changeGroups` are the
+atomic behavioral inventory: each describes one cohesive before/after intent
+with grounded evidence; a shared file, commit, package, or configuration
+surface alone never justifies combining groups. `stories` are canonical
+chapters over those groups. Exactly one story is primary, every change group is
+owned by exactly one story, and `reviewPlan` contains every story exactly once
+with `primaryStoryId` first. Story dependencies may reference only earlier
+entries in that plan.
 
-- A reason for its position in the review order.
-- A step-specific narrative summary.
-- Dependencies on earlier steps.
-- Evidence, flow-node, test, and review-insight references.
-- Explicit limitations or uncertainty, including an empty list when none is known.
+Stories contain no copied evidence, tests, flow nodes, review insights, or
+step summaries. Those relationships are derived from their associated change
+groups and the shared evidence/test/review/graph collections. Schema 2.0 has
+no persisted walkthrough steps; review progress is keyed by `changeGroupId`
+and story progress is derived. The Review surface contains the story rail and
+the nested Change inventory, while Flows remains the full graph explorer.
 
-All walkthrough documents must use schema 1.1.0. Older schema versions are
-rejected for both new analysis and persisted-run loading.
+`risks`, `dependencies`, and `unchangedInteractions` are required canonical
+arrays (empty when absent), not loose extras. Each item has an id, title,
+detail, at least one group link, and at least one evidence link. Dependency links target only known
+dependency ids and may not be self-referential or cyclic.
+
+Older persisted formats are rejected rather than being normalized or assigned
+invented story semantics. The selectable legacy scan engine is an execution
+engine only; it still emits schema 2.0 documents.
 
 ---
 
@@ -1570,7 +1590,7 @@ PR Atlas/
 │           └── 481/
 │               └── def456/
 │                   └── run-id/
-│                       ├── walkthrough.json
+│                       ├── review.json
 │                       ├── raw-output.txt
 │                       ├── run.json
 │                       ├── logs.jsonl
@@ -1679,7 +1699,7 @@ Target expectations:
 - Cached repository list visible within 1 second.
 - Cached pull-request list visible within 1 second.
 - Pull-request list refresh should provide progressive results.
-- Existing walkthrough should open within 2 seconds.
+- Existing Review document should open within 2 seconds.
 - Large graphs should remain interactive with approximately 200 visible nodes.
 - UI interactions should remain responsive during agent execution.
 - Analysis execution must occur outside the renderer thread.
@@ -1687,7 +1707,7 @@ Target expectations:
 ## 32.2 Reliability
 
 - Agent failure must not corrupt previous runs.
-- Partial output must not replace the last valid walkthrough.
+- Partial output must not replace the last valid Review document.
 - Cancellation must leave the application usable.
 - Database writes should be transactional.
 - Stale state must be determined from the current head SHA.
@@ -1762,7 +1782,7 @@ Examples:
 - Invalid structured output.
 - Process crash.
 
-## 33.4 Walkthrough validation errors
+## 33.4 Review-document validation errors
 
 The application should:
 
@@ -1784,8 +1804,8 @@ Median time from opening a pull request to the reviewer reporting sufficient und
 
 A practical proxy:
 
-- Time from walkthrough open to first evidence-navigation action.
-- Walkthrough completion rate.
+- Time from Review open to first evidence-navigation action.
+- Story and group completion rate.
 - Change groups marked reviewed.
 
 ## 34.2 Additional metrics
@@ -1794,7 +1814,7 @@ A practical proxy:
 - Median analysis duration.
 - Rerun rate.
 - Stale-analysis update rate.
-- Percentage of walkthrough steps opened.
+- Percentage of Review groups opened.
 - Percentage of change groups reviewed.
 - Review insights opened.
 - Exact-code navigation actions.
@@ -1856,11 +1876,11 @@ run separately, but must use the same rubric and case identifiers.
 - Selecting an unprocessed pull request triggers analysis.
 - The user sees current execution stages.
 - The user can cancel analysis.
-- At least one supported agent can complete the walkthrough.
+- At least one supported agent can complete the Review document.
 - Agent output is validated against a versioned schema.
 - Failed output does not replace a valid previous run.
 
-## Walkthrough
+## Review
 
 - The application displays an overview.
 - The application displays logical change groups.
@@ -1870,8 +1890,9 @@ run separately, but must use the same rubric and case identifiers.
 - Every important generated section includes evidence links where available.
 - The Overview displays behavioral changes, architectural impact, limitations,
   review activity, test coverage, and the actual recommended review order.
-- Walkthrough steps display their ordering reason, dependencies, linked flows,
-  tests, insights, evidence, and limitations.
+- Story chapters display their relationship, review reason, dependencies, and
+  derived completion; the selected Change inventory group displays linked
+  flows, tests, insights, evidence, risks, and unchanged interactions.
 - Review progress, follow-up state, skipped state, and notes persist per analysis
   run and remain isolated between historical runs.
 - Evidence opens in a read-only in-application source and diff view before the
@@ -1892,7 +1913,7 @@ run separately, but must use the same rubric and case identifiers.
 - The user can rerun analysis for the same head SHA.
 - Historical runs remain available.
 - A head-SHA change marks prior analysis as outdated.
-- The user can update the walkthrough for the new head SHA.
+- The user can update the Review document for the new head SHA.
 - The application never silently labels stale analysis as current.
 - Failed, invalid, and cancelled runs expose sanitized diagnostics, last
   progress, logs, and same-provider or alternate-provider retry actions.
@@ -1913,12 +1934,12 @@ Goals:
 - Validate review-thread retrieval.
 - Validate isolated worktree flow.
 - Validate one agent runtime.
-- Convert the walkthrough skill to structured JSON.
+- Convert the review-analysis skill to structured JSON.
 - Validate schema generation on real pull requests.
 
 Deliverable:
 
-A CLI prototype that accepts a repository and pull-request number and produces valid `walkthrough.json`.
+A CLI prototype that accepts a repository and pull-request number and produces valid `review.json`.
 
 ## Phase 1: Desktop foundation
 
@@ -1951,15 +1972,14 @@ Goals:
 
 Deliverable:
 
-A user can select an unprocessed pull request and receive a validated walkthrough.
+A user can select an unprocessed pull request and receive a validated Review document.
 
-## Phase 3: Walkthrough experience
+## Phase 3: Review experience
 
 Goals:
 
 - Overview.
-- Guided walkthrough.
-- Change groups.
+- Primary-first story rail and nested Change inventory.
 - Evidence drawer.
 - Files.
 - Tests.

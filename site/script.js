@@ -44,7 +44,7 @@
       icon: '✓',
       title: 'Trust the shape before you trust the summary.',
       body: 'PR Atlas validates schema version, pull-request identity, base/head SHAs, evidence paths, graph relationships, and review-thread coverage before saving.',
-      code: 'walkthrough.json · valid',
+      code: 'review.json · valid',
     },
     {
       type: 'REVIEW',

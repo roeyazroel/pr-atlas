@@ -79,6 +79,32 @@ describe("analysis request validation", () => {
     }
   });
 
+  it("strips stale Cursor effort before the service persists a manifest", () => {
+    const result = validateAnalysisRequest({
+      ...validRequest(),
+      provider: "cursor",
+      model: "gpt-5.6-sol-high",
+      effort: "high",
+    });
+
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.value.model).toBe("gpt-5.6-sol-high");
+      expect(result.value).not.toHaveProperty("effort");
+    }
+  });
+
+  it("still rejects malformed Cursor effort values at the validation boundary", () => {
+    const result = validateAnalysisRequest({
+      ...validRequest(),
+      provider: "cursor",
+      effort: "unbounded",
+    });
+
+    expect(result.valid).toBe(false);
+    if (!result.valid) expect(result.error.code).toBe("INVALID_EFFORT");
+  });
+
   it("rejects unsafe or oversized model and supplemental prompt values", () => {
     expect(
       validateAnalysisRequest({
@@ -142,6 +168,19 @@ describe("analysis request validation", () => {
         },
       }).valid,
     ).toBe(false);
+  });
+
+  it("defaults persisted pre-scan-engine configurations to the coordinator and accepts legacy explicitly", () => {
+    const oldConfig = {
+      depth: "standard" as const,
+      includeReviewComments: true,
+      maxGraphNodes: 80,
+      timeoutMinutes: 20,
+    };
+    const old = validateAnalysisRequest({ ...validRequest(), config: oldConfig });
+    expect(old).toMatchObject({ valid: true, value: { config: { ...oldConfig, scanMode: "coordinator" } } });
+    expect(validateAnalysisRequest({ ...validRequest(), config: { ...oldConfig, scanMode: "legacy" } })).toMatchObject({ valid: true, value: { config: { scanMode: "legacy" } } });
+    expect(validateAnalysisRequest({ ...validRequest(), config: { ...oldConfig, scanMode: "unsupported" } }).valid).toBe(false);
   });
 });
 

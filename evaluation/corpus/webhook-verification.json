@@ -19,6 +19,7 @@
     "threadStates": { "thread-status": "active", "thread-message": "disputed" }
   },
   "actual": {
+    "schemaVersion": "2.0.0",
     "summary": {
       "intent": "Preserve actionable webhook signature errors at the verification boundary.",
       "behavioralChanges": ["Invalid signatures retain a stable status and reason."],
@@ -30,15 +31,18 @@
       { "id": "error-contract", "title": "Error contract", "summary": "Returns an actionable error status instead of a generic failure.", "evidenceIds": ["ev-errors"] },
       { "id": "regression-tests", "title": "Regression tests", "summary": "Covers invalid signatures and expired timestamps.", "evidenceIds": ["ev-tests"] }
     ],
-    "walkthrough": [
-      { "id": "step-1", "changeGroupId": "verification-boundary", "evidenceIds": ["ev-verify"] },
-      { "id": "step-2", "changeGroupId": "error-contract", "evidenceIds": ["ev-errors"] },
-      { "id": "step-3", "changeGroupId": "regression-tests", "evidenceIds": ["ev-tests"] }
+    "stories": [
+      { "id": "story-verification", "title": "Verification boundary", "summary": "Review raw-body verification.", "relationshipToPrimary": "primary", "relationshipRationale": "It is the central behavioral boundary.", "reviewReason": "Review verification before error behavior.", "changeGroupIds": ["verification-boundary"], "dependsOnStoryIds": [] },
+      { "id": "story-errors", "title": "Error contract", "summary": "Review the returned error contract.", "relationshipToPrimary": "supporting", "relationshipRationale": "It follows verification behavior.", "reviewReason": "Review the error outcome after verification.", "changeGroupIds": ["error-contract"], "dependsOnStoryIds": ["story-verification"] },
+      { "id": "story-tests", "title": "Regression tests", "summary": "Review the guarded verification cases.", "relationshipToPrimary": "supporting", "relationshipRationale": "It proves the boundary and contract.", "reviewReason": "Review regression coverage last.", "changeGroupIds": ["regression-tests"], "dependsOnStoryIds": ["story-errors"] }
     ],
+    "primaryStoryId": "story-verification",
+    "reviewPlan": ["story-verification", "story-errors", "story-tests"],
     "graphs": { "userAction": { "id": "user-action", "edges": [{ "source": "request", "target": "verifier", "label": "passes raw body" }] } },
     "tests": [{ "id": "test-expiry", "title": "Expired timestamp", "behavior": "Rejects an expired webhook timestamp.", "status": "covered", "changeGroupIds": ["regression-tests"], "evidenceIds": ["ev-tests"] }],
     "reviewThreads": [{ "id": "thread-status", "status": "active", "evidenceIds": ["ev-errors"] }, { "id": "thread-message", "status": "disputed", "evidenceIds": ["ev-errors"] }],
     "reviewInsights": [{ "id": "insight-errors", "status": "disputed", "reviewThreadIds": ["thread-status", "thread-message"], "evidenceIds": ["ev-errors"] }],
+    "risks": [], "dependencies": [], "unchangedInteractions": [],
     "evidence": [
       { "id": "ev-verify", "path": "api/webhooks/verify.ts" },
       { "id": "ev-errors", "path": "api/webhooks/errors.ts" },

@@ -17,7 +17,6 @@ import {
   GitPullRequestArrow,
   History,
   LayoutList,
-  ListFilter,
   Loader2,
   MessageSquare,
   Network,
@@ -30,7 +29,6 @@ import {
   Square,
   TestTube2,
   UserRound,
-  Users,
   Workflow,
   X,
 } from "lucide-react";
@@ -41,7 +39,6 @@ import {
   Evidence,
   Flow,
   FlowEdge,
-  FlowNode,
   PullRequest,
   PRStatus,
   Repository,
@@ -49,10 +46,20 @@ import {
   ReviewReply,
   ReviewState,
   ReviewThread,
+  ReviewStory,
   TestMapping,
 } from "./types";
+import {
+  buildRecommendedReviewOrder,
+  buildReviewArchitecture,
+  buildReviewStoriesForPullRequest,
+  deriveReviewFlowTraces,
+} from "./review-ui";
 import RichThreadsView from "./components/ThreadsView";
 import SelectMenu from "./components/SelectMenu";
+import LoggingView from "./components/LoggingView";
+import KeyboardShortcutsView from "./components/KeyboardShortcutsView";
+import { hasPrimaryModifier, isTypingTarget } from "./keyboard-shortcuts";
 import {
   AGENT_PROVIDER_PRIORITY,
   DEFAULT_ANALYSIS_RUN_CONFIG,
@@ -62,6 +69,7 @@ import {
   type AnalysisEffort,
   type AnalysisProgressEvent,
   type AnalysisDiagnostics,
+  type AnalysisDiagnosticEvent,
   type AnalysisRunConfig,
   type AnalysisRunResult,
   type AnalysisRunSummary,
@@ -69,7 +77,6 @@ import {
   type EvidenceDetail,
   type Graph as ContractGraph,
   type GraphEdge,
-  type GraphNode,
   type PullRequestComment,
   type PullRequestDTO,
   type RepositoryDTO,
@@ -78,13 +85,12 @@ import {
   type RunRetentionSettings,
   type UpdateCheckResult,
   type UpdateDownloadProgress,
-  type WalkthroughDocument,
+  type ReviewDocument,
 } from "../shared/contracts";
 
 type View =
   | "overview"
-  | "walkthrough"
-  | "groups"
+  | "review"
   | "insights"
   | "flows"
   | "files"
@@ -120,6 +126,13 @@ const reviewKey = (prId: string, groupId: string) => `${prId}:${groupId}`;
 const MIN_GRAPH_ZOOM = 25;
 const LARGE_PR_FILE_THRESHOLD = 20;
 const LARGE_PR_CHANGE_THRESHOLD = 1_000;
+const COORDINATOR_EXCLUSIVE_PROGRESS_STAGES = new Set<AnalysisProgressEvent["stage"]>([
+  "anchoring",
+  "review",
+  "tests-risks",
+  "flows",
+  "assembling",
+]);
 
 export type EvidenceCodeLineKind =
   | "context"
@@ -498,8 +511,7 @@ const statusMeta: Record<PRStatus, { label: string; tone: string }> = {
 
 const viewItems: { id: View; label: string; icon: typeof LayoutList }[] = [
   { id: "overview", label: "Overview", icon: LayoutList },
-  { id: "walkthrough", label: "Walkthrough", icon: Sparkles },
-  { id: "groups", label: "Change groups", icon: GitPullRequestArrow },
+  { id: "review", label: "Review", icon: Sparkles },
   { id: "insights", label: "Insights", icon: AlertCircle },
   { id: "flows", label: "Flows", icon: Network },
   { id: "files", label: "Files", icon: Files },
@@ -580,7 +592,6 @@ const THEME_STORAGE_KEY = "atlas:theme";
 const PROVIDER_STORAGE_KEY = "atlas:provider";
 const MODEL_STORAGE_KEY = "atlas:provider-models";
 const EFFORT_STORAGE_KEY = "atlas:provider-efforts";
-const CUSTOM_PROMPT_STORAGE_KEY = "atlas:custom-prompt";
 const ANALYSIS_CONFIG_STORAGE_KEY = "atlas:analysis-config";
 const providerDefaults: Record<AgentProvider, string> = {
   claude: "Claude Code",
@@ -592,9 +603,11 @@ const themeModes: { value: ThemeMode; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ];
-const providerEfforts: Record<AgentProvider, readonly AnalysisEffort[]> = {
+const providerEfforts: Record<
+  Exclude<AgentProvider, "cursor">,
+  readonly AnalysisEffort[]
+> = {
   codex: ["low", "medium", "high", "xhigh", "max"],
-  cursor: ["low", "medium", "high", "xhigh", "max"],
   claude: ["low", "medium", "high", "xhigh", "max"],
 };
 const effortLabels: Record<AnalysisEffort, string> = {
@@ -651,22 +664,25 @@ function readProviderPreference(): AgentProvider | null {
 }
 
 function readEffortPreferences(): Partial<
-  Record<AgentProvider, AnalysisEffort>
+  Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>
 > {
   const raw = readStored<unknown>(EFFORT_STORAGE_KEY, {});
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const stored = raw as Record<string, unknown>;
-  return AGENT_PROVIDER_PRIORITY.reduce<
-    Partial<Record<AgentProvider, AnalysisEffort>>
-  >((preferences, provider) => {
-    const effort = stored[provider];
-    if (
-      typeof effort === "string" &&
-      providerEfforts[provider].includes(effort as AnalysisEffort)
-    )
-      preferences[provider] = effort as AnalysisEffort;
-    return preferences;
-  }, {});
+  return (
+    Object.keys(providerEfforts) as Array<keyof typeof providerEfforts>
+  ).reduce<Partial<Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>>>(
+    (preferences, provider) => {
+      const effort = stored[provider];
+      if (
+        typeof effort === "string" &&
+        providerEfforts[provider].includes(effort as AnalysisEffort)
+      )
+        preferences[provider] = effort as AnalysisEffort;
+      return preferences;
+    },
+    {},
+  );
 }
 
 function providerLabel(provider: string | undefined): string {
@@ -811,8 +827,8 @@ function mapGraph(contract: ContractGraph | undefined, fallback: Flow): Flow {
   };
 }
 
-export function mapWalkthroughDocument(
-  document: WalkthroughDocument,
+export function mapReviewDocument(
+  document: ReviewDocument,
   pr: PullRequest,
   provider?: string,
 ): PullRequest {
@@ -883,16 +899,26 @@ export function mapWalkthroughDocument(
       evidenceIds: ids,
     };
   });
-  const order = new Map(
-    safeArray(document.walkthrough).map((raw, index) => {
-      const item = objectValue(raw);
-      return [safeString(item.changeGroupId), index];
-    }),
+  const reviewArchitecture = buildReviewArchitecture(document);
+  const reviewStories: ReviewStory[] = reviewArchitecture.stories.map((story) => ({
+    id: story.id,
+    title: story.title,
+    summary: story.summary,
+    relationshipToPrimary: story.relationshipToPrimary,
+    relationshipRationale: story.relationshipRationale,
+    reviewReason: story.reviewReason,
+    changeGroupIds: story.changeGroupIds,
+    dependsOnStoryIds: story.dependsOnStoryIds,
+  }));
+  const storyOrder = new Map(
+    reviewArchitecture.stories.flatMap((story, storyIndex) =>
+      story.changeGroupIds.map((groupId, groupIndex) => [groupId, storyIndex * 1000 + groupIndex] as const),
+    ),
   );
   rawGroups.sort(
     (a, b) =>
-      (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
-      (order.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+      (storyOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (storyOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER),
   );
   const graphs = document.graphs ?? {};
   const flows = (
@@ -1109,6 +1135,17 @@ export function mapWalkthroughDocument(
     ),
     analysisProvenance,
     walkthrough: document,
+    ...(reviewStories.length ? { stories: reviewStories } : {}),
+    ...(reviewArchitecture.primaryStoryId
+      ? { primaryStoryId: reviewArchitecture.primaryStoryId }
+      : {}),
+    ...(safeArray(objectValue(document).reviewPlan).length
+      ? {
+          reviewPlan: safeArray(objectValue(document).reviewPlan).filter(
+            (item): item is string => typeof item === "string",
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1149,6 +1186,14 @@ function readStored<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+function readAnalysisConfig(): AnalysisRunConfig {
+  const saved = readStored<Partial<AnalysisRunConfig>>(ANALYSIS_CONFIG_STORAGE_KEY, {});
+  return {
+    ...DEFAULT_ANALYSIS_RUN_CONFIG,
+    ...saved,
+    scanMode: saved.scanMode === "legacy" ? "legacy" : "coordinator",
+  };
 }
 
 function StatusPill({ status }: { status: PRStatus }) {
@@ -1275,7 +1320,9 @@ function App() {
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
+    diagnosticEvents?: AnalysisDiagnosticEvent[];
   } | null>(null);
   const [analysisDone, setAnalysisDone] = useState<Record<string, boolean>>({});
   const [account, setAccount] = useState<AccountState>({
@@ -1291,7 +1338,7 @@ function App() {
     Record<string, AnalysisRunSummary[]>
   >({});
   const [liveDocuments, setLiveDocuments] = useState<
-    Record<string, WalkthroughDocument>
+    Record<string, ReviewDocument>
   >({});
   const [commentResources, setCommentResources] = useState<
     Record<string, CommentResource>
@@ -1304,6 +1351,8 @@ function App() {
   const [liveError, setLiveError] = useState<string | null>(null);
   const [confirmLiveAnalysis, setConfirmLiveAnalysis] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loggingOpen, setLoggingOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState("");
   const [analysisStatus, setAnalysisStatus] = useState<PRStatus | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readThemeMode);
@@ -1314,6 +1363,8 @@ function App() {
   const [providers, setProviders] = useState<AgentInstallationStatus[]>([]);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const providerStatusesRef = useRef<AgentInstallationStatus[]>([]);
+  const providerLoadRef = useRef<Promise<AgentInstallationStatus[]> | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
   const [updateDownloadState, setUpdateDownloadState] =
     useState<UpdateDownloadState>("idle");
@@ -1329,17 +1380,13 @@ function App() {
     Partial<Record<AgentProvider, string>>
   >(() => readStored(MODEL_STORAGE_KEY, {}));
   const [selectedEfforts, setSelectedEfforts] = useState<
-    Partial<Record<AgentProvider, AnalysisEffort>>
+    Partial<Record<Exclude<AgentProvider, "cursor">, AnalysisEffort>>
   >(readEffortPreferences);
-  const [customPrompt, setCustomPrompt] = useState(() =>
-    readStored(CUSTOM_PROMPT_STORAGE_KEY, ""),
-  );
-  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(() =>
-    readStored(ANALYSIS_CONFIG_STORAGE_KEY, DEFAULT_ANALYSIS_RUN_CONFIG),
-  );
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [analysisConfig, setAnalysisConfig] = useState<AnalysisRunConfig>(readAnalysisConfig);
   const [retentionSettings, setRetentionSettings] =
     useState<RunRetentionSettings>(DEFAULT_RETENTION_SETTINGS);
-  const [stepProgress, setStepProgress] = useState<
+  const [reviewProgress, setReviewProgress] = useState<
     Record<string, ReviewProgress>
   >({});
   const [evidenceDetail, setEvidenceDetail] = useState<EvidenceDetail | null>(
@@ -1347,6 +1394,8 @@ function App() {
   );
   const evidenceDrawerRef = useRef<HTMLElement>(null);
   const [analysisDiagnostics, setAnalysisDiagnostics] =
+    useState<AnalysisDiagnostics | null>(null);
+  const [analysisLogDiagnostics, setAnalysisLogDiagnostics] =
     useState<AnalysisDiagnostics | null>(null);
   const [diagnosticExportMessage, setDiagnosticExportMessage] = useState("");
   const selectedProviderStatus = providers.find(
@@ -1390,12 +1439,6 @@ function App() {
   }, [selectedEfforts]);
   useEffect(() => {
     localStorage.setItem(
-      CUSTOM_PROMPT_STORAGE_KEY,
-      JSON.stringify(customPrompt),
-    );
-  }, [customPrompt]);
-  useEffect(() => {
-    localStorage.setItem(
       ANALYSIS_CONFIG_STORAGE_KEY,
       JSON.stringify(analysisConfig),
     );
@@ -1416,6 +1459,8 @@ function App() {
       if (confirmLiveAnalysis) setConfirmLiveAnalysis(false);
       setEvidenceDetail(null);
       setSettingsOpen(false);
+      setLoggingOpen(false);
+      setShortcutsOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
@@ -1423,7 +1468,7 @@ function App() {
       document.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [confirmLiveAnalysis, evidenceDetail, settingsOpen]);
+  }, [confirmLiveAnalysis, evidenceDetail, settingsOpen, loggingOpen, shortcutsOpen]);
   useEffect(() => {
     if (!api?.getRetentionSettings) return;
     void api
@@ -1474,11 +1519,29 @@ function App() {
     const priority = new Map(
       AGENT_PROVIDER_PRIORITY.map((provider, index) => [provider, index]),
     );
-    const orderedStatuses = [...statuses].sort(
+    const previousByProvider = new Map(
+      providerStatusesRef.current.map((status) => [status.provider, status]),
+    );
+    const orderedStatuses = statuses.map((status) => {
+      const previous = previousByProvider.get(status.provider);
+      // Model discovery is a convenience command exposed by external CLIs.
+      // Keep a known-good list through a transient empty response while the
+      // provider itself is still installed, instead of making the selector
+      // disappear after it has already been usable.
+      if (
+        status.installed &&
+        !status.models?.length &&
+        previous?.installed &&
+        previous.models?.length
+      )
+        return { ...status, models: previous.models };
+      return status;
+    }).sort(
       (left, right) =>
         (priority.get(left.provider) ?? Number.MAX_SAFE_INTEGER) -
         (priority.get(right.provider) ?? Number.MAX_SAFE_INTEGER),
     );
+    providerStatusesRef.current = orderedStatuses;
     setProviders(orderedStatuses);
     setProviderError(null);
     setSelectedModels((current) => {
@@ -1509,9 +1572,11 @@ function App() {
   };
   const loadProviders = () => {
     const currentApi = api;
-    if (!currentApi) return;
+    if (!currentApi || providerLoadRef.current) return;
     setProvidersLoading(true);
-    void currentApi.listProviders!()
+    const load = currentApi.listProviders!();
+    providerLoadRef.current = load;
+    void load
       .then(applyProviderStatuses)
       .catch((error: unknown) =>
         setProviderError(
@@ -1520,7 +1585,11 @@ function App() {
             : "Could not detect analysis providers.",
         ),
       )
-      .finally(() => setProvidersLoading(false));
+      .finally(() => {
+        if (providerLoadRef.current !== load) return;
+        providerLoadRef.current = null;
+        setProvidersLoading(false);
+      });
   };
   useEffect(() => {
     if (!api) return;
@@ -1604,6 +1673,10 @@ function App() {
               stage:
                 event.stage === "complete"
                   ? analysisStages.length - 1
+                  : ["anchoring", "review", "tests-risks", "flows"].includes(event.stage)
+                    ? 3
+                    : event.stage === "assembling"
+                      ? 4
                   : Math.max(
                       0,
                       [
@@ -1713,7 +1786,6 @@ function App() {
                   provider: run.provider,
                   model: run.model ?? "Tool default",
                   schemaVersion: run.schemaVersion,
-                  skillVersion: run.skillContractVersion,
                   statusLabel: run.error?.message,
                 })) as PullRequest["history"],
               };
@@ -1729,7 +1801,7 @@ function App() {
                     [pr.id]: result.document!,
                   }));
                   next = {
-                    ...mapWalkthroughDocument(
+                    ...mapReviewDocument(
                       result.document,
                       next,
                       currentReady?.provider,
@@ -1822,7 +1894,7 @@ function App() {
   const selectedPR = !baseSelectedPR
     ? null
     : liveDocument
-      ? mapWalkthroughDocument(
+      ? mapReviewDocument(
           liveDocument,
           baseSelectedPR,
           baseSelectedPR.analysisProvenance,
@@ -1840,6 +1912,10 @@ function App() {
             tests: fixtureReadyPR.tests,
             threads: fixtureReadyPR.threads,
             evidence: fixtureReadyPR.evidence,
+            walkthrough: fixtureReadyPR.walkthrough,
+            stories: fixtureReadyPR.stories,
+            primaryStoryId: fixtureReadyPR.primaryStoryId,
+            reviewPlan: fixtureReadyPR.reviewPlan,
             history: [
               ...baseSelectedPR.history,
               {
@@ -1861,6 +1937,17 @@ function App() {
   const selectedCommentReload = selectedPR
     ? (commentReloads[selectedPR.id] ?? 0)
     : 0;
+  const loggingEvents = useMemo<AnalysisDiagnosticEvent[]>(() => {
+    const persisted = analysisLogDiagnostics?.events ?? [];
+    const current = analysis?.id === selectedPR?.id ? (analysis?.diagnosticEvents ?? []) : [];
+    const unique = new Map<string, AnalysisDiagnosticEvent>();
+    for (const event of [...persisted, ...current])
+      unique.set(
+        `${event.timestamp}:${event.level}:${event.event}:${event.runId ?? ""}:${event.provider ?? ""}:${event.taskId ?? ""}:${event.message}`,
+        event,
+      );
+    return [...unique.values()].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  }, [analysis, analysisLogDiagnostics?.events, selectedPR?.id]);
 
   useEffect(() => {
     if (
@@ -2033,10 +2120,12 @@ function App() {
       )
       .then((items) => {
         if (!cancelled)
-          setStepProgress((current) => ({
+          setReviewProgress((current) => ({
             ...current,
-            ...Object.fromEntries(
-              items.map((item) => [`${item.runId}:${item.stepId}`, item]),
+              ...Object.fromEntries(
+              items.map((item) => {
+                return [`${item.runId}:${item.changeGroupId}`, item];
+              }),
             ),
           }));
       })
@@ -2088,6 +2177,47 @@ function App() {
   ]);
 
   useEffect(() => {
+    const currentRun = analysis?.id === selectedPR?.id && !analysis?.running
+      ? analysis?.runId
+      : undefined;
+    const latestRun = selectedPR ? liveRuns[selectedPR.id]?.[0]?.runId : undefined;
+    const runId = currentRun ?? latestRun;
+    if (
+      !api?.loadAnalysisDiagnostics ||
+      !selectedPR ||
+      selectedPR.source !== "github" ||
+      !selectedPR.repositoryFullName ||
+      !runId ||
+      analysis?.running
+    ) {
+      setAnalysisLogDiagnostics(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .loadAnalysisDiagnostics(selectedPR.repositoryFullName, selectedPR.number, runId)
+      .then((diagnostics) => {
+        if (!cancelled) setAnalysisLogDiagnostics(diagnostics);
+      })
+      .catch(() => {
+        if (!cancelled) setAnalysisLogDiagnostics(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    analysis?.id,
+    analysis?.runId,
+    analysis?.running,
+    liveRuns,
+    selectedPR?.id,
+    selectedPR?.number,
+    selectedPR?.repositoryFullName,
+    selectedPR?.source,
+  ]);
+
+  useEffect(() => {
     if (selectedPR && selectedPR.repositoryId !== selectedRepo)
       setSelectedId(repoPRs[0]?.id ?? pullRequests[0].id);
   }, [selectedRepo]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2111,7 +2241,7 @@ function App() {
       return;
     }
     setConfirmLiveAnalysis(false);
-    setView("walkthrough");
+    setView("review");
     setAnalysisMessage(
       `Preparing ${selectedProviderStatus.displayName} analysis…`,
     );
@@ -2123,12 +2253,12 @@ function App() {
       startedAt: Date.now(),
       live: true,
       provider,
+      scanMode: analysisConfig.scanMode,
       activity: [],
     });
     let result: AnalysisRunResult;
     try {
       const model = selectedModels[provider];
-      const effort = selectedEfforts[provider] ?? DEFAULT_ANALYSIS_EFFORT;
       const supplemental = customPrompt.trim();
       result = await api.startAnalysis({
         repository: selectedPR.repositoryFullName,
@@ -2138,7 +2268,12 @@ function App() {
         provider,
         config: analysisConfig,
         ...(model ? { model } : {}),
-        effort,
+        ...(provider === "cursor"
+          ? {}
+          : {
+              effort:
+                selectedEfforts[provider] ?? DEFAULT_ANALYSIS_EFFORT,
+            }),
         ...(supplemental ? { customPrompt: supplemental } : {}),
       });
     } catch (error) {
@@ -2159,6 +2294,7 @@ function App() {
             running: false,
             stage: analysisStages.length - 1,
             provider,
+            diagnosticEvents: result.diagnosticEvents,
           }
         : current,
     );
@@ -2184,7 +2320,7 @@ function App() {
           (pr) =>
             pr.id === selectedPR.id
               ? {
-                  ...mapWalkthroughDocument(
+                  ...mapReviewDocument(
                     result.document!,
                     pr,
                     result.manifest.provider,
@@ -2205,7 +2341,6 @@ function App() {
                         result.document!.run.model ??
                         "Tool default",
                       schemaVersion: result.manifest.schemaVersion,
-                      skillVersion: result.manifest.skillContractVersion,
                     },
                     ...pr.history,
                   ],
@@ -2247,7 +2382,6 @@ function App() {
                       provider: result.manifest.provider,
                       model: result.manifest.model ?? "Tool default",
                       schemaVersion: result.manifest.schemaVersion,
-                      skillVersion: result.manifest.skillContractVersion,
                       statusLabel: result.error?.message,
                     },
                     ...pr.history.filter((run) => run.id !== result.runId),
@@ -2277,7 +2411,7 @@ function App() {
       setConfirmLiveAnalysis(true);
       return;
     }
-    setView("walkthrough");
+    setView("review");
     setAnalysis({
       id: selectedPR.id,
       stage: 0,
@@ -2442,7 +2576,7 @@ function App() {
         (pr) =>
           pr.id === selectedPR.id
             ? {
-                ...mapWalkthroughDocument(
+                ...mapReviewDocument(
                   result.document!,
                   pr,
                   summary.provider,
@@ -2573,8 +2707,8 @@ function App() {
         evidenceLine,
       );
   };
-  const updateStepProgress = (
-    stepId: string,
+  const updateGroupProgress = (
+    changeGroupId: string,
     status: ReviewProgressStatus,
     note: string,
   ) => {
@@ -2582,14 +2716,14 @@ function App() {
     if (!selectedPR || !runId) return;
     const progress: ReviewProgress = {
       runId,
-      stepId,
+      changeGroupId,
       status,
       note,
       updatedAt: new Date().toISOString(),
     };
-    setStepProgress((current) => ({
+    setReviewProgress((current) => ({
       ...current,
-      [`${runId}:${stepId}`]: progress,
+      [`${runId}:${changeGroupId}`]: progress,
     }));
     if (
       api?.setReviewProgress &&
@@ -2604,9 +2738,9 @@ function App() {
         )
         .then((saved) => {
           if (saved)
-            setStepProgress((current) => ({
+            setReviewProgress((current) => ({
               ...current,
-              [`${saved.runId}:${saved.stepId}`]: saved,
+              [`${saved.runId}:${saved.changeGroupId}`]: saved,
             }));
         });
   };
@@ -2643,8 +2777,131 @@ function App() {
     setReviewed((current) => {
       if (!selectedPR) return current;
       const key = reviewKey(selectedPR.id, group.id);
-      return { ...current, [key]: !current[key] };
+      return { ...current, [key]: true };
     });
+
+  const openUtilityPage = (page: "settings" | "logging" | "shortcuts") => {
+    setSettingsOpen(page === "settings");
+    setLoggingOpen(page === "logging");
+    setShortcutsOpen(page === "shortcuts");
+  };
+
+  const selectAdjacentPullRequest = (delta: number) => {
+    if (!visiblePRs.length) return;
+    const currentIndex = visiblePRs.findIndex((pr) => pr.id === selectedId);
+    const fallbackIndex = currentIndex < 0 ? 0 : currentIndex;
+    const nextIndex = Math.min(
+      visiblePRs.length - 1,
+      Math.max(0, fallbackIndex + delta),
+    );
+    const next = visiblePRs[nextIndex];
+    if (next && next.id !== selectedId) setSelectedId(next.id);
+  };
+
+  useEffect(() => {
+    const viewByDigit: Record<string, View> = {
+      "1": "overview",
+      "2": "review",
+      "3": "insights",
+      "4": "flows",
+      "5": "files",
+      "6": "tests",
+      "7": "threads",
+      "8": "details",
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const mod = hasPrimaryModifier(event);
+      const utilityOpen = settingsOpen || loggingOpen || shortcutsOpen;
+
+      if (event.key === "?" && !mod && !event.altKey && !event.metaKey && !event.ctrlKey) {
+        if (isTypingTarget(event.target)) return;
+        event.preventDefault();
+        if (shortcutsOpen) setShortcutsOpen(false);
+        else openUtilityPage("shortcuts");
+        return;
+      }
+
+      if (isTypingTarget(event.target)) return;
+      if (event.altKey) return;
+
+      if (!mod && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key === ",") {
+        event.preventDefault();
+        if (settingsOpen) setSettingsOpen(false);
+        else openUtilityPage("settings");
+        return;
+      }
+
+      if (
+        !mod &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "l"
+      ) {
+        event.preventDefault();
+        if (loggingOpen) setLoggingOpen(false);
+        else openUtilityPage("logging");
+        return;
+      }
+
+      if (mod && event.key >= "1" && event.key <= "8") {
+        const nextView = viewByDigit[event.key];
+        if (!nextView) return;
+        event.preventDefault();
+        setShortcutsOpen(false);
+        setSettingsOpen(false);
+        setLoggingOpen(false);
+        setView(nextView);
+        return;
+      }
+
+      if (utilityOpen || confirmLiveAnalysis) return;
+      if (event.metaKey || event.ctrlKey) return;
+
+      if (event.key === "/" && view !== "flows") {
+        event.preventDefault();
+        document
+          .querySelector<HTMLInputElement>('[aria-label="Search pull requests"]')
+          ?.focus();
+        return;
+      }
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        selectAdjacentPullRequest(1);
+        return;
+      }
+
+      if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        selectAdjacentPullRequest(-1);
+        return;
+      }
+
+      if (
+        !event.shiftKey &&
+        event.key.toLowerCase() === "a" &&
+        canStartSelectedAnalysis &&
+        !activeAnalysis?.running
+      ) {
+        event.preventDefault();
+        startAnalysis();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    activeAnalysis?.running,
+    canStartSelectedAnalysis,
+    confirmLiveAnalysis,
+    loggingOpen,
+    selectedId,
+    settingsOpen,
+    shortcutsOpen,
+    startAnalysis,
+    view,
+    visiblePRs,
+  ]);
 
   return (
     <div className="app-shell" data-theme={resolvedTheme}>
@@ -2720,16 +2977,24 @@ function App() {
                 Model: <code>{selectedModels[selectedProvider]}</code>
               </p>
             )}
-            <p className="confirm-detail">
-              Thinking effort: {" "}
-              <code>
-                {effortLabels[
-                  selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT
-                ]}
-              </code>
-            </p>
+            {selectedProvider === "cursor" ? (
+              <p className="confirm-detail">
+                The selected Cursor model includes the thinking effort; no
+                separate effort setting is sent.
+              </p>
+            ) : (
+              <p className="confirm-detail">
+                Thinking effort: {" "}
+                <code>
+                  {effortLabels[
+                    selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT
+                  ]}
+                </code>
+              </p>
+            )}
             <p className="confirm-detail">
               {analysisConfig.depth} depth ·{" "}
+              {analysisConfig.scanMode === "coordinator" ? "coordinator engine" : "legacy batching engine"} ·{" "}
               {analysisConfig.includeReviewComments
                 ? "review comments included"
                 : "review comments excluded"}{" "}
@@ -2954,25 +3219,65 @@ function App() {
                 )}
               </div>
             )}
-            <button className="help-button">
-              <CircleHelp size={14} /> Keyboard shortcuts
-            </button>
-            <button
-              className={`workspace-settings-link ${settingsOpen ? "active" : ""}`}
-              aria-label="Open settings"
-              onClick={() => setSettingsOpen((open) => !open)}
-            >
-              <Settings size={14} /> Workspace settings
-            </button>
+            <div className="sidebar-utilities" aria-label="Workspace utilities">
+              <button
+                className={`sidebar-utility-button help-button ${shortcutsOpen ? "active" : ""}`}
+                aria-label="Open keyboard shortcuts"
+                aria-pressed={shortcutsOpen}
+                onClick={() => {
+                  if (shortcutsOpen) setShortcutsOpen(false);
+                  else openUtilityPage("shortcuts");
+                }}
+              >
+                <CircleHelp size={14} /> Keyboard shortcuts <kbd>?</kbd>
+              </button>
+              <button
+                className={`sidebar-utility-button ${loggingOpen ? "active" : ""}`}
+                aria-label="Open activity log"
+                onClick={() => {
+                  if (loggingOpen) setLoggingOpen(false);
+                  else openUtilityPage("logging");
+                }}
+              >
+                <Activity size={14} /> Activity log
+                {(loggingEvents.length + (analysis?.id === selectedPR?.id ? (analysis?.activity.length ?? 0) : 0)) > 0 && <span className="utility-count">{loggingEvents.length + (analysis?.id === selectedPR?.id ? (analysis?.activity.length ?? 0) : 0)}</span>}
+              </button>
+              <button
+                className={`sidebar-utility-button workspace-settings-link ${settingsOpen ? "active" : ""}`}
+                aria-label="Open settings"
+                onClick={() => {
+                  if (settingsOpen) setSettingsOpen(false);
+                  else openUtilityPage("settings");
+                }}
+              >
+                <Settings size={14} /> Settings
+              </button>
+            </div>
           </div>
         </aside>
 
-        {settingsOpen ? <main className="settings-page" aria-labelledby="workspace-settings-title">
-          <header className="settings-page-header"><div><div className="eyebrow">Workspace</div><h1 id="workspace-settings-title">Workspace settings</h1><p>Choose the provider, model, and thinking budget for every analysis run. Changes save locally and apply to the next scan.</p></div><button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button></header>
-          <div className="settings-page-grid">
-            <section className="settings-panel"><div className="settings-panel-heading"><div><div className="eyebrow">Appearance</div><h2>Interface</h2></div></div><fieldset className="theme-fieldset"><legend>Theme</legend><div className="theme-options">{themeModes.map(({ value, label }) => <label className="theme-option" key={value}><input type="radio" name="theme-mode" value={value} checked={themeMode === value} onChange={() => chooseTheme(value)} /><span>{label}</span></label>)}</div><p id="theme-description" className="theme-description">System follows your operating-system appearance.</p></fieldset></section>
-            <section className="settings-panel provider-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Analysis</div><h2>Provider</h2></div><span className={`provider-health ${providerIsActive ? 'ready' : ''}`}>{providerIndicatorLabel}</span></div>{electronMode ? <fieldset className="provider-fieldset"><legend>Choose an installed provider</legend>{providersLoading && <p className="provider-note">Detecting Claude Code, Codex CLI, and Cursor Agent…</p>}{providerError && <p className="provider-note provider-error">{providerError}</p>}{!providersLoading && !providers.length && !providerError && <p className="provider-note">No provider detection result yet.</p>}{providers.map((status) => <label className={`provider-option ${status.installed ? '' : 'unavailable'}`} key={status.provider}><input type="radio" name="analysis-provider" value={status.provider} checked={selectedProvider === status.provider} disabled={!status.installed} onChange={() => chooseProvider(status.provider)} /><span className="provider-option-main"><strong>{status.displayName}</strong><small>{status.executable}</small></span><span className="provider-option-status">{providerStatusLabel(status)}</span></label>)}</fieldset> : <p className="provider-note">Browser demo runtime only; installed provider detection is available in Electron.</p>}</section>
-            <section className="settings-panel run-settings">
+        {shortcutsOpen ? <KeyboardShortcutsView onClose={() => setShortcutsOpen(false)} /> : loggingOpen ? <LoggingView events={loggingEvents} liveActivity={analysis?.id === selectedPR?.id ? (analysis?.activity ?? []) : []} running={Boolean(analysis?.running)} providerLabel={activeAnalysisProviderName} onClose={() => setLoggingOpen(false)} /> : settingsOpen ? <main className="settings-page" aria-labelledby="settings-title">
+          <header className="settings-page-header">
+            <div className="settings-page-intro">
+              <div className="eyebrow">Workspace</div>
+              <h1 id="settings-title">Settings</h1>
+              <p>Choose the provider and model for every analysis run. Codex and Claude also support a separate thinking budget. Changes save locally and apply to the next scan.</p>
+            </div>
+            <button className="secondary-button" type="button" aria-label="Return to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={13} aria-hidden="true" /> Pull requests</button>
+          </header>
+          <div className="settings-workbench">
+            <nav className="settings-rail" aria-label="Settings sections">
+              <div className="eyebrow">Configuration</div>
+              <a href="#appearance-settings">Appearance</a>
+              <a href="#provider-settings">Provider</a>
+              <a href="#analysis-settings">Next analysis</a>
+              <a href="#retention-settings">Retention</a>
+              <a href="#guidance-settings">Guidance</a>
+            </nav>
+            <div className="settings-content">
+            <section id="appearance-settings" className="settings-panel interface-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Appearance</div><h2>Interface</h2></div></div><fieldset className="theme-fieldset"><legend>Theme</legend><div className="theme-options">{themeModes.map(({ value, label }) => <label className="theme-option" key={value}><input type="radio" name="theme-mode" value={value} checked={themeMode === value} onChange={() => chooseTheme(value)} /><span>{label}</span></label>)}</div><p id="theme-description" className="theme-description">System follows your operating-system appearance.</p></fieldset></section>
+            <section id="provider-settings" className="settings-panel provider-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Analysis</div><h2>Provider</h2></div><span className={`provider-health ${providerIsActive ? 'ready' : ''}`}>{providerIndicatorLabel}</span></div>{electronMode ? <fieldset className="provider-fieldset"><legend>Choose an installed provider</legend>{providersLoading && <p className="provider-note">Detecting Claude Code, Codex CLI, and Cursor Agent…</p>}{providerError && <p className="provider-note provider-error">{providerError}</p>}{!providersLoading && !providers.length && !providerError && <p className="provider-note">No provider detection result yet.</p>}{providers.map((status) => <label className={`provider-option ${status.installed ? '' : 'unavailable'}`} key={status.provider}><input type="radio" name="analysis-provider" value={status.provider} checked={selectedProvider === status.provider} disabled={!status.installed} onChange={() => chooseProvider(status.provider)} /><span className="provider-option-main"><strong>{status.displayName}</strong><small>{status.executable}</small></span><span className="provider-option-status">{providerStatusLabel(status)}</span></label>)}</fieldset> : <p className="provider-note">Browser demo runtime only; installed provider detection is available in Electron.</p>}</section>
+            <section id="analysis-settings" className="settings-panel run-settings">
               <div className="settings-panel-heading">
                 <div>
                   <div className="eyebrow">Next analysis</div>
@@ -3000,6 +3305,7 @@ function App() {
                           value: model.id,
                           label: model.label,
                         }))}
+                        searchable={selectedProviderStatus.models.length > 12}
                         onChange={(value) =>
                           setSelectedModels((current) => ({
                             ...current,
@@ -3013,42 +3319,68 @@ function App() {
                         configured default will be used.
                       </small>
                     )}
+                    {selectedProvider === "cursor" && (
+                      <small>
+                        Cursor models include their effort level, so no separate
+                        effort setting is needed.
+                      </small>
+                    )}
                   </label>
-                  <label className="model-setting">
-                    <span>Thinking effort</span>
-                    <SelectMenu
-                      ariaLabel={`Thinking effort for ${selectedProviderStatus.displayName}`}
-                      className="model-select-menu"
-                      value={
-                        selectedEfforts[selectedProvider] ??
-                        DEFAULT_ANALYSIS_EFFORT
-                      }
-                      options={providerEfforts[selectedProvider].map((effort) => ({
-                        value: effort,
-                        label: effortLabels[effort],
-                      }))}
-                      onChange={(value) =>
-                        setSelectedEfforts((current) => ({
-                          ...current,
-                          [selectedProvider]: value as AnalysisEffort,
-                        }))
-                      }
-                    />
-                    <small>
-                      Medium balances coverage and cost. Lower effort is faster
-                      and generally less expensive; higher effort may produce a
-                      more thorough scan.
-                    </small>
-                  </label>
+                  {selectedProvider !== "cursor" && (
+                    <label className="model-setting">
+                      <span>Thinking effort</span>
+                      <SelectMenu
+                        ariaLabel={`Thinking effort for ${selectedProviderStatus.displayName}`}
+                        className="model-select-menu"
+                        value={
+                          selectedEfforts[selectedProvider] ??
+                          DEFAULT_ANALYSIS_EFFORT
+                        }
+                        options={providerEfforts[selectedProvider].map((effort) => ({
+                          value: effort,
+                          label: effortLabels[effort],
+                        }))}
+                        onChange={(value) =>
+                          setSelectedEfforts((current) => ({
+                            ...current,
+                            [selectedProvider]: value as AnalysisEffort,
+                          }))
+                        }
+                      />
+                      <small>
+                        Medium balances coverage and cost. Lower effort is faster
+                        and generally less expensive; higher effort may produce a
+                        more thorough scan.
+                      </small>
+                    </label>
+                  )}
                 </>
               ) : (
                 <p className="provider-note">
                   Select an installed provider to configure its model and
-                  thinking budget.
+                  supported thinking budget.
                 </p>
               )}
               <fieldset className="provider-fieldset">
                 <legend>Analysis scope</legend>
+                <label className="model-setting">
+                  <span>Scan engine</span>
+                  <SelectMenu
+                    ariaLabel="Scan engine"
+                    value={analysisConfig.scanMode}
+                    options={[
+                      { value: "coordinator", label: "Coordinator (recommended)" },
+                      { value: "legacy", label: "Legacy batching" },
+                    ]}
+                    onChange={(value) =>
+                      setAnalysisConfig((current) => ({
+                        ...current,
+                        scanMode: value as AnalysisRunConfig["scanMode"],
+                      }))
+                    }
+                  />
+                  <small>Coordinator anchors the PR before parallel specialists. Legacy keeps the established map/reduce batching flow.</small>
+                </label>
                 <label className="model-setting">
                   <span>Depth</span>
                   <SelectMenu
@@ -3121,7 +3453,7 @@ function App() {
                 </label>
               </fieldset>
             </section>
-            <section className="settings-panel retention-settings">
+            <section id="retention-settings" className="settings-panel retention-settings">
               <div className="settings-panel-heading">
                 <div>
                   <div className="eyebrow">Storage</div>
@@ -3171,9 +3503,10 @@ function App() {
                 />
               </label>
             </section>
-            <section className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
+            <section id="guidance-settings" className="settings-panel guidance-settings"><div className="settings-panel-heading"><div><div className="eyebrow">Collection</div><h2>Supplemental guidance</h2></div></div><label className="prompt-setting"><span>Focus the next walkthrough</span><textarea aria-label="Supplemental collection guidance" value={customPrompt} maxLength={4000} rows={5} placeholder="Example: collect more migration, rollback, or test evidence" onChange={(event) => setCustomPrompt(event.target.value)} /><small>This may guide additional evidence collection, but cannot change the required walkthrough structure.</small></label></section>
+              <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? selectedProvider === "cursor" ? <>The next run will use {activeProviderName}; the selected Cursor model includes its effort. Repository context is sent only to that provider’s configured model service.</> : <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
+            </div>
           </div>
-          <section className="settings-boundary"><ShieldCheck size={18} /><div><strong>Repository context stays local until you approve an analysis.</strong><p>{selectedProviderStatus?.installed ? <>The next run will use {activeProviderName} with {effortLabels[selectedEfforts[selectedProvider] ?? DEFAULT_ANALYSIS_EFFORT].toLowerCase()} thinking effort. Repository context is sent only to that provider’s configured model service.</> : 'Select an installed provider to enable analysis.'}</p></div><dl><div><dt>Data source</dt><dd>{electronMode ? account.live ? 'GitHub CLI + local artifacts' : 'GitHub CLI unavailable' : 'Demo fixture'}</dd></div><div><dt>Unprocessed PRs</dt><dd>Ask before analysis</dd></div></dl></section>
         </main> : <>
         <section className="pr-list-pane" aria-label="Pull request list">
           <div className="pane-header">
@@ -3305,7 +3638,7 @@ function App() {
                       </code>{" "}
                       · current SHA <code>{shortSha(selectedPR.headSha)}</code>
                     </span>
-                    <button onClick={startAnalysis}>Update walkthrough</button>
+                    <button onClick={startAnalysis}>Update review</button>
                     <span className="stale-note">
                       New commits may change the evidence below.
                     </span>
@@ -3418,10 +3751,10 @@ function App() {
                   onRefreshComments={refreshSelectedComments}
                   markGroup={markGroup}
                   reviewed={reviewed}
-                  stepProgress={stepProgress}
-                  updateStepProgress={updateStepProgress}
+                  reviewProgress={reviewProgress}
+                  updateGroupProgress={updateGroupProgress}
                   cancelAnalysis={() => void cancelAnalysis()}
-                  reopenWalkthrough={() => setView("walkthrough")}
+                  reopenWalkthrough={() => setView("review")}
                   openHistoricalRun={(runId) => void openHistoricalRun(runId)}
                   openEvidence={openEvidence}
                   onDeleteRun={(runId) => void deleteHistoricalRun(runId)}
@@ -3590,7 +3923,7 @@ function App() {
                           `${selectedRepository.owner}/${selectedRepository.name}`}
                       </strong>{" "}
                       is all clear. New pull requests will appear here with
-                      their walkthrough status and review evidence.
+                      their review status and evidence.
                     </>
                   )}
                 </p>
@@ -3644,8 +3977,8 @@ function ViewContent({
   onRefreshComments,
   markGroup,
   reviewed,
-  stepProgress,
-  updateStepProgress,
+  reviewProgress,
+  updateGroupProgress,
   cancelAnalysis,
   reopenWalkthrough,
   openHistoricalRun,
@@ -3673,6 +4006,7 @@ function ViewContent({
     startedAt: number;
     live?: boolean;
     provider?: AgentProvider;
+    scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
   } | null;
   providerName: string;
@@ -3684,9 +4018,9 @@ function ViewContent({
   onRefreshComments: () => void;
   markGroup: (group: ChangeGroup) => void;
   reviewed: Record<string, boolean>;
-  stepProgress: Record<string, ReviewProgress>;
-  updateStepProgress: (
-    stepId: string,
+  reviewProgress: Record<string, ReviewProgress>;
+  updateGroupProgress: (
+    groupId: string,
     status: ReviewProgressStatus,
     note: string,
   ) => void;
@@ -3708,7 +4042,7 @@ function ViewContent({
   if (
     activeAnalysis?.running &&
     view !== "threads" &&
-    (view === "walkthrough" || pr.status === "unprocessed")
+    (view === "review" || pr.status === "unprocessed")
   )
     return (
       <AnalysisProgress
@@ -3720,7 +4054,7 @@ function ViewContent({
       />
     );
   if (
-    view === "walkthrough" &&
+    view === "review" &&
     (pr.status === "failed" || pr.status === "cancelled")
   )
     return (
@@ -3741,27 +4075,16 @@ function ViewContent({
       />
     );
   if (view === "overview") return <OverviewFull pr={pr} />;
-  if (view === "walkthrough")
+  if (view === "review")
     return (
-      <WalkthroughRich
+      <ReviewView
         pr={pr}
         markGroup={markGroup}
         reviewed={reviewed}
-        progress={stepProgress}
-        updateProgress={updateStepProgress}
+        progress={reviewProgress}
+        updateProgress={updateGroupProgress}
         openEvidence={openEvidence}
         openFlow={openFlow}
-      />
-    );
-  if (view === "groups")
-    return (
-      <GroupsRich
-        pr={pr}
-        markGroup={markGroup}
-        reviewed={reviewed}
-        progress={stepProgress}
-        updateProgress={updateStepProgress}
-        openEvidence={openEvidence}
       />
     );
   if (view === "insights")
@@ -3774,7 +4097,7 @@ function ViewContent({
         setFlowType={setFlowType}
         selectedFlowNodeId={selectedFlowNodeId}
         evidence={pr.evidence}
-        groups={pr.groups}
+        stories={buildReviewStoriesForPullRequest(pr)}
         threads={pr.threads}
         openEvidence={openEvidence}
       />
@@ -3822,12 +4145,13 @@ function ViewContent({
   );
 }
 
-function OverviewFull({ pr }: { pr: PullRequest }) {
+export function OverviewFull({ pr }: { pr: PullRequest }) {
   const provider =
     pr.analysisProvenance && pr.analysisProvenance !== "demo"
       ? providerLabel(pr.analysisProvenance)
       : null;
   const summary = pr.walkthrough?.summary;
+  const reviewArchitecture = buildReviewArchitecture(pr.walkthrough);
   const list = (items: unknown[] | undefined, fallback: string) =>
     items?.length ? (
       <ul className="overview-note-list">
@@ -3852,7 +4176,7 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
         <div>
           <div className="eyebrow">
             {pr.source === "github" && provider
-              ? `Validated ${provider} walkthrough`
+              ? `Validated ${provider} review`
               : "What this pull request does"}
           </div>
           <h3>{pr.summary}</h3>
@@ -3889,7 +4213,7 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
         />
       </div>
       <div className="overview-columns">
-        <section className="overview-notes" aria-label="Walkthrough summary">
+        <section className="overview-notes" aria-label="Review summary">
           <section className="overview-note-block">
             <SectionTitle label="Behavioral changes" />
             {list(
@@ -3910,32 +4234,39 @@ function OverviewFull({ pr }: { pr: PullRequest }) {
           </section>
         </section>
         <section>
+          {reviewArchitecture.kind === "schema-2" && (
+            <section className="overview-story-map" aria-label="Review story relationships">
+              <SectionTitle label="Review story map" />
+              {[
+                ["Primary", reviewArchitecture.stories.filter((story) => story.relationshipToPrimary === "primary")],
+                ["Additional / Supporting", reviewArchitecture.stories.filter((story) => story.relationshipToPrimary === "supporting" || story.relationshipToPrimary === "adjacent")],
+                ["Independent", reviewArchitecture.stories.filter((story) => story.relationshipToPrimary === "independent")],
+              ].map(([label, stories]) => {
+                const items = stories as typeof reviewArchitecture.stories;
+                return items.length ? <div className="overview-story-group" key={label as string}><h5>{label as string}</h5>{items.map((story) => <div className="overview-story-row" key={story.id}><span className="relationship-badge">{story.relationshipToPrimary}</span><div><strong>{story.title}</strong><p>{story.summary}</p></div></div>)}</div> : null;
+              })}
+            </section>
+          )}
           <SectionTitle label="Recommended review order" />
-          {(safeArray(pr.walkthrough?.walkthrough).length
-            ? safeArray(pr.walkthrough?.walkthrough).map(objectValue)
-            : pr.groups.map((group) => ({
-                ...group,
-                changeGroupId: group.id,
-                reason: group.description,
-              }))
-          ).map((entry, index) => {
-            const group =
-              pr.groups.find(
-                (candidate) => candidate.id === entry.changeGroupId,
-              ) ?? (entry as ChangeGroup);
+          {buildRecommendedReviewOrder(reviewArchitecture).map((entry, index) => {
             return (
               <div
                 className="change-row"
-                key={safeString(entry.id, `${group.id}-${index}`)}
+                key={safeString(entry.id, `story-${index}`)}
               >
                 <span className="change-index">
                   {String(index + 1).padStart(2, "0")}
                 </span>
                 <div>
-                  <strong>{safeString(entry.title, group.title)}</strong>
-                  <p>{safeString(entry.reason, group.description)}</p>
+                  <strong>{entry.title}</strong>
+                  <p>{entry.reason}</p>
+                  <small>
+                    {entry.groupCount === 1
+                      ? "1 change group"
+                      : `${entry.groupCount} change groups`}
+                  </small>
                 </div>
-                <AttentionTag level={group.attention} />
+                <AttentionTag level={entry.attention} />
               </div>
             );
           })}
@@ -4037,6 +4368,7 @@ function AnalysisProgress({
     stage: number;
     running: boolean;
     live?: boolean;
+    scanMode?: AnalysisRunConfig["scanMode"];
     startedAt: number;
     activity: AnalysisProgressEvent[];
   };
@@ -4055,6 +4387,27 @@ function AnalysisProgress({
   const elapsedSeconds = Math.max(
     0,
     Math.floor((now - analysis.startedAt) / 1_000),
+  );
+  const coordinatorRows = [
+    ["anchoring", "Anchor"],
+    ["review", "Review"],
+    ["tests-risks", "Tests & risks"],
+    ["flows", "Flows"],
+    ["assembling", "Assembly"],
+    ["validating", "Validation"],
+  ] as const;
+  /** Latest coordinator receipt for a stage, including the agent's detail message. */
+  const coordinatorState = (stage: AnalysisProgressEvent["stage"]) => {
+    const events = analysis.activity.filter((event) => event.stage === stage);
+    const latest = events.at(-1);
+    const state = latest?.taskState ?? (latest ? "running" : "pending");
+    return {
+      state,
+      detail: latest?.message?.trim() || undefined,
+    };
+  };
+  const hasCoordinatorActivity = analysis.activity.some((event) =>
+    COORDINATOR_EXCLUSIVE_PROGRESS_STAGES.has(event.stage),
   );
   return (
     <div className="analysis-screen">
@@ -4121,6 +4474,23 @@ function AnalysisProgress({
           </small>
         </section>
       )}
+      {live && hasCoordinatorActivity && (
+        <section className="agent-activity coordinator-task-state" aria-label="Coordinator task state">
+          <div className="agent-activity-head"><div><strong>Coordinator task state</strong><span>Independent task receipts remain visible while parallel work continues.</span></div><Workflow size={14} /></div>
+          <div role="list" aria-label="Coordinator tasks">
+            {coordinatorRows.map(([stage, label]) => {
+              const { state, detail } = coordinatorState(stage);
+              return <div className={`agent-activity-row coordinator-task-row ${state}`} role="listitem" aria-label={detail ? `${label}: ${state}. ${detail}` : `${label}: ${state}`} key={stage}>
+                <div className="coordinator-task-main">
+                  <strong>{label}</strong>
+                  <span className={`state-tag ${state === "complete" ? "resolved" : state === "failed" ? "active" : state === "running" ? "disputed" : "outdated"}`}>{state}</span>
+                </div>
+                {detail && <p className="coordinator-task-detail">{detail}</p>}
+              </div>;
+            })}
+          </div>
+        </section>
+      )}
       <div className="stage-list">
         {analysisStages.map((stage: AnalysisStage, index) => (
           <div
@@ -4170,7 +4540,7 @@ function AnalysisProgress({
   );
 }
 
-function WalkthroughRich({
+export function ReviewView({
   pr,
   markGroup,
   reviewed,
@@ -4183,386 +4553,249 @@ function WalkthroughRich({
   markGroup: (group: ChangeGroup) => void;
   reviewed: Record<string, boolean>;
   progress: Record<string, ReviewProgress>;
-  updateProgress: (
-    stepId: string,
-    status: ReviewProgressStatus,
-    note: string,
-  ) => void;
+  updateProgress: (groupId: string, status: ReviewProgressStatus, note: string) => void;
   openEvidence: (path: string, line?: number) => void;
   openFlow: (type: Flow["type"], nodeId: string) => void;
 }) {
-  const [active, setActive] = useState(0);
+  const architecture = buildReviewArchitecture(pr.walkthrough);
+  const storyModels = architecture.stories.map((story) => ({
+    ...story,
+    groups: story.changeGroupIds.flatMap((id) => {
+      const group = pr.groups.find((candidate) => candidate.id === id);
+      return group ? [group] : [];
+    }),
+  }));
+  const [activeStoryId, setActiveStoryId] = useState(
+    storyModels[0]?.id ?? architecture.primaryStoryId ?? "",
+  );
+  const activeStory = storyModels.find((story) => story.id === activeStoryId) ?? storyModels[0];
+  const [activeGroupId, setActiveGroupId] = useState(activeStory?.groups[0]?.id ?? "");
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
-  const documentSteps = safeArray(pr.walkthrough?.walkthrough).map(
-    (value, index) => objectValue(value),
-  );
-  const steps = documentSteps.length
-    ? documentSteps
-    : pr.groups.map((group, index) => ({
-        id: `group-${group.id}`,
-        title: group.title,
-        changeGroupId: group.id,
-        summary: group.description,
-        reason: group.rationale,
-        limitations: [],
-        dependsOnStepIds: [],
-        evidenceIds: group.evidenceIds ?? [],
-        flowNodeIds: [],
-        testIds: [],
-        reviewInsightIds: [],
-        index,
-      }));
-  const step = steps[active] ?? steps[0];
-  const group =
-    pr.groups.find((item) => item.id === step?.changeGroupId) ??
-    pr.groups[active] ??
-    pr.groups[0];
-  if (!step || !group) return <EmptyAnalysis />;
+  // Keep the rendered group selection canonical for the active story. The
+  // story can change before any effect runs, so never render derived content
+  // from an activeGroupId that belongs to a different story.
+  const selectedGroupId = activeStory?.groups.some((group) => group.id === activeGroupId)
+    ? activeGroupId
+    : activeStory?.groups[0]?.id ?? "";
+  const selectedGroup = activeStory?.groups.find((group) => group.id === selectedGroupId);
   const runId = pr.walkthrough?.run.id ?? pr.id;
-  const itemProgress = progress[`${runId}:${String(step.id)}`];
-  const noteKey = `${runId}:${String(step.id)}`;
-  const note = noteDrafts[noteKey] ?? itemProgress?.note ?? "";
-  const status =
-    itemProgress?.status ??
-    (reviewed[reviewKey(pr.id, group.id)] ? "reviewed" : "pending");
-  const evidence = safeArray(step.evidenceIds).flatMap((id) =>
-    pr.evidence.filter((item) => item.id === id),
-  );
-  const evidenceItems: Array<{ id: string; path: string; line?: number }> =
-    evidence.length
-      ? evidence
-      : group.files.map((path) => ({ id: path, path }));
-  const tests = pr.tests.filter((test) =>
-    safeArray(step.testIds).includes(test.id),
-  );
-  const insights = pr.insights.filter((insight) =>
-    safeArray(step.reviewInsightIds).includes(insight.id),
-  );
-  const flowNodes = safeArray(step.flowNodeIds).flatMap((nodeId) =>
-    pr.flows.flatMap((flow) =>
-      flow.nodes
-        .filter((node) => node.id === nodeId)
-        .map((node) => ({ flow, node })),
-    ),
-  );
-  const setStatus = (next: ReviewProgressStatus) => {
-    updateProgress(String(step.id), next, note);
-    setNoteDrafts((current) => ({ ...current, [noteKey]: note }));
-    if (next === "reviewed") markGroup(group);
+  const progressFor = (groupId: string) =>
+    progress[`${runId}:${groupId}`] as ReviewProgress | undefined;
+  const statusFor = (groupId: string): ReviewProgressStatus => {
+    const saved = progressFor(groupId);
+    if (saved?.status) return saved.status;
+    return reviewed[reviewKey(pr.id, groupId)] ? "reviewed" : "pending";
   };
-  return (
-    <div className="walkthrough view-section">
-      <div className="walkthrough-head">
-        <div>
-          <div className="eyebrow">
-            Guided review · Step {active + 1} of {steps.length}
-          </div>
-          <h3>{safeString(step.title, group.title)}</h3>
-          <p>{safeString(step.summary, group.description)}</p>
-        </div>
-        <div className="walkthrough-actions">
-          <span
-            className={`state-tag ${status === "follow-up" ? "active" : status === "skipped" ? "outdated" : status === "reviewed" ? "resolved" : "unknown"}`}
-          >
-            {status}
-          </span>
-        </div>
-      </div>
-      <div className="walkthrough-layout">
-        <div className="step-rail">
-          {steps.map((item, index) => {
-            const current =
-              progress[`${runId}:${String(item.id)}`]?.status ?? "pending";
-            return (
-              <button
-                key={String(item.id)}
-                className={`step-item ${index === active ? "active" : ""} ${current === "reviewed" ? "done" : ""}`}
-                aria-label={`Step ${index + 1}: ${safeString(item.title)}`}
-                onClick={() => setActive(index)}
-              >
-                <span className="step-number">
-                  {current === "reviewed" ? (
-                    <Check size={12} />
-                  ) : (
-                    String(index + 1).padStart(2, "0")
-                  )}
-                </span>
-                <span>
-                  <strong>{safeString(item.title)}</strong>
-                  <small>{current}</small>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-        <div className="walkthrough-body">
-          <div className="reason-callout">
-            <Sparkles size={15} />
-            <div>
-              <strong>Why review this now</strong>
-              <p>{safeString(step.reason, group.rationale)}</p>
-            </div>
-          </div>
-          {safeArray(step.dependsOnStepIds).length > 0 && (
-            <section className="evidence-section">
-              <SectionTitle label="Depends on earlier steps" />
-              <p>{safeArray(step.dependsOnStepIds).join(" · ")}</p>
-            </section>
-          )}
-          {safeArray(step.limitations).length > 0 && (
-            <section className="evidence-section">
-              <SectionTitle label="Step limitations" />
-              <p>{safeArray(step.limitations).join(" · ")}</p>
-            </section>
-          )}
-          <div className="behavior-compare">
-            <div className="compare-col before">
-              <div className="compare-label">Before</div>
-              <p>{group.before}</p>
-            </div>
-            <div className="compare-arrow">
-              <ArrowDown size={14} />
-            </div>
-            <div className="compare-col after">
-              <div className="compare-label">What changed</div>
-              <p>{group.after}</p>
-            </div>
-          </div>
-          <section className="evidence-section">
-            <SectionTitle label="Evidence" />
-            <div className="evidence-list">
-              {evidenceItems.map((item) => (
-                <button
-                  key={item.id}
-                  className="evidence-row"
-                  onClick={() => openEvidence(item.path, item.line)}
-                >
-                  <FileCode2 size={14} />
-                  <code>
-                    {item.path}
-                    {item.line ? `:${item.line}` : ""}
-                  </code>
-                  <ExternalLink size={13} />
-                </button>
-              ))}
-            </div>
-          </section>
-          {tests.length > 0 && (
-            <section className="evidence-section">
-              <SectionTitle label="Related tests" />
-              <p>{tests.map((test) => test.test).join(" · ")}</p>
-            </section>
-          )}
-          {insights.length > 0 && (
-            <section className="evidence-section">
-              <SectionTitle label="Active insights" />
-              <p>{insights.map((insight) => insight.title).join(" · ")}</p>
-            </section>
-          )}
-          {flowNodes.length > 0 && (
-            <section className="evidence-section">
-              <SectionTitle label="Related flow context" />
-              <div className="flow-context-list">
-                {flowNodes.map(({ flow, node }) => (
-                  <button
-                    key={`${flow.id}:${node.id}`}
-                    type="button"
-                    onClick={() => openFlow(flow.type, node.id)}
-                  >
-                    <strong>
-                      {flow.title}: {node.label}
-                    </strong>
-                    <span>{node.explanation}</span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-          <label className="prompt-setting">
-            <span>Review note</span>
-            <textarea
-              aria-label="Review note"
-              value={note}
-              maxLength={4000}
-              rows={2}
-              onChange={(event) =>
-                setNoteDrafts((current) => ({
-                  ...current,
-                  [noteKey]: event.target.value,
-                }))
-              }
-              placeholder="Optional local note"
-            />
-          </label>
-          <div
-            className="walkthrough-actions"
-            role="group"
-            aria-label="Step review status"
-          >
-            <button
-              className="secondary-button"
-              onClick={() => setStatus("pending")}
-            >
-              Pending
-            </button>
-            <button
-              className="secondary-button"
-              onClick={() => setStatus("follow-up")}
-            >
-              Needs follow-up
-            </button>
-            <button
-              className="secondary-button"
-              onClick={() => setStatus("skipped")}
-            >
-              Skip
-            </button>
-            <button
-              className="primary-button"
-              onClick={() => setStatus("reviewed")}
-            >
-              <Check size={14} /> Mark reviewed
-            </button>
-          </div>
-          <div className="pager">
-            <button
-              className="secondary-button"
-              disabled={active === 0}
-              onClick={() => setActive((index) => Math.max(0, index - 1))}
-            >
-              ← Previous
-            </button>
-            <button
-              className="primary-button"
-              disabled={active === steps.length - 1}
-              onClick={() =>
-                setActive((index) => Math.min(steps.length - 1, index + 1))
-              }
-            >
-              Next step <ArrowUp size={14} />
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+  const noteFor = (groupId: string) =>
+    noteDrafts[`${runId}:${groupId}`] ?? progressFor(groupId)?.note ?? "";
+  const setStatus = (group: ChangeGroup, status: ReviewProgressStatus) => {
+    const note = noteFor(group.id);
+    setNoteDrafts((current) => ({ ...current, [`${runId}:${group.id}`]: note }));
+    updateProgress(group.id, status, note);
+    if (status === "reviewed") markGroup(group);
+  };
+  const statusClass = (status: ReviewProgressStatus) =>
+    status === "reviewed"
+      ? "resolved"
+      : status === "follow-up"
+        ? "active"
+        : status === "skipped"
+          ? "outdated"
+          : "unknown";
+  const terminalStatus = (status: ReviewProgressStatus) =>
+    status === "reviewed" || status === "skipped";
+  const rawDocument = objectValue(pr.walkthrough);
+  const linkedEntries = (key: string, groupId: string) =>
+    safeArray(rawDocument[key])
+      .map(objectValue)
+      .filter((entry) => safeArray(entry.changeGroupIds).includes(groupId));
+  const storyTitles = new Map(
+    storyModels.map((story) => [story.id, story.title]),
   );
-}
-
-function GroupsRich({
-  pr,
-  markGroup,
-  reviewed,
-  progress,
-  updateProgress,
-  openEvidence,
-}: {
-  pr: PullRequest;
-  markGroup: (group: ChangeGroup) => void;
-  reviewed: Record<string, boolean>;
-  progress: Record<string, ReviewProgress>;
-  updateProgress: (
-    stepId: string,
-    status: ReviewProgressStatus,
-    note: string,
-  ) => void;
-  openEvidence: (path: string, line?: number) => void;
-}) {
-  const runId = pr.walkthrough?.run.id ?? pr.id;
-  const steps = safeArray(pr.walkthrough?.walkthrough).map(objectValue);
-  const groupSteps = (group: ChangeGroup) =>
-    steps.filter((step) => step.changeGroupId === group.id);
-  const status = (group: ChangeGroup): ReviewProgressStatus => {
-    const values = groupSteps(group).map(
-      (step) => progress[`${runId}:${String(step.id)}`]?.status ?? "pending",
+  const dependencyEntries = safeArray(rawDocument.dependencies).map(objectValue);
+  const dependencyTitles = new Map(
+    dependencyEntries.map((entry) => [safeString(entry.id), safeString(entry.title, "Prerequisite dependency")]),
+  );
+  const storyPrerequisites = activeStory
+    ? activeStory.dependsOnStoryIds.map((id) =>
+        storyTitles.get(id) ?? "Earlier review story",
+      )
+    : [];
+  const groupDependencies = selectedGroup
+    ? linkedEntries("dependencies", selectedGroup.id)
+    : [];
+  const prerequisiteDependencies = (entry: Record<string, unknown>) =>
+    safeArray(entry.dependsOnIds).map((id) =>
+      dependencyTitles.get(safeString(id)) ?? "Prerequisite dependency",
     );
-    return values.includes("follow-up")
-      ? "follow-up"
-      : values.length > 0 && values.every((value) => value === "reviewed")
-        ? "reviewed"
-        : values.length > 0 && values.every((value) => value === "skipped")
-          ? "skipped"
-          : reviewed[reviewKey(pr.id, group.id)]
-            ? "reviewed"
-            : "pending";
-  };
-  const setGroup = (group: ChangeGroup, next: ReviewProgressStatus) => {
-    const linked = groupSteps(group);
-    if (linked.length)
-      linked.forEach((step) => updateProgress(String(step.id), next, ""));
-    else markGroup(group);
-  };
-  const groupEvidenceItems = (group: ChangeGroup) => {
-    const linked = (group.evidenceIds ?? []).flatMap((id) => {
-      const item = pr.evidence.find((candidate) => candidate.id === id);
-      return item
-        ? [{ id: item.id, path: item.path, line: item.line ?? undefined }]
-        : [];
-    });
-    return mergeGroupEvidenceItems(linked, group.files);
-  };
+  const groupEvidence = selectedGroup
+    ? (selectedGroup.evidenceIds ?? []).flatMap((id) => {
+        const item = pr.evidence.find((candidate) => candidate.id === id);
+        return item ? [item] : [];
+      })
+    : [];
+  const groupTests = selectedGroup
+    ? pr.tests.filter((test) => test.changeGroupIds?.includes(selectedGroup.id))
+    : [];
+  const groupInsights = selectedGroup
+    ? pr.insights.filter((insight) =>
+        safeArray(rawDocument.reviewInsights)
+          .map(objectValue)
+          .some((raw) =>
+            safeString(raw.id, "") === insight.id &&
+            safeArray(raw.changeGroupIds).includes(selectedGroup.id),
+          ),
+      )
+    : [];
+  const unchangedInteractions = selectedGroup
+    ? linkedEntries("unchangedInteractions", selectedGroup.id)
+    : [];
+  const selectedStoryFlow = selectedGroup
+    ? deriveReviewFlowTraces(pr.walkthrough, [selectedGroup.id])
+    : [];
+  const storyStatus: ReviewProgressStatus = activeStory
+    ? (() => {
+        const statuses = activeStory.groups.map((group) => statusFor(group.id));
+        if (statuses.some((status) => status === "follow-up")) return "follow-up";
+        if (statuses.length === 0 || statuses.some((status) => status === "pending")) return "pending";
+        if (statuses.every((status) => status === "reviewed")) return "reviewed";
+        if (statuses.every(terminalStatus)) return "skipped";
+        return "pending";
+      })()
+    : "pending";
+
+  if (architecture.kind === "empty" || storyModels.length === 0) {
+    return (
+      <div className="review-surface view-section review-empty" data-review-kind={architecture.kind}>
+        <SectionIntro
+          eyebrow="Review"
+          title="Review is not available yet"
+          description="A validated analysis will turn the pull request into ordered stories and atomic change groups."
+        />
+        <div className="review-empty-panel">
+          <Sparkles size={18} aria-hidden="true" />
+          <strong>No review stories generated</strong>
+          <p>Start an analysis to build the relationship map. Existing Flows and evidence remain available.</p>
+        </div>
+      </div>
+    );
+  }
   return (
-    <div className="view-section">
-      <SectionIntro
-        eyebrow="Structure"
-        title="Logical change groups"
-        description="A live run derives group state from its persisted walkthrough steps."
-      />
-      <div className="group-table">
-        {pr.groups.map((group, index) => (
-          <div className="group-row" key={group.id}>
-            <div className="group-order">
-              {String(index + 1).padStart(2, "0")}
-            </div>
-            <div className="group-main">
-              <div className="group-title-line">
-                <h4>{group.title}</h4>
-                <AttentionTag level={group.attention} />
-              </div>
-              <p>{group.description}</p>
-              <div className="file-chips">
-                {groupEvidenceItems(group).map(({ id, path, line }) => {
-                  return (
-                    <button
-                      type="button"
-                      className="file-chip"
-                      aria-label={`Open evidence ${path}${line ? `:${line}` : ""}`}
-                      key={id}
-                      onClick={() => openEvidence(path, line)}
-                    >
-                      <FileCode2 size={12} />
-                      {path.split("/").pop()}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            <div
-              className="walkthrough-actions"
-              role="group"
-              aria-label={`${group.title} review status`}
+    <div className="review-surface view-section" data-review-kind="schema-2">
+      <div className="review-head">
+        <div>
+          <div className="eyebrow">Review · schema 2.0</div>
+          <h3>Follow the change story</h3>
+          <p>Start with the primary behavior, then inspect supporting and independent stories in the order the evidence suggests.</p>
+        </div>
+        <span className={`state-tag ${statusClass(storyStatus)}`}>{storyStatus}</span>
+      </div>
+      <div className="review-layout">
+        <aside className="review-story-rail" aria-label="Review stories">
+          <div className="review-rail-label">Story rail</div>
+          {storyModels.map((story, index) => (
+            <button
+              key={story.id}
+              className={`review-story-item ${story.id === activeStory?.id ? "active" : ""}`}
+              aria-label={`${story.relationshipToPrimary} story: ${story.title}`}
+              aria-current={story.id === activeStory?.id ? "step" : undefined}
+              onClick={() => { setActiveStoryId(story.id); setActiveGroupId(story.groups[0]?.id ?? ""); }}
             >
-              <span className="state-tag">{status(group)}</span>
-              <button
-                className="secondary-button"
-                onClick={() => setGroup(group, "follow-up")}
-              >
-                Follow-up
-              </button>
-              <button
-                className="secondary-button"
-                onClick={() => setGroup(group, "skipped")}
-              >
-                Skip
-              </button>
-              <button
-                className="review-button compact"
-                onClick={() => setGroup(group, "reviewed")}
-              >
-                Mark reviewed
-              </button>
-            </div>
-          </div>
-        ))}
+              <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
+              <span className="review-story-copy">
+                <strong>{story.title}</strong>
+                <small className="relationship-badge">{story.relationshipToPrimary}</small>
+                <small>{story.summary}</small>
+              </span>
+              <span className={`state-dot ${story.groups.length > 0 && story.groups.every((group) => terminalStatus(statusFor(group.id))) ? "done" : ""}`} aria-hidden="true" />
+            </button>
+          ))}
+          <div className="review-rail-note">{storyModels.length} stories · {pr.groups.length} atomic groups</div>
+        </aside>
+        <div className="review-main">
+          {activeStory && (
+            <section className="review-chapter" aria-labelledby="review-chapter-title">
+              <div className="review-chapter-head">
+                <div>
+                  <span className="relationship-badge prominent">{activeStory.relationshipToPrimary}</span>
+                  <h4 id="review-chapter-title">{activeStory.title}</h4>
+                  <p>{activeStory.summary}</p>
+                </div>
+                <div className="review-story-meta">
+                  <strong>Why review this now</strong>
+                  <span>{activeStory.reviewReason}</span>
+                  {activeStory.relationshipRationale && <small>{activeStory.relationshipRationale}</small>}
+                  <div className="review-story-dependencies">
+                    <strong>Story dependencies</strong>
+                    {storyPrerequisites.length ? <ul>{storyPrerequisites.map((title, index) => <li key={`${title}-${index}`}>Requires story: {title}</li>)}</ul> : <span>No story prerequisites.</span>}
+                  </div>
+                </div>
+              </div>
+              <div className="review-groups" aria-label="Change inventory">
+                <div className="review-groups-heading"><span>Change inventory</span><small>Ordered atomic groups</small></div>
+                {activeStory.groups.length ? activeStory.groups.map((group, index) => (
+                  <button
+                    className={`review-group-item ${group.id === selectedGroup?.id ? "active" : ""}`}
+                    key={group.id}
+                    aria-label={`Change group: ${group.title}`}
+                    onClick={() => setActiveGroupId(group.id)}
+                  >
+                    <span className="change-index">{String(index + 1).padStart(2, "0")}</span>
+                    <span><strong>{group.title}</strong><small>{group.description}</small></span>
+                    <AttentionTag level={group.attention} />
+                    <span className={`state-tag ${statusClass(statusFor(group.id))}`}>{statusFor(group.id)}</span>
+                  </button>
+                )) : <p className="review-empty-copy">No atomic groups were linked to this story.</p>}
+              </div>
+              {selectedGroup && (
+                <section className="review-group-detail" aria-labelledby="review-group-detail-title">
+                  <div className="review-detail-head">
+                    <div><span className="eyebrow">Selected change group</span><h4 id="review-group-detail-title">{selectedGroup.title}</h4><p>{selectedGroup.description}</p></div>
+                    <span className={`state-tag ${statusClass(statusFor(selectedGroup.id))}`}>
+                      {statusFor(selectedGroup.id)}
+                    </span>
+                  </div>
+                  <div className="behavior-compare">
+                    <div className="compare-col before"><div className="compare-label">Before</div><p>{selectedGroup.before}</p></div>
+                    <div className="compare-arrow"><ArrowDown size={14} /></div>
+                    <div className="compare-col after"><div className="compare-label">After</div><p>{selectedGroup.after}</p></div>
+                  </div>
+                  <div className="review-detail-grid">
+                    <section className="evidence-section"><SectionTitle label="Evidence" />{groupEvidence.length ? <div className="evidence-list">{groupEvidence.map((item) => <button key={item.id} className="evidence-row" onClick={() => openEvidence(item.path, item.line)}><FileCode2 size={13} /><code>{item.path}{item.line ? `:${item.line}` : ""}</code><ExternalLink size={12} /></button>)}</div> : <p className="review-empty-copy">No evidence linked.</p>}</section>
+                    <section className="evidence-section"><SectionTitle label="Tests" />{groupTests.length ? <ul className="review-detail-list">{groupTests.map((test) => <li key={test.id}><strong>{test.test}</strong><span>{test.behavior}</span></li>)}</ul> : <p className="review-empty-copy">No tests linked.</p>}</section>
+                    <section className="evidence-section"><SectionTitle label="Insights" />{groupInsights.length ? <ul className="review-detail-list">{groupInsights.map((insight) => <li key={insight.id}><strong>{insight.title}</strong><span>{insight.detail}</span></li>)}</ul> : <p className="review-empty-copy">No insights linked.</p>}</section>
+                    <section className="evidence-section"><SectionTitle label="Dependencies" />{groupDependencies.length ? <ul className="review-detail-list">{groupDependencies.map((entry, index) => { const prerequisites = prerequisiteDependencies(entry); return <li key={safeString(entry.id, `dependency-${index}`)}><strong>{safeString(entry.title, "Dependency")}</strong><span>{safeString(entry.detail, "Dependency context")}</span><small className="review-dependency-chain">{prerequisites.length ? `Requires: ${prerequisites.join(" · ")}` : "No prerequisite dependencies."}</small></li>; })}</ul> : <p className="review-empty-copy">No dependencies linked.</p>}</section>
+                    <section className="evidence-section"><SectionTitle label="Risks" />{linkedEntries("risks", selectedGroup.id).length ? <ul className="review-detail-list">{linkedEntries("risks", selectedGroup.id).map((entry, index) => <li key={safeString(entry.id, `risk-${index}`)}><strong>{safeString(entry.title, "Risk")}</strong><span>{safeString(entry.detail, "Risk context")}</span></li>)}</ul> : <p className="review-empty-copy">No risks linked.</p>}</section>
+                    <section className="evidence-section"><SectionTitle label="Unchanged around this change" />{unchangedInteractions.length ? <ul className="review-detail-list">{unchangedInteractions.map((entry, index) => <li key={safeString(entry.id, `unchanged-${index}`)}><strong>{safeString(entry.title, "Unchanged interaction")}</strong><span>{safeString(entry.detail, "No unchanged interaction detail provided.")}</span></li>)}</ul> : <p className="review-empty-copy">No unchanged interactions linked.</p>}</section>
+                  </div>
+                  <label className="prompt-setting review-note-field">
+                    <span>Review note</span>
+                    <textarea
+                      aria-label="Review note"
+                      value={noteFor(selectedGroup.id)}
+                      maxLength={4000}
+                      rows={2}
+                      onChange={(event) =>
+                        setNoteDrafts((current) => ({
+                          ...current,
+                          [`${runId}:${selectedGroup.id}`]: event.target.value,
+                        }))
+                      }
+                      placeholder="Optional local note"
+                    />
+                  </label>
+                  <div className="walkthrough-actions review-status-actions" role="group" aria-label={`${selectedGroup.title} review status`}>
+                    <button className="secondary-button" onClick={() => setStatus(selectedGroup, "pending")}>Pending</button>
+                    <button className="secondary-button" onClick={() => setStatus(selectedGroup, "follow-up")}>Needs follow-up</button>
+                    <button className="secondary-button" onClick={() => setStatus(selectedGroup, "skipped")}>Skip</button>
+                    <button className="primary-button" onClick={() => setStatus(selectedGroup, "reviewed")}><Check size={14} /> Mark reviewed</button>
+                  </div>
+                  {selectedStoryFlow.length > 0 && <section className="review-flow-traces"><SectionTitle label="Related flow trace" /><div className="review-flow-trace-list">{selectedStoryFlow.map((trace) => <div className="review-flow-trace" key={trace.type}><span><strong>{trace.label}</strong><small>{trace.type === "data-flow" ? "Data flow" : trace.type === "code-dependency" ? "Code dependency" : trace.type === "user-action" ? "User action" : "System overview"}</small></span>{trace.nodeId && <button className="secondary-button" onClick={() => openFlow(trace.type, trace.nodeId!)}>Open in Flows</button>}</div>)}</div></section>}
+                </section>
+              )}
+            </section>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -4622,13 +4855,13 @@ function InsightsView({
   );
 }
 
-function FlowsView({
+export function FlowsView({
   flows,
   flowType,
   setFlowType,
   selectedFlowNodeId,
   evidence,
-  groups,
+  stories,
   threads,
   openEvidence,
 }: {
@@ -4637,7 +4870,7 @@ function FlowsView({
   setFlowType: (type: Flow["type"]) => void;
   selectedFlowNodeId: string | null;
   evidence: Evidence[];
-  groups: ChangeGroup[];
+  stories: ReviewStory[];
   threads: ReviewThread[];
   openEvidence: (path: string, line?: number) => void;
 }) {
@@ -4646,12 +4879,13 @@ function FlowsView({
   const [nodeFilter, setNodeFilter] = useState<"all" | "changed" | "context">(
     "all",
   );
-  const [highlightedGroup, setHighlightedGroup] = useState("");
+  const [highlightedStory, setHighlightedStory] = useState("");
   const [zoom, setZoom] = useState(100);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [tourStep, setTourStep] = useState(0);
   const [canvasViewport, setCanvasViewport] = useState({ width: 0, height: 0 });
+  const visibleTourStepCount = useRef(0);
   const flowCanvasRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{
     x: number;
@@ -4669,10 +4903,17 @@ function FlowsView({
     );
     setSearch("");
     setNodeFilter("all");
-    setHighlightedGroup("");
     setZoom(100);
     setPan({ x: 0, y: 0 });
   }, [flow?.id, selectedFlowNodeId]);
+  const storySelectionKey = stories
+    .map((story) => `${story.id}:${story.changeGroupIds.join(",")}`)
+    .join("|");
+  useEffect(() => {
+    setHighlightedStory((current) =>
+      stories.some((story) => story.id === current) ? current : "",
+    );
+  }, [storySelectionKey]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (
@@ -4693,12 +4934,16 @@ function FlowsView({
         );
       if (event.key === "n" || event.key === "ArrowRight")
         setTourStep((step) =>
-          Math.min((flow?.guidedTours[0]?.steps.length ?? 1) - 1, step + 1),
+          Math.min(
+            Math.max(visibleTourStepCount.current - 1, 0),
+            step + 1,
+          ),
         );
       if (event.key === "p" || event.key === "ArrowLeft")
         setTourStep((step) => Math.max(0, step - 1));
-      if (event.key === "+") setZoom((value) => Math.min(160, value + 10));
-      if (event.key === "-")
+      if (event.key === "+" || event.key === "=")
+        setZoom((value) => Math.min(160, value + 10));
+      if (event.key === "-" || event.key === "_")
         setZoom((value) => Math.max(MIN_GRAPH_ZOOM, value - 10));
       if (event.key === "0") {
         setZoom(100);
@@ -4733,7 +4978,32 @@ function FlowsView({
     };
   }, []);
   if (!flow) return <EmptyAnalysis />;
+  const selectedStory = stories.find((story) => story.id === highlightedStory);
+  const storyNeutral =
+    flow.type === "system-overview" ||
+    flow.nodes.every((node) => node.changeGroupIds.length === 0) &&
+    flow.edges.every((edge) => edge.changeGroupIds.length === 0);
+  const storyScopeActive = Boolean(selectedStory && !storyNeutral);
+  const storyGroupIds = new Set(selectedStory?.changeGroupIds ?? []);
+  const storyScopedNodeIds = storyScopeActive
+    ? new Set(
+        flow.nodes
+          .filter((node) =>
+            node.changeGroupIds.some((id) => storyGroupIds.has(id)),
+          )
+          .map((node) => node.id),
+      )
+    : new Set(flow.nodes.map((node) => node.id));
+  if (storyScopeActive) {
+    flow.edges.forEach((edge) => {
+      if (edge.changeGroupIds.some((id) => storyGroupIds.has(id))) {
+        storyScopedNodeIds.add(edge.source);
+        storyScopedNodeIds.add(edge.target);
+      }
+    });
+  }
   const filteredNodes = flow.nodes.filter((node) => {
+    if (!storyScopedNodeIds.has(node.id)) return false;
     const matchesKind =
       nodeFilter === "all" ||
       (nodeFilter === "changed" ? node.changed : !node.changed);
@@ -4745,10 +5015,20 @@ function FlowsView({
     );
   });
   const visibleIds = new Set(filteredNodes.map((node) => node.id));
+  const visibleNodeIndex = new Map(
+    filteredNodes.map((node, index) => [node.id, index] as const),
+  );
   const selected =
     filteredNodes.find((node) => node.id === selectedNode) ?? filteredNodes[0];
   const tour = flow.guidedTours[0];
-  const tourNodeId = tour?.steps[tourStep]?.nodeId;
+  const visibleTourSteps =
+    tour?.steps.filter((step) => visibleIds.has(step.nodeId)) ?? [];
+  visibleTourStepCount.current = visibleTourSteps.length;
+  const boundedTourStep = Math.min(
+    tourStep,
+    Math.max(visibleTourSteps.length - 1, 0),
+  );
+  const tourNodeId = visibleTourSteps[boundedTourStep]?.nodeId;
   const tabLabels: Record<Flow["type"], string> = {
     "system-overview": "System overview",
     "data-flow": "Data flow",
@@ -4762,7 +5042,10 @@ function FlowsView({
       : { x: 90 + (index % 3) * 190, y: 70 + Math.floor(index / 3) * 110 };
   const nodeWidth = overview ? 220 : 132;
   const nodeHeight = overview ? 92 : 44;
-  const rows = Math.max(1, Math.ceil(flow.nodes.length / (overview ? 2 : 3)));
+  const rows = Math.max(
+    1,
+    Math.ceil(filteredNodes.length / (overview ? 2 : 3)),
+  );
   const surfaceWidth = overview ? 620 : 700;
   const surfaceHeight = Math.max(360, 100 + rows * (overview ? 145 : 110));
   const viewportWidth = canvasViewport.width || 700;
@@ -4796,15 +5079,16 @@ function FlowsView({
     const thread = threads.find((candidate) => candidate.id === id);
     return thread ? [thread] : [];
   });
-  const graphGroups = groups.filter((group) =>
-    flow.nodes.some((node) => node.changeGroupIds.includes(group.id)),
-  );
   const visibleEdges = flow.edges.filter(
-    (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+    (edge) =>
+      visibleIds.has(edge.source) &&
+      visibleIds.has(edge.target) &&
+      (!storyScopeActive ||
+        edge.changeGroupIds.some((id) => storyGroupIds.has(id))),
   );
   const visibleNodeBoxes = filteredNodes.map((node) =>
     positionedGraphNodeBox(
-      nodePosition(flow.nodes.findIndex((candidate) => candidate.id === node.id)),
+      nodePosition(visibleNodeIndex.get(node.id) ?? 0),
       { width: nodeWidth, height: nodeHeight },
       !overview,
     ),
@@ -4819,10 +5103,10 @@ function FlowsView({
     edgeObstacles: GraphEdgeObstacle[] = [],
   ) => {
     const from = nodePosition(
-      flow.nodes.findIndex((node) => node.id === edge.source),
+      visibleNodeIndex.get(edge.source) ?? 0,
     );
     const to = nodePosition(
-      flow.nodes.findIndex((node) => node.id === edge.target),
+      visibleNodeIndex.get(edge.target) ?? 0,
     );
     const laneKey = `${edge.source}->${edge.target}`;
     const laneCount = edgeLaneCounts.get(laneKey) ?? 1;
@@ -4926,21 +5210,31 @@ function FlowsView({
             </button>
           ))}
         </div>
-        <label className="group-highlight">
-          <span>Group</span>
-          <SelectMenu
-            ariaLabel="Highlight change group"
-            value={highlightedGroup}
-            options={[
-              { value: "", label: "None" },
-              ...graphGroups.map((group) => ({
-                value: group.id,
-                label: group.title,
-              })),
-            ]}
-            onChange={setHighlightedGroup}
-          />
-        </label>
+        <div className="story-filter">
+          <span>Story</span>
+          {storyNeutral ? (
+            <span
+              className="story-neutral"
+              role="status"
+              aria-label="Story filter status"
+            >
+              Story-neutral
+            </span>
+          ) : (
+            <SelectMenu
+              ariaLabel="Filter by story"
+              value={highlightedStory}
+              options={[
+                { value: "", label: "All stories" },
+                ...stories.map((story) => ({
+                  value: story.id,
+                  label: story.title,
+                })),
+              ]}
+              onChange={setHighlightedStory}
+            />
+          )}
+        </div>
         <button
           className="secondary-button"
           aria-label="Zoom out"
@@ -5063,21 +5357,18 @@ function FlowsView({
                   })}
               </svg>
             )}
+            {selectedStory && storyScopeActive && filteredNodes.length === 0 && (
+              <div className="flow-empty-state" role="status" aria-label="Story flow empty">
+                No flow nodes are linked to this story in this view.
+              </div>
+            )}
             {filteredNodes.map((node) => {
-              const index = flow.nodes.findIndex(
-                (candidate) => candidate.id === node.id,
-              );
+              const index = visibleNodeIndex.get(node.id) ?? 0;
               const position = nodePosition(index);
-              const groupMatch =
-                !highlightedGroup ||
-                node.changeGroupIds.includes(highlightedGroup);
               return (
                 <button
                   key={node.id}
-                  data-change-group-highlight={
-                    highlightedGroup && groupMatch ? "true" : undefined
-                  }
-                  className={`flow-node ${overview ? "overview-card" : ""} ${node.changed ? "changed-node" : "context-node"} ${highlightedGroup && !groupMatch ? "group-muted" : ""} ${selected?.id === node.id || tourNodeId === node.id ? "focused" : ""}`}
+                  className={`flow-node ${overview ? "overview-card" : ""} ${node.changed ? "changed-node" : "context-node"} ${selected?.id === node.id || tourNodeId === node.id ? "focused" : ""}`}
                   style={{
                     left: position.x,
                     top: position.y,
@@ -5098,13 +5389,13 @@ function FlowsView({
           </div>
           <div className="flow-tour">
             <span>
-              Step {Math.min(tourStep + 1, tour?.steps.length ?? 1)} /{" "}
-              {tour?.steps.length ?? 1}
+              Step {visibleTourSteps.length ? boundedTourStep + 1 : 0} /{" "}
+              {visibleTourSteps.length}
             </span>
             <button
               className="secondary-button"
               aria-label="Previous tour"
-              disabled={tourStep === 0}
+              disabled={boundedTourStep === 0 || visibleTourSteps.length === 0}
               onClick={() => setTourStep((step) => Math.max(0, step - 1))}
             >
               Previous
@@ -5112,10 +5403,13 @@ function FlowsView({
             <button
               className="secondary-button"
               aria-label="Next tour"
-              disabled={tourStep >= (tour?.steps.length ?? 1) - 1}
+              disabled={
+                boundedTourStep >= visibleTourSteps.length - 1 ||
+                visibleTourSteps.length === 0
+              }
               onClick={() =>
                 setTourStep((step) =>
-                  Math.min((tour?.steps.length ?? 1) - 1, step + 1),
+                  Math.min(visibleTourSteps.length - 1, step + 1),
                 )
               }
             >
@@ -5409,7 +5703,7 @@ function DetailsView({
             <dd>
               {pr.walkthrough?.schemaVersion ??
                 pr.history.find((run) => run.schemaVersion)?.schemaVersion ??
-                (live ? "walkthrough/1.1.0" : "walkthrough/v1")}
+                "Not available"}
             </dd>
             <dt>Repository state</dt>
             <dd>
@@ -5491,6 +5785,25 @@ function DetailsView({
               <pre>{diagnostics.logExcerpt.join("\n")}</pre>
             </details>
           ) : null}
+          {diagnostics.events?.length ? (
+            <details>
+              <summary>Verbose execution trace ({diagnostics.events.length} events)</summary>
+              <ol className="diagnostics-activity">
+                {diagnostics.events.map((event, index) => (
+                  <li key={`${event.timestamp}:${event.event}:${index}`}>
+                    <code>{event.timestamp}</code> [{event.level}] {event.event}: {event.message}
+                    {event.durationMs !== undefined ? ` (${event.durationMs}ms)` : ""}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          ) : null}
+          {diagnostics.rawOutputExcerpt ? (
+            <details>
+              <summary>Provider output excerpt</summary>
+              <pre>{diagnostics.rawOutputExcerpt}</pre>
+            </details>
+          ) : null}
           <div className="diagnostics-actions">
             <button type="button" onClick={onExportDiagnostics}>
               Save diagnostic report
@@ -5544,7 +5857,7 @@ function DetailsView({
       <div className="run-history">
         <SectionTitle
           label="Run history"
-          action={pr.groups.length ? "Reopen walkthrough" : undefined}
+          action={pr.groups.length ? "Reopen review" : undefined}
           onAction={pr.groups.length ? onReopen : undefined}
         />
         <div className="history-table">
@@ -5605,7 +5918,7 @@ function EmptyAnalysis() {
   return (
     <div className="empty-analysis">
       <Sparkles size={20} />
-      <h4>Walkthrough not generated yet</h4>
+      <h4>Review not generated yet</h4>
       <p>
         Start a local analysis to map this pull request into reviewable
         behavior.

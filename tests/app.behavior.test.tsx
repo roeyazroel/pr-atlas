@@ -7,7 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { StrictMode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, {
   buildEvidenceCodeLines,
   calculateFitZoom,
@@ -16,10 +17,24 @@ import App, {
   routeGraphEdge,
 } from "../src/App";
 import { pullRequests } from "../src/data/demo";
+import type { AgentInstallationStatus, AnalysisProgressEvent } from "../shared/contracts";
 
 describe("PR Atlas desktop workflow", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
   });
 
   it("normalizes source and diff evidence into unified line rows", () => {
@@ -326,28 +341,119 @@ describe("PR Atlas desktop workflow", () => {
     );
   });
 
-  it("opens the settings page from the sidebar and returns to pull requests", async () => {
+  it("opens settings and returns to the PR view without changing the sidebar", async () => {
     const user = userEvent.setup();
     render(<App />);
 
+    const list = screen.getByRole("list", { name: /pull request list/i });
+    const initialRows = within(list).getAllByRole("listitem");
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+
     await user.click(screen.getByRole("button", { name: /open settings/i }));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+    expect(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
     await user.click(screen.getByText("Theme"));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
     await user.click(document.body);
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
+
     await user.click(
-      screen.getByRole("button", { name: /back to pull requests/i }),
+      screen.getByRole("button", { name: /return to pull requests/i }),
     );
     expect(
-      screen.queryByRole("heading", { name: /workspace settings/i }),
+      screen.queryByRole("heading", { name: /^settings$/i }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /^pull requests$/i }),
+    ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+  });
+
+  it("opens the activity log and returns to the PR view without changing the sidebar", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const list = screen.getByRole("list", { name: /pull request list/i });
+    const initialRows = within(list).getAllByRole("listitem");
+    await user.click(screen.getByRole("button", { name: /open activity log/i }));
+    expect(screen.getByRole("heading", { name: /analysis log/i })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: /analysis log events/i })).toBeInTheDocument();
+    expect(document.querySelector(".logging-page")).toHaveClass("logging-page");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+    expect(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
+
+    await user.click(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    );
+    expect(
+      screen.queryByRole("heading", { name: /analysis log/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /^pull requests$/i }),
+    ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+  });
+
+  it("shares one in-flight provider discovery during Strict Mode startup", async () => {
+    let resolveProviders: ((value: AgentInstallationStatus[]) => void) | undefined;
+    const capabilities = {
+      structuredOutput: true,
+      streaming: false,
+      sessionContinuation: false,
+      readOnly: true,
+      toolAllowlist: false,
+      modelSelection: true,
+      authenticationState: false,
+    };
+    const api = {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [], warnings: [] })),
+      listProviders: vi.fn(() => new Promise((resolve) => { resolveProviders = resolve; })),
+      listPullRequests: vi.fn(async () => []),
+      subscribeAnalysisProgress: vi.fn(() => () => undefined),
+    };
+    Object.defineProperty(window, "prAtlas", {
+      configurable: true,
+      writable: true,
+      value: api,
+    });
+
+    render(<StrictMode><App /></StrictMode>);
+
+    await waitFor(() => expect(api.listProviders).toHaveBeenCalledTimes(1));
+    resolveProviders?.([{
+      provider: "cursor",
+      displayName: "Cursor Agent",
+      executable: "cursor-agent",
+      installed: true,
+      capabilities,
+      models: [{ id: "auto", label: "Auto", isDefault: true }],
+    }]);
+    await waitFor(() => expect(screen.queryByText(/detecting claude code/i)).not.toBeInTheDocument());
   });
 
   it("defaults to the system theme and exposes accessible controls on the sidebar settings page", async () => {
@@ -359,21 +465,40 @@ describe("PR Atlas desktop workflow", () => {
       removeEventListener: vi.fn(),
     }));
     vi.stubGlobal("matchMedia", matchMedia);
+    window.localStorage.setItem(
+      "atlas:custom-prompt",
+      JSON.stringify("Persisted guidance must not become the default."),
+    );
 
     render(<App />);
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     await user.click(screen.getByRole("button", { name: /open settings/i }));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /back to pull requests/i }),
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
+    expect(
+      screen.queryByLabelText(/next analysis profile/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("navigation", { name: /settings sections/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: /theme/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^system$/i })).toBeChecked();
     expect(screen.getByRole("radio", { name: /^light$/i })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /^dark$/i })).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/supplemental collection guidance/i),
+    ).toHaveValue("");
+    expect(
+      screen.getByLabelText(/supplemental collection guidance/i),
+    ).toHaveAttribute(
+      "placeholder",
+      "Example: collect more migration, rollback, or test evidence",
+    );
   });
 
   it("persists explicit theme choices and applies them to the document", async () => {
@@ -409,6 +534,14 @@ describe("PR Atlas desktop workflow", () => {
 
     render(<App />);
     expect(screen.getByText("PR Atlas", { exact: true })).toBeInTheDocument();
+  });
+
+  it("keeps an explicitly saved analysis timeout instead of replacing it with the fresh-install default", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem("atlas:analysis-config", JSON.stringify({ timeoutMinutes: 25 }));
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /open settings/i }));
+    expect(screen.getByRole("spinbutton", { name: /analysis timeout minutes/i })).toHaveValue(25);
   });
 
   it("tracks operating-system theme changes while System is selected", async () => {
@@ -473,6 +606,70 @@ describe("PR Atlas desktop workflow", () => {
     expect(
       document.querySelector(".pr-list-pane .list-footer"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /keyboard shortcuts/i }),
+    ).toHaveClass("sidebar-utility-button");
+    expect(screen.getByRole("button", { name: /open settings/i })).toHaveClass(
+      "sidebar-utility-button",
+    );
+  });
+
+  it("opens the keyboard shortcuts page from the sidebar and lists every binding", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(
+      screen.getByRole("button", { name: /keyboard shortcuts/i }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: /^keyboard shortcuts$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: /workspace shortcuts/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: /pull requests shortcuts/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: /flows shortcuts/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Select next pull request"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Submit the comment composer"),
+    ).toBeInTheDocument();
+    const legend = screen.getByRole("note");
+    expect(legend).toHaveTextContent(/Ctrl on Windows and Linux/i);
+    expect(legend).toHaveTextContent(/⌘ on macOS/i);
+  });
+
+  it("navigates pull requests and sections with keyboard shortcuts", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const list = screen.getByRole("list", { name: /pull request list/i });
+    const initial = within(list).getByRole("listitem", { name: /#482/i });
+    expect(initial).toHaveClass("selected");
+
+    await user.keyboard("j");
+    expect(initial).not.toHaveClass("selected");
+
+    await user.keyboard("{Control>}2{/Control}");
+    expect(screen.getByRole("button", { name: /^review$/i })).toHaveClass(
+      "active",
+    );
+
+    await user.keyboard("?");
+    expect(
+      screen.getByRole("heading", { name: /^keyboard shortcuts$/i }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("heading", { name: /^keyboard shortcuts$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("filters the pull-request list without losing the selected item", async () => {
@@ -492,7 +689,7 @@ describe("PR Atlas desktop workflow", () => {
     );
   });
 
-  it("switches the selected PR between overview and walkthrough", async () => {
+  it("switches the selected PR between overview and Review", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -500,23 +697,23 @@ describe("PR Atlas desktop workflow", () => {
       "active",
     );
 
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
 
-    expect(screen.getByRole("button", { name: /^walkthrough$/i })).toHaveClass(
+    expect(screen.getByRole("button", { name: /^review$/i })).toHaveClass(
       "active",
     );
-    expect(screen.getByText(/guided review/i)).toBeInTheDocument();
+    expect(screen.getByText(/follow the change story/i)).toBeInTheDocument();
   });
 
-  it("renders the ready demo PR from its rich 1.1 walkthrough instead of fallback copy", async () => {
+  it("renders the ready demo PR from its schema 2 review instead of fallback copy", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(
-      screen.getByText(
+      screen.getAllByText(
         "Refresh tokens rotate at the server boundary before a workspace request can reuse the old credential.",
-      ),
-    ).toBeInTheDocument();
+      ).length,
+    ).toBeGreaterThan(0);
     expect(
       screen.getByText(
         "The session service becomes the only owner of refresh-token hashing and rotation.",
@@ -532,38 +729,21 @@ describe("PR Atlas desktop workflow", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("2 covered")).toBeInTheDocument();
     expect(screen.getByText("1 partial · 1 missing")).toBeInTheDocument();
-    expect(
-      screen.getByText("Review server-side token rotation"),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("Session-owned rotation").length).toBeGreaterThan(0);
 
     const fixture = pullRequests.find((pr) => pr.id === "atlas-482");
-    const firstStep = fixture?.walkthrough?.walkthrough[0];
-    expect(fixture?.walkthrough?.schemaVersion).toBe("1.1.0");
-    expect(firstStep).toMatchObject({
-      reason:
-        "Review the credential boundary first because every callback and refresh path depends on it.",
-      evidenceIds: ["demo-session-file", "demo-rotate-symbol"],
-      flowNodeIds: ["data-flow-2", "data-flow-3"],
-      testIds: ["test1", "test3"],
-      reviewInsightIds: ["i1"],
-      limitations: [
-        "The fixture does not model a provider-side token revocation event.",
-      ],
+    expect(fixture?.walkthrough?.schemaVersion).toBe("2.0.0");
+    expect(fixture?.walkthrough).toMatchObject({
+      primaryStoryId: "story-session",
+      reviewPlan: ["story-session", "story-callback", "story-migration", "story-coverage"],
     });
 
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
     expect(
-      screen.getByText(/guided review · step 1 of 4/i),
+      screen.getByText(/review · schema 2/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "Review the credential boundary first because every callback and refresh path depends on it.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "The fixture does not model a provider-side token revocation event.",
-      ),
+      screen.getByText("Start at the credential boundary because every callback and refresh path depends on it."),
     ).toBeInTheDocument();
     expect(
       screen.getAllByText(/apps\/api\/src\/session\/session\.service\.ts/),
@@ -572,14 +752,31 @@ describe("PR Atlas desktop workflow", () => {
     expect(
       screen.getByText(/Rotation can invalidate parallel requests/),
     ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: /Refresh token data: normalize/i }),
-    );
+    expect(screen.getByText("Provider revocation remains external")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /supporting story: callback handoff ordering/i }));
+    expect(screen.queryByText("Provider revocation remains external")).not.toBeInTheDocument();
+    expect(screen.getByText("No unchanged interactions linked.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /primary story: session-owned rotation/i }));
+    expect(screen.getByText("Provider revocation remains external")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /open in flows/i })[0]!);
     expect(
       screen.getByRole("heading", { name: "Refresh token data" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Selected: normalize()")).toBeInTheDocument();
-    expect(screen.queryByText("Selected: OAuth callback")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Refresh token data" })).toBeInTheDocument();
+  });
+
+  it("exposes schema 2 demo stories in the Flows story filter", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /^flows$/i }));
+    await user.click(screen.getByRole("tab", { name: "Data flow" }));
+    await user.click(screen.getByRole("button", { name: "Filter by story" }));
+
+    expect(screen.getByRole("option", { name: "Session-owned rotation" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Callback handoff ordering" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Staged token migration" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Executable regression coverage" })).toBeInTheDocument();
   });
 
   it("keeps a failed fixture run visibly failed in analysis history", async () => {
@@ -602,203 +799,6 @@ describe("PR Atlas desktop workflow", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps notes scoped to each hydrated walkthrough step while navigating and saving", async () => {
-    const user = userEvent.setup();
-    const capabilities = {
-      structuredOutput: true,
-      streaming: true,
-      sessionContinuation: false,
-      readOnly: true,
-      toolAllowlist: true,
-      modelSelection: true,
-      authenticationState: true,
-    };
-    const repository = {
-      source: "github" as const,
-      id: "repo-notes",
-      name: "notes",
-      fullName: "runway/notes",
-      owner: "runway",
-      private: true,
-      defaultBranch: "main",
-      updatedAt: "2026-08-05T08:00:00.000Z",
-      url: "https://github.com/runway/notes",
-    };
-    const pullRequest = {
-      source: "github" as const,
-      id: "pr-notes",
-      repository: repository.fullName,
-      number: 77,
-      title: "Keep walkthrough notes scoped",
-      url: "https://github.com/runway/notes/pull/77",
-      state: "open",
-      author: "maya",
-      baseRef: "main",
-      headRef: "feature/notes",
-      baseSha: "a".repeat(40),
-      headSha: "b".repeat(40),
-      updatedAt: "2026-08-05T08:00:00.000Z",
-      isDraft: false,
-      additions: 3,
-      deletions: 1,
-      changedFiles: 1,
-      labels: [],
-      reviewDecision: null,
-      reviewRequested: false,
-    };
-    const baseDocument = pullRequests.find(
-      (pr) => pr.id === "atlas-482",
-    )!.walkthrough!;
-    const document = {
-      ...baseDocument,
-      run: { ...baseDocument.run, id: "run-notes", provider: "claude" },
-      pullRequest: {
-        ...baseDocument.pullRequest,
-        repository: repository.fullName,
-        number: pullRequest.number,
-        baseSha: pullRequest.baseSha,
-        headSha: pullRequest.headSha,
-      },
-    };
-    const summary = {
-      runId: "run-notes",
-      repository: repository.fullName,
-      pullNumber: pullRequest.number,
-      baseSha: pullRequest.baseSha,
-      headSha: pullRequest.headSha,
-      provider: "claude" as const,
-      status: "ready" as const,
-      createdAt: "2026-08-05T08:00:00.000Z",
-      schemaVersion: "1.1.0",
-      artifactDirectory: "/tmp/run-notes",
-    };
-    const setReviewProgress = vi.fn(
-      async (_repository, _number, value) => value,
-    );
-    const api = {
-      bootstrap: vi.fn(async () => ({
-        account: null,
-        repositories: [repository],
-        warnings: [],
-      })),
-      listProviders: vi.fn(async () => [
-        {
-          provider: "claude",
-          displayName: "Claude Code",
-          executable: "claude",
-          installed: true,
-          capabilities,
-        },
-      ]),
-      listPullRequests: vi.fn(async () => [pullRequest]),
-      listPullRequestComments: vi.fn(async () => []),
-      createPullRequestComment: vi.fn(async () => { throw new Error("unused in this test"); }),
-      startAnalysis: vi.fn(),
-      cancelAnalysis: vi.fn(async () => true),
-      listAnalysisRuns: vi.fn(async () => [summary]),
-      loadAnalysisRun: vi.fn(async () => ({
-        runId: summary.runId,
-        status: "ready" as const,
-        document,
-        manifest: summary,
-        artifactDirectory: summary.artifactDirectory,
-      })),
-      getReviewProgress: vi.fn(async () => [
-        {
-          runId: summary.runId,
-          stepId: "step-session-boundary",
-          status: "pending" as const,
-          note: "hydrated first",
-          updatedAt: "2026-08-05T08:01:00.000Z",
-        },
-        {
-          runId: summary.runId,
-          stepId: "step-callback-handoff",
-          status: "pending" as const,
-          note: "hydrated second",
-          updatedAt: "2026-08-05T08:01:00.000Z",
-        },
-      ]),
-      setReviewProgress,
-      openExternal: vi.fn(async () => true),
-      subscribeAnalysisProgress: vi.fn(() => () => undefined),
-    };
-    Object.defineProperty(window, "prAtlas", {
-      configurable: true,
-      writable: true,
-      value: api,
-    });
-    try {
-      render(<App />);
-      await user.click(
-        await screen.findByRole("listitem", {
-          name: /#77 keep walkthrough notes scoped/i,
-        }),
-      );
-      await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
-      const note = await screen.findByRole("textbox", { name: /review note/i });
-      expect(note).toHaveValue("hydrated first");
-      await user.clear(note);
-      await user.type(note, "first draft");
-      await user.click(
-        screen.getByRole("button", {
-          name: /step 2: review callback handoff ordering/i,
-        }),
-      );
-      expect(screen.getByRole("textbox", { name: /review note/i })).toHaveValue(
-        "hydrated second",
-      );
-      await user.clear(screen.getByRole("textbox", { name: /review note/i }));
-      await user.type(
-        screen.getByRole("textbox", { name: /review note/i }),
-        "second draft",
-      );
-      await user.click(
-        screen.getByRole("button", { name: /needs follow-up/i }),
-      );
-      await waitFor(() =>
-        expect(setReviewProgress).toHaveBeenCalledWith(
-          repository.fullName,
-          pullRequest.number,
-          expect.objectContaining({
-            stepId: "step-callback-handoff",
-            note: "second draft",
-          }),
-        ),
-      );
-      await user.click(screen.getByRole("button", { name: /next step/i }));
-      await user.click(screen.getByRole("button", { name: /previous/i }));
-      expect(screen.getByRole("textbox", { name: /review note/i })).toHaveValue(
-        "second draft",
-      );
-      await user.click(
-        screen.getByRole("button", {
-          name: /step 1: review server-side token rotation/i,
-        }),
-      );
-      expect(screen.getByRole("textbox", { name: /review note/i })).toHaveValue(
-        "first draft",
-      );
-      await user.click(screen.getByRole("button", { name: /mark reviewed/i }));
-      await waitFor(() =>
-        expect(setReviewProgress).toHaveBeenCalledWith(
-          repository.fullName,
-          pullRequest.number,
-          expect.objectContaining({
-            stepId: "step-session-boundary",
-            note: "first draft",
-          }),
-        ),
-      );
-    } finally {
-      Object.defineProperty(window, "prAtlas", {
-        configurable: true,
-        writable: true,
-        value: undefined,
-      });
-    }
-  });
-
   it("shows analysis progress and returns to idle when cancelled", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -818,9 +818,7 @@ describe("PR Atlas desktop workflow", () => {
 
     await user.click(screen.getByRole("button", { name: /cancel/i }));
 
-    expect(
-      screen.getByText(/walkthrough not generated yet/i),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^review$/i })).toHaveClass("active");
   });
 
   it("completes local analysis into a rendered walkthrough", async () => {
@@ -891,14 +889,7 @@ describe("PR Atlas desktop workflow", () => {
       reviewRequested: false,
     };
     const startAnalysis = vi.fn(() => new Promise<never>(() => undefined));
-    let progressListener:
-      | ((event: {
-          runId: string;
-          stage: "generating" | "validating";
-          message: string;
-          timestamp: string;
-        }) => void)
-      | undefined;
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
     const api = {
       bootstrap: vi.fn(async () => ({
         account: null,
@@ -964,6 +955,27 @@ describe("PR Atlas desktop workflow", () => {
       act(() => {
         progressListener?.({
           runId: "run-live",
+          stage: "anchoring",
+          taskState: "complete",
+          message: "Anchor accepted.",
+          timestamp: "2026-08-06T06:27:00.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
+          stage: "review",
+          taskState: "running",
+          message: "Walkthrough specialist started.",
+          timestamp: "2026-08-06T06:27:30.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
+          stage: "tests-risks",
+          taskState: "failed",
+          message: "Tests specialist rejected.",
+          timestamp: "2026-08-06T06:27:45.000Z",
+        });
+        progressListener?.({
+          runId: "run-live",
           stage: "generating",
           message: "Map batch 1/2 started · 10 source units.",
           timestamp: "2026-08-06T06:28:00.000Z",
@@ -991,6 +1003,18 @@ describe("PR Atlas desktop workflow", () => {
       expect(
         screen.getByRole("log", { name: /agent activity/i }),
       ).toHaveTextContent("Reducer started");
+      expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Anchor");
+      expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Validation");
+      expect(screen.getByRole("listitem", { name: /anchor: complete\. Anchor accepted\./i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /review: running\. Walkthrough specialist started\./i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /tests & risks: failed\. Tests specialist rejected\./i })).toBeInTheDocument();
+      act(() => {
+        progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "running", message: "Anchor restarted.", timestamp: "2026-08-06T06:30:01.000Z" });
+        progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "failed", message: "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", timestamp: "2026-08-06T06:30:02.000Z" });
+        progressListener?.({ runId: "run-live", stage: "generating", message: "Cursor coordinator instruction isolation was unavailable; using legacy analysis.", timestamp: "2026-08-06T06:30:03.000Z" });
+      });
+      expect(screen.getByRole("listitem", { name: /anchor: failed\. Cursor coordinator instruction isolation was unavailable/i })).toBeInTheDocument();
+      expect(screen.queryByRole("listitem", { name: /anchor: running/i })).not.toBeInTheDocument();
       expect(
         screen.getByText(
           /large pr: 30 files and 1,350 changed lines\. analysis may take several minutes\./i,
@@ -1004,6 +1028,52 @@ describe("PR Atlas desktop workflow", () => {
       });
       vi.useRealTimers();
     }
+  });
+
+  it("does not show coordinator task rows for a live deletion fallback despite coordinator selection", async () => {
+    const repository = { source: "github", id: "repo-legacy", name: "atlas", fullName: "runway/atlas", owner: "runway", private: true, defaultBranch: "main", updatedAt: "2026-08-04T08:00:00.000Z", url: "https://github.com/runway/atlas" };
+    const pullRequest = { source: "github", id: "pr-legacy", repository: repository.fullName, number: 47, title: "Deletion fallback analysis", url: "https://github.com/runway/atlas/pull/47", state: "open", author: "maya", baseRef: "main", headRef: "feature/legacy", baseSha: "base-legacy", headSha: "head-legacy", updatedAt: "2026-08-04T08:30:00.000Z", isDraft: false, additions: 1_200, deletions: 150, changedFiles: 30, labels: [], reviewDecision: null, reviewRequested: false };
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
+    Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [repository], warnings: [] })),
+      listProviders: vi.fn(async () => [{ provider: "claude", displayName: "Claude Code", executable: "claude", installed: true, version: "1.2.3", capabilities: { structuredOutput: true, streaming: true, sessionContinuation: false, readOnly: true, toolAllowlist: true, modelSelection: true, authenticationState: true } }]),
+      listPullRequests: vi.fn(async () => [pullRequest]), listPullRequestComments: vi.fn(async () => []), createPullRequestComment: vi.fn(async () => { throw new Error("unused"); }), startAnalysis: vi.fn(() => new Promise<never>(() => undefined)), cancelAnalysis: vi.fn(async () => true), listAnalysisRuns: vi.fn(async () => []), loadAnalysisRun: vi.fn(async () => null), openExternal: vi.fn(async () => true), subscribeAnalysisProgress: vi.fn((listener) => { progressListener = listener; return () => undefined; }),
+    } });
+    try {
+      render(<App />); await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+      fireEvent.click(within(screen.getByRole("list", { name: /pull request list/i })).getByRole("listitem", { name: /#47 deletion fallback analysis/i }));
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+      act(() => {
+        progressListener?.({ runId: "run-legacy", stage: "generating", message: "Legacy batch started.", timestamp: "2026-08-06T06:30:00.000Z" });
+        progressListener?.({ runId: "run-legacy", stage: "validating", message: "Legacy reducer validating.", timestamp: "2026-08-06T06:30:10.000Z" });
+        progressListener?.({ runId: "run-legacy", stage: "complete", message: "Legacy result complete.", timestamp: "2026-08-06T06:30:20.000Z" });
+      });
+      expect(screen.queryByRole("list", { name: /coordinator tasks/i })).not.toBeInTheDocument();
+    } finally { Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: undefined }); }
+  });
+
+  it("does not show coordinator task rows for a small direct analysis without coordinator progress", async () => {
+    const repository = { source: "github", id: "repo-small", name: "atlas", fullName: "runway/atlas", owner: "runway", private: true, defaultBranch: "main", updatedAt: "2026-08-04T08:00:00.000Z", url: "https://github.com/runway/atlas" };
+    const pullRequest = { source: "github", id: "pr-small", repository: repository.fullName, number: 48, title: "Small direct analysis", url: "https://github.com/runway/atlas/pull/48", state: "open", author: "maya", baseRef: "main", headRef: "feature/small", baseSha: "base-small", headSha: "head-small", updatedAt: "2026-08-04T08:30:00.000Z", isDraft: false, additions: 1, deletions: 0, changedFiles: 1, labels: [], reviewDecision: null, reviewRequested: false };
+    let progressListener: ((event: AnalysisProgressEvent) => void) | undefined;
+    Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: {
+      bootstrap: vi.fn(async () => ({ account: null, repositories: [repository], warnings: [] })),
+      listProviders: vi.fn(async () => [{ provider: "claude", displayName: "Claude Code", executable: "claude", installed: true, version: "1.2.3", capabilities: { structuredOutput: true, streaming: true, sessionContinuation: false, readOnly: true, toolAllowlist: true, modelSelection: true, authenticationState: true } }]),
+      listPullRequests: vi.fn(async () => [pullRequest]), listPullRequestComments: vi.fn(async () => []), createPullRequestComment: vi.fn(async () => { throw new Error("unused"); }), startAnalysis: vi.fn(() => new Promise<never>(() => undefined)), cancelAnalysis: vi.fn(async () => true), listAnalysisRuns: vi.fn(async () => []), loadAnalysisRun: vi.fn(async () => null), openExternal: vi.fn(async () => true), subscribeAnalysisProgress: vi.fn((listener) => { progressListener = listener; return () => undefined; }),
+    } });
+    try {
+      render(<App />); await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+      fireEvent.click(within(screen.getByRole("list", { name: /pull request list/i })).getByRole("listitem", { name: /#48 small direct analysis/i }));
+      fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }));
+      act(() => {
+        progressListener?.({ runId: "run-small", stage: "generating", message: "Direct provider started.", timestamp: "2026-08-06T06:31:00.000Z" });
+        progressListener?.({ runId: "run-small", stage: "validating", message: "Direct provider validating.", timestamp: "2026-08-06T06:31:10.000Z" });
+        progressListener?.({ runId: "run-small", stage: "complete", message: "Direct result complete.", timestamp: "2026-08-06T06:31:20.000Z" });
+      });
+      expect(screen.queryByRole("list", { name: /coordinator tasks/i })).not.toBeInTheDocument();
+    } finally { Object.defineProperty(window, "prAtlas", { configurable: true, writable: true, value: undefined }); }
   });
 
   it("offers same-head reruns for a ready live pull request with the selected provider", async () => {
@@ -1057,7 +1127,7 @@ describe("PR Atlas desktop workflow", () => {
       guidedTours: [],
     });
     const document = {
-      schemaVersion: "1.1.0",
+      schemaVersion: "2.0.0",
       run: {
         id: "run-rerun",
         createdAt: "2026-08-04T08:35:00.000Z",
@@ -1079,7 +1149,9 @@ describe("PR Atlas desktop workflow", () => {
         limitations: [],
       },
       changeGroups: [],
-      walkthrough: [],
+      stories: [],
+      primaryStoryId: "",
+      reviewPlan: [],
       graphs: {
         systemOverview: graph("system-overview"),
         dataFlow: graph("data-flow"),
@@ -1089,6 +1161,9 @@ describe("PR Atlas desktop workflow", () => {
       tests: [],
       reviewThreads: [],
       reviewInsights: [],
+      risks: [],
+      dependencies: [],
+      unchangedInteractions: [],
       evidence: [],
     };
     const runResult = {
@@ -1104,7 +1179,7 @@ describe("PR Atlas desktop workflow", () => {
         provider: "codex",
         status: "ready",
         createdAt: "2026-08-04T08:35:00.000Z",
-        schemaVersion: "1.1.0",
+        schemaVersion: "2.0.0",
         artifactDirectory: "/tmp/run-rerun",
       },
       artifactDirectory: "/tmp/run-rerun",
@@ -1170,6 +1245,8 @@ describe("PR Atlas desktop workflow", () => {
         screen.getByRole("button", { name: /analysis depth/i }),
       );
       await user.click(screen.getByRole("option", { name: "Deep" }));
+      await user.click(screen.getByRole("button", { name: /scan engine/i }));
+      await user.click(screen.getByRole("option", { name: /legacy batching/i }));
       await user.click(
         screen.getByRole("checkbox", { name: /include review comments/i }),
       );
@@ -1180,6 +1257,7 @@ describe("PR Atlas desktop workflow", () => {
       const timeoutMinutes = screen.getByRole("spinbutton", {
         name: /analysis timeout minutes/i,
       });
+      expect(timeoutMinutes).toHaveValue(40);
       fireEvent.change(timeoutMinutes, { target: { value: "25" } });
       const analysisDays = await screen.findByRole("spinbutton", {
         name: /analysis retention days/i,
@@ -1211,6 +1289,7 @@ describe("PR Atlas desktop workflow", () => {
           name: /send repository context to codex cli/i,
         }),
       ).toBeInTheDocument();
+      expect(screen.getByText(/legacy batching engine/i)).toBeInTheDocument();
       expect(screen.getByText(/thinking effort:/i)).toHaveTextContent("High");
       await user.click(screen.getByRole("button", { name: /continue/i }));
       await act(async () => {
@@ -1258,6 +1337,7 @@ describe("PR Atlas desktop workflow", () => {
           effort: "high",
           config: {
             depth: "deep",
+            scanMode: "legacy",
             includeReviewComments: false,
             maxGraphNodes: 120,
             timeoutMinutes: 25,
@@ -1275,7 +1355,7 @@ describe("PR Atlas desktop workflow", () => {
 
   it.each([
     ["failed", "CLAUDE_FAILED"],
-    ["invalid", "INVALID_WALKTHROUGH"],
+    ["invalid", "INVALID_REVIEW_DOCUMENT"],
     ["cancelled", "CANCELLED"],
   ] as const)(
     "shows a newly %s run in diagnostics, history, and retry controls without refresh",
@@ -1492,37 +1572,29 @@ describe("PR Atlas desktop workflow", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
     await user.click(screen.getByRole("button", { name: /mark reviewed/i }));
-    expect(
-      screen.getByRole("button", { name: /reviewed/i }),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("reviewed").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /^overview$/i }));
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
 
-    expect(
-      screen.getByRole("button", { name: /reviewed/i }),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("reviewed").length).toBeGreaterThan(0);
   });
 
   it("does not bleed review progress between pull requests sharing group ids", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
     await user.click(screen.getByRole("button", { name: /mark reviewed/i }));
-    expect(
-      screen.getByRole("button", { name: /reviewed/i }),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("reviewed").length).toBeGreaterThan(0);
 
     const list = screen.getByRole("list", { name: /pull request list/i });
     await user.click(within(list).getByRole("listitem", { name: /#476/i }));
-    await user.click(screen.getByRole("button", { name: /^walkthrough$/i }));
+    await user.click(screen.getByRole("button", { name: /^review$/i }));
 
-    expect(
-      screen.getByRole("button", { name: /mark reviewed/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/review is not available yet/i)).toBeInTheDocument();
   });
 
   it.each([

@@ -40,7 +40,7 @@ export function safeError(
 ): SafeDiagnostic {
   return { code, message, ...(details?.length ? { details } : {}) };
 }
-export function validateAnalysisRunConfig(
+function validateAnalysisRunConfig(
   value: unknown,
 ): AnalysisRunConfig | null {
   if (value === undefined) return { ...DEFAULT_ANALYSIS_RUN_CONFIG };
@@ -53,6 +53,8 @@ export function validateAnalysisRunConfig(
   )
     return null;
   if (typeof config.includeReviewComments !== "boolean") return null;
+  if (config.scanMode !== undefined && config.scanMode !== "coordinator" && config.scanMode !== "legacy")
+    return null;
   if (
     !Number.isInteger(config.maxGraphNodes) ||
     (config.maxGraphNodes as number) < 20 ||
@@ -67,6 +69,7 @@ export function validateAnalysisRunConfig(
     return null;
   return {
     depth: config.depth,
+    scanMode: config.scanMode ?? "coordinator",
     includeReviewComments: config.includeReviewComments,
     maxGraphNodes: config.maxGraphNodes as number,
     timeoutMinutes: config.timeoutMinutes as number,
@@ -169,16 +172,19 @@ export function validateAnalysisRequest(
         "Analysis configuration contains unsupported values.",
       ),
     };
-  return {
-    valid: true,
-    value: {
-      ...(request as AnalysisRequest),
-      config,
-      ...(request.customPrompt !== undefined
-        ? { customPrompt: request.customPrompt.trim() }
-        : {}),
-    },
+  const normalized: AnalysisRequest = {
+    ...(request as AnalysisRequest),
+    config,
+    ...(request.customPrompt !== undefined
+      ? { customPrompt: request.customPrompt.trim() }
+      : {}),
   };
+  if (normalized.provider === "cursor") {
+    const cursorRequest = { ...normalized };
+    delete cursorRequest.effort;
+    return { valid: true, value: cursorRequest };
+  }
+  return { valid: true, value: normalized };
 }
 
 export function safeExternalUrl(value: unknown): string | null {

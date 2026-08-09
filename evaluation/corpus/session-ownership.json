@@ -10,7 +10,7 @@
       { "id": "storage-migration", "titleKeywords": ["storage", "migration"], "contentKeywords": ["hash", "expiry"] },
       { "id": "callback-handoff", "titleKeywords": ["callback", "handoff"], "contentKeywords": ["redirect", "race"] }
     ],
-    "reviewOrder": ["storage-migration", "session-boundary", "callback-handoff"],
+    "reviewOrder": ["session-boundary", "storage-migration", "callback-handoff"],
     "evidencePaths": ["db/migrations/session.sql", "api/session/service.ts", "web/auth/callback.tsx"],
     "limitationKeywords": ["runtime", "concurrency"],
     "flowEdges": [{ "graph": "data-flow", "source": "callback", "target": "session-service", "labelKeywords": ["creates"] }],
@@ -19,6 +19,7 @@
     "threadStates": { "thread-race": "active", "thread-retry": "outdated" }
   },
   "actual": {
+    "schemaVersion": "2.0.0",
     "summary": {
       "intent": "Move session ownership into the server-side session service.",
       "behavioralChanges": ["The service rotates refresh credentials before returning a session."],
@@ -30,15 +31,18 @@
       { "id": "session-boundary", "title": "Session boundary", "summary": "Moves rotation into the server service.", "evidenceIds": ["ev-service"] },
       { "id": "callback-handoff", "title": "Callback handoff", "summary": "Orders durable state before redirect to avoid a race.", "evidenceIds": ["ev-callback"] }
     ],
-    "walkthrough": [
-      { "id": "step-1", "changeGroupId": "storage-migration", "evidenceIds": ["ev-migration"] },
-      { "id": "step-2", "changeGroupId": "session-boundary", "evidenceIds": ["ev-service"] },
-      { "id": "step-3", "changeGroupId": "callback-handoff", "evidenceIds": ["ev-callback"] }
+    "stories": [
+      { "id": "story-session", "title": "Session boundary", "summary": "Review the server-owned rotation boundary first.", "relationshipToPrimary": "primary", "relationshipRationale": "It is the central user-visible ownership change.", "reviewReason": "Review ownership before its storage and callback consequences.", "changeGroupIds": ["session-boundary"], "dependsOnStoryIds": [] },
+      { "id": "story-storage", "title": "Storage migration", "summary": "Review durable session state after the ownership boundary.", "relationshipToPrimary": "supporting", "relationshipRationale": "It implements the primary service-owned session state.", "reviewReason": "Review persistence after the service contract is clear.", "changeGroupIds": ["storage-migration"], "dependsOnStoryIds": ["story-session"] },
+      { "id": "story-callback", "title": "Callback handoff", "summary": "Review redirect ordering after durable state is established.", "relationshipToPrimary": "supporting", "relationshipRationale": "It completes the client handoff for the primary behavior.", "reviewReason": "Review the callback once state creation and storage are understood.", "changeGroupIds": ["callback-handoff"], "dependsOnStoryIds": ["story-storage"] }
     ],
+    "primaryStoryId": "story-session",
+    "reviewPlan": ["story-session", "story-storage", "story-callback"],
     "graphs": { "dataFlow": { "id": "data-flow", "edges": [{ "source": "callback", "target": "session-service", "label": "creates session" }] } },
     "tests": [{ "id": "test-race", "title": "Concurrent refresh", "behavior": "Concurrent refresh calls converge safely.", "status": "partial", "changeGroupIds": ["session-boundary"], "evidenceIds": ["ev-service"] }],
     "reviewThreads": [{ "id": "thread-race", "status": "active", "evidenceIds": ["ev-service"] }, { "id": "thread-retry", "status": "outdated", "evidenceIds": ["ev-service"] }],
     "reviewInsights": [{ "id": "insight-race", "status": "disputed", "reviewThreadIds": ["thread-race", "thread-retry"], "evidenceIds": ["ev-service"] }],
+    "risks": [], "dependencies": [], "unchangedInteractions": [],
     "evidence": [
       { "id": "ev-migration", "path": "db/migrations/session.sql" },
       { "id": "ev-service", "path": "api/session/service.ts" },

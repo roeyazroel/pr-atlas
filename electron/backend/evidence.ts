@@ -1,6 +1,6 @@
 import { open, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { WalkthroughDocument } from "../../shared/contracts.js";
+import type { ReviewDocument } from "../../shared/contracts.js";
 import type { EvidenceDetail } from "../../shared/contracts.js";
 import { validateRepository } from "./validation.js";
 
@@ -215,8 +215,8 @@ export async function normalizeDocumentEvidencePaths(
   headSha: string,
   worktree: string,
   inputDirectory: string,
-  document: WalkthroughDocument,
-): Promise<WalkthroughDocument> {
+  document: ReviewDocument,
+): Promise<ReviewDocument> {
   const normalized = structuredClone(document);
   for (const item of normalized.evidence) {
     const path = item.path;

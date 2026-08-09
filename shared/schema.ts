@@ -1,5 +1,5 @@
 import AjvModule, { type ErrorObject } from "ajv";
-import type { Graph, WalkthroughDocument } from "./contracts.js";
+import type { Graph, ReviewDocument } from "./contracts.js";
 
 const nonEmptyString = {
   type: "string",
@@ -162,25 +162,32 @@ const graphSchema = (
   };
 };
 
-export const walkthroughSchema: Record<string, unknown> = {
-  $id: "https://pr-atlas.local/schema/walkthrough/1.1.0",
+/** The schema accepted for every persisted and newly generated review document. */
+export const reviewDocumentSchema: Record<string, unknown> = {
+  $id: "https://pr-atlas.local/schema/review/2.0.0",
   type: "object",
   additionalProperties: true,
+  not: { required: ["walkthrough"] },
   required: [
     "schemaVersion",
     "run",
     "pullRequest",
     "summary",
     "changeGroups",
-    "walkthrough",
+    "stories",
+    "primaryStoryId",
+    "reviewPlan",
     "graphs",
     "tests",
     "reviewThreads",
     "reviewInsights",
+    "risks",
+    "dependencies",
+    "unchangedInteractions",
     "evidence",
   ],
   properties: {
-    schemaVersion: { const: "1.1.0", type: "string" },
+    schemaVersion: { const: "2.0.0", type: "string" },
     run: {
       type: "object",
       additionalProperties: true,
@@ -249,21 +256,39 @@ export const walkthroughSchema: Record<string, unknown> = {
         },
       },
     },
-    walkthrough: {
+    stories: {
       type: "array",
       minItems: 1,
       items: {
         type: "object",
         additionalProperties: true,
-        required: ["id", "title", "changeGroupId", "evidenceIds"],
+        required: [
+          "id",
+          "title",
+          "summary",
+          "relationshipToPrimary",
+          "relationshipRationale",
+          "reviewReason",
+          "changeGroupIds",
+          "dependsOnStoryIds",
+        ],
         properties: {
           id: { ...nonEmptyString },
           title: { ...nonEmptyString },
-          changeGroupId: { ...nonEmptyString },
-          evidenceIds: { ...nonEmptyStringArray, minItems: 1 },
+          summary: { ...nonEmptyString },
+          relationshipToPrimary: {
+            type: "string",
+            enum: ["primary", "supporting", "adjacent", "independent"],
+          },
+          relationshipRationale: { ...nonEmptyString },
+          reviewReason: { ...nonEmptyString },
+          changeGroupIds: { ...nonEmptyStringArray, minItems: 1 },
+          dependsOnStoryIds: { ...nonEmptyStringArray },
         },
       },
     },
+    primaryStoryId: { ...nonEmptyString },
+    reviewPlan: { type: "array", minItems: 1, items: { ...nonEmptyString } },
     tests: {
       type: "array",
       items: {
@@ -283,7 +308,7 @@ export const walkthroughSchema: Record<string, unknown> = {
           behavior: { ...nonEmptyString },
           status: { type: "string", enum: [...supportedTestStatuses] },
           evidenceIds: { ...nonEmptyStringArray, minItems: 1 },
-          changeGroupIds: { ...nonEmptyStringArray },
+          changeGroupIds: { ...nonEmptyStringArray, minItems: 1 },
         },
       },
     },
@@ -379,6 +404,52 @@ export const walkthroughSchema: Record<string, unknown> = {
         },
       },
     },
+    risks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        required: ["id", "title", "detail", "changeGroupIds", "evidenceIds"],
+        properties: {
+          id: { ...nonEmptyString },
+          title: { ...nonEmptyString },
+          detail: { ...nonEmptyString },
+          changeGroupIds: { ...nonEmptyStringArray, minItems: 1 },
+          evidenceIds: { ...nonEmptyStringArray, minItems: 1 },
+        },
+      },
+    },
+    dependencies: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        required: ["id", "title", "detail", "dependsOnIds", "changeGroupIds", "evidenceIds"],
+        properties: {
+          id: { ...nonEmptyString },
+          title: { ...nonEmptyString },
+          detail: { ...nonEmptyString },
+          dependsOnIds: { ...nonEmptyStringArray },
+          changeGroupIds: { ...nonEmptyStringArray, minItems: 1 },
+          evidenceIds: { ...nonEmptyStringArray, minItems: 1 },
+        },
+      },
+    },
+    unchangedInteractions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: true,
+        required: ["id", "title", "detail", "changeGroupIds", "evidenceIds"],
+        properties: {
+          id: { ...nonEmptyString },
+          title: { ...nonEmptyString },
+          detail: { ...nonEmptyString },
+          changeGroupIds: { ...nonEmptyStringArray, minItems: 1 },
+          evidenceIds: { ...nonEmptyStringArray, minItems: 1 },
+        },
+      },
+    },
     graphs: {
       type: "object",
       additionalProperties: true,
@@ -410,34 +481,6 @@ export const walkthroughSchema: Record<string, unknown> = {
   },
 };
 
-const walkthroughItems = (
-  (walkthroughSchema.properties as Record<string, unknown>)
-    .walkthrough as Record<string, unknown>
-).items as Record<string, unknown>;
-walkthroughItems.required = [
-  "id",
-  "title",
-  "reason",
-  "summary",
-  "limitations",
-  "dependsOnStepIds",
-  "changeGroupId",
-  "flowNodeIds",
-  "evidenceIds",
-  "testIds",
-  "reviewInsightIds",
-];
-walkthroughItems.properties = {
-  ...(walkthroughItems.properties as Record<string, unknown>),
-  reason: { ...nonEmptyString },
-  summary: { ...nonEmptyString },
-  limitations: { type: "array", items: { ...nonEmptyString } },
-  dependsOnStepIds: { ...nonEmptyStringArray },
-  flowNodeIds: { ...nonEmptyStringArray },
-  testIds: { ...nonEmptyStringArray },
-  reviewInsightIds: { ...nonEmptyStringArray },
-};
-
 const Ajv = AjvModule as unknown as new (options: {
   allErrors: boolean;
   strict: boolean;
@@ -447,10 +490,10 @@ const Ajv = AjvModule as unknown as new (options: {
   ): ((value: unknown) => boolean) & { errors?: ErrorObject[] | null };
 };
 const ajv = new Ajv({ allErrors: true, strict: false });
-const validate = ajv.compile(walkthroughSchema);
-export interface WalkthroughValidation {
+const validate = ajv.compile(reviewDocumentSchema);
+export interface ReviewDocumentValidation {
   valid: boolean;
-  document?: WalkthroughDocument;
+  document?: ReviewDocument;
   errors: string[];
 }
 
@@ -552,21 +595,6 @@ function graphValidation(
     ),
   );
   const tours = new Set(graph.guidedTours.map((tour) => tour.id));
-  const graphIds = new Map<string, string>();
-  const register = (id: unknown, kind: string, index: number): void => {
-    if (typeof id !== "string") return;
-    const previous = graphIds.get(id);
-    if (previous)
-      errors.push(
-        `duplicate graph id '${id}' in ${graphPath}.${kind}[${index}] and ${previous}.`,
-      );
-    else graphIds.set(id, `${graphPath}.${kind}[${index}]`);
-  };
-  graph.nodes.forEach((node, index) => register(node.id, "nodes", index));
-  graph.edges.forEach((edge, index) => register(edge.id, "edges", index));
-  graph.guidedTours.forEach((tour, index) =>
-    register(tour.id, "guidedTours", index),
-  );
 
   for (const edge of graph.edges) {
     if (!nodes.has(edge.source) || !nodes.has(edge.target))
@@ -697,9 +725,9 @@ function graphValidation(
   }
 }
 
-export function validateWalkthroughDocument(
+export function validateReviewDocument(
   value: unknown,
-): WalkthroughValidation {
+): ReviewDocumentValidation {
   if (!validate(value)) {
     const errors = (validate.errors ?? []).map(
       (error: ErrorObject) =>
@@ -707,7 +735,7 @@ export function validateWalkthroughDocument(
     );
     return { valid: false, errors };
   }
-  const document = value as WalkthroughDocument;
+  const document = value as ReviewDocument;
   const evidence = new Set(document.evidence.map((item) => item.id));
   const errors = evidenceReferences(document)
     .filter((reference) => !evidence.has(reference.id))
@@ -716,17 +744,86 @@ export function validateWalkthroughDocument(
         `${reference.path} references unknown evidence '${reference.id}'`,
     );
   const changeGroups = new Set(document.changeGroups.map((group) => group.id));
-  for (const step of document.walkthrough)
-    if (!changeGroups.has(step.changeGroupId))
-      errors.push(
-        `walkthrough '${step.id}' references unknown change group '${step.changeGroupId}'.`,
-      );
-  for (const test of document.tests)
+  const storyIds = new Set(document.stories.map((story) => story.id));
+  const primaryStories = document.stories.filter((story) => story.relationshipToPrimary === "primary");
+  if (primaryStories.length !== 1 || primaryStories[0]?.id !== document.primaryStoryId)
+    errors.push("schema 2.0 requires exactly one primary story matching primaryStoryId.");
+  if (document.reviewPlan.length !== document.stories.length || new Set(document.reviewPlan).size !== document.reviewPlan.length || document.reviewPlan.some((id) => !storyIds.has(id)))
+    errors.push("reviewPlan must contain every known story exactly once.");
+  else if (document.reviewPlan[0] !== document.primaryStoryId)
+    errors.push("reviewPlan must begin with primaryStoryId.");
+  const owner = new Map<string, string>();
+  for (const story of document.stories) {
+    for (const groupId of story.changeGroupIds) {
+      if (!changeGroups.has(groupId)) errors.push(`story '${story.id}' references unknown change group '${groupId}'.`);
+      else if (owner.has(groupId)) errors.push(`change group '${groupId}' belongs to exactly one story (also '${owner.get(groupId)}').`);
+      else owner.set(groupId, story.id);
+    }
+    for (const dependency of story.dependsOnStoryIds) {
+      const current = document.reviewPlan.indexOf(story.id);
+      const prior = document.reviewPlan.indexOf(dependency);
+      if (!storyIds.has(dependency)) errors.push(`story '${story.id}' depends on unknown story '${dependency}'.`);
+      else if (dependency === story.id) errors.push(`story '${story.id}' cannot depend on itself.`);
+      else if (prior >= current) errors.push(`story '${story.id}' must depend only on an earlier reviewPlan story.`);
+    }
+  }
+  for (const groupId of changeGroups) if (!owner.has(groupId)) errors.push(`change group '${groupId}' must belong to exactly one story.`);
+  for (const test of document.tests) {
+    if (test.changeGroupIds.length === 0)
+      errors.push(`test '${test.id}' must reference at least one change group.`);
     for (const changeGroupId of test.changeGroupIds ?? [])
       if (!changeGroups.has(changeGroupId))
         errors.push(
           `test '${test.id}' references unknown change group '${changeGroupId}'.`,
         );
+  }
+  const relationshipCollections: Array<{
+    name: "risks" | "dependencies" | "unchangedInteractions";
+    items: Array<Record<string, unknown>>;
+  }> = [
+    { name: "risks", items: document.risks },
+    { name: "dependencies", items: document.dependencies },
+    { name: "unchangedInteractions", items: document.unchangedInteractions },
+  ];
+  for (const collection of relationshipCollections) {
+    collection.items.forEach((item, index) => {
+      if (!Array.isArray(item.changeGroupIds) || item.changeGroupIds.length === 0)
+        errors.push(`${collection.name}[${index}].changeGroupIds must not be empty.`);
+      if (!Array.isArray(item.evidenceIds) || item.evidenceIds.length === 0)
+        errors.push(`${collection.name}[${index}].evidenceIds must not be empty.`);
+      unresolvedRelations(
+        item,
+        `${collection.name}[${index}]`,
+        "changeGroupId",
+        "changeGroupIds",
+        changeGroups,
+        errors,
+      );
+    });
+  }
+  const dependencyIds = new Set(document.dependencies.map((dependency) => dependency.id));
+  for (const [index, dependency] of document.dependencies.entries()) {
+    for (const target of dependency.dependsOnIds) {
+      if (!dependencyIds.has(target))
+        errors.push(`dependencies[${index}].dependsOnIds references unknown dependency '${target}'.`);
+      else if (target === dependency.id)
+        errors.push(`dependency '${dependency.id}' cannot depend on itself.`);
+    }
+  }
+  const dependencyVisit = new Map<string, "visiting" | "visited">();
+  const dependencyById = new Map(document.dependencies.map((dependency) => [dependency.id, dependency]));
+  const visitDependency = (id: string): void => {
+    if (dependencyVisit.get(id) === "visiting") {
+      errors.push(`dependencies contain a cycle through '${id}'.`);
+      return;
+    }
+    if (dependencyVisit.get(id) === "visited") return;
+    dependencyVisit.set(id, "visiting");
+    for (const target of dependencyById.get(id)?.dependsOnIds ?? [])
+      if (dependencyById.has(target)) visitDependency(target);
+    dependencyVisit.set(id, "visited");
+  };
+  for (const id of dependencyIds) visitDependency(id);
   const reviewThreads = new Set(
     document.reviewThreads.map((thread) => thread.id),
   );
@@ -743,41 +840,6 @@ export function validateWalkthroughDocument(
   const graphNodeIds = new Set(
     graphs.flatMap((graph) => graph.nodes.map((node) => node.id)),
   );
-  const stepIds = new Set(document.walkthrough.map((step) => step.id));
-  for (const [index, step] of document.walkthrough.entries()) {
-    for (const dependency of step.dependsOnStepIds ?? []) {
-      if (!stepIds.has(dependency)) errors.push(`walkthrough '${step.id}' depends on unknown step '${dependency}'.`);
-      else if (dependency === step.id) errors.push(`walkthrough '${step.id}' cannot depend on itself.`);
-      else if (document.walkthrough.findIndex((candidate) => candidate.id === dependency) >= index) errors.push(`walkthrough '${step.id}' must depend only on an earlier step.`);
-    }
-  }
-  for (const [index, step] of document.walkthrough.entries()) {
-    const value = step as Record<string, unknown>;
-    unresolvedRelations(
-      value,
-      `walkthrough[${index}]`,
-      "flowNodeId",
-      "flowNodeIds",
-      graphNodeIds,
-      errors,
-    );
-    unresolvedRelations(
-      value,
-      `walkthrough[${index}]`,
-      "testId",
-      "testIds",
-      tests,
-      errors,
-    );
-    unresolvedRelations(
-      value,
-      `walkthrough[${index}]`,
-      "reviewInsightId",
-      "reviewInsightIds",
-      reviewInsights,
-      errors,
-    );
-  }
   for (const thread of document.reviewThreads) {
     const value = thread as unknown as Record<string, unknown>;
     const threadPath = `reviewThreads[${document.reviewThreads.indexOf(thread)}]`;
@@ -839,11 +901,19 @@ export function validateWalkthroughDocument(
   errors.push(
     ...duplicateIds([
       { collection: "changeGroups", items: document.changeGroups },
-      { collection: "walkthrough", items: document.walkthrough },
+      { collection: "stories", items: document.stories },
       { collection: "tests", items: document.tests },
       { collection: "reviewThreads", items: document.reviewThreads },
       { collection: "reviewInsights", items: document.reviewInsights },
+      { collection: "risks", items: document.risks },
+      { collection: "dependencies", items: document.dependencies },
+      { collection: "unchangedInteractions", items: document.unchangedInteractions },
       { collection: "evidence", items: document.evidence },
+      ...graphs.flatMap((graph) => [
+        { collection: `graphs.${graph.id}.nodes`, items: graph.nodes },
+        { collection: `graphs.${graph.id}.edges`, items: graph.edges },
+        { collection: `graphs.${graph.id}.guidedTours`, items: graph.guidedTours },
+      ]),
     ]),
   );
   for (const graph of graphs) {

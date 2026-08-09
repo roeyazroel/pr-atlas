@@ -1,4 +1,16 @@
-import type { AgentProvider, AnalysisRunSummary, Graph as ContractGraph, GraphNode as ContractGraphNode, GraphEdge as ContractGraphEdge, WalkthroughDocument } from '../shared/contracts';
+import type { AgentProvider, AnalysisRunSummary, Graph as ContractGraph, GraphNode as ContractGraphNode, GraphEdge as ContractGraphEdge, ReviewDocument } from '../shared/contracts';
+
+export type ReviewRelationship = 'primary' | 'supporting' | 'adjacent' | 'independent';
+export interface ReviewStory {
+  id: string;
+  title: string;
+  summary: string;
+  relationshipToPrimary: ReviewRelationship;
+  relationshipRationale: string;
+  reviewReason: string;
+  changeGroupIds: string[];
+  dependsOnStoryIds: string[];
+}
 
 export type PRStatus = 'ready' | 'outdated' | 'processing' | 'unprocessed' | 'failed' | 'cancelled';
 export type ReviewState = 'active' | 'open' | 'resolved' | 'outdated' | 'disputed' | 'dismissed' | 'informational' | 'unknown';
@@ -55,7 +67,10 @@ export interface PullRequest {
   evidenceHeadSha?: string;
   analysisDiagnostic?: string;
   analysisProvenance?: 'demo' | AgentProvider;
-  walkthrough?: WalkthroughDocument;
+  walkthrough?: ReviewDocument;
+  stories?: ReviewStory[];
+  primaryStoryId?: string;
+  reviewPlan?: string[];
 }
 
 export interface ChangeGroup {
@@ -193,7 +208,6 @@ export interface RunHistory {
   provider?: AgentProvider | 'demo';
   model: string;
   schemaVersion?: string;
-  skillVersion?: string;
   statusLabel?: string;
 }
 

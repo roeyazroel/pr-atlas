@@ -2,16 +2,16 @@ import { copyFile, lstat, open, stat, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, parse, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-import type { UpdateCheckResult, UpdateDownloadProgress } from '../../shared/contracts.js'
+import type { UpdateCheckResult, UpdateDownloadProgress, UpdateDownloadResult } from '../../shared/contracts.js'
 import { compareVersions, expectedAssetName, isSha256Digest, safeArtifactName, safeArtifactUrl } from './update.js'
 
-export const DEFAULT_MAX_UPDATE_BYTES = 1_024 * 1_024 * 1_024
-export const DEFAULT_UPDATE_STALL_TIMEOUT_MS = 30_000
+const DEFAULT_MAX_UPDATE_BYTES = 1_024 * 1_024 * 1_024
+const DEFAULT_UPDATE_STALL_TIMEOUT_MS = 30_000
 const UNKNOWN_TOTAL_PROGRESS_INTERVAL = 256 * 1024
 const SAFE_REDIRECT_HOSTS = new Set(['github.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com', 'release-assets.githubusercontent.com'])
 const GENERIC_DOWNLOAD_ERROR = 'Could not download the update.'
 
-export interface UpdateDownloadOptions {
+interface UpdateDownloadOptions {
   downloadsPath: string
   platform: NodeJS.Platform
   arch: string
@@ -19,14 +19,6 @@ export interface UpdateDownloadOptions {
   maxBytes?: number
   onProgress?: (event: UpdateDownloadProgress) => void
   stallTimeoutMs?: number
-}
-
-export interface UpdateDownloadResult {
-  success: boolean
-  artifactName?: string
-  path?: string
-  digest?: string
-  error?: string
 }
 
 function failed(): UpdateDownloadResult { return { success: false, error: GENERIC_DOWNLOAD_ERROR } }

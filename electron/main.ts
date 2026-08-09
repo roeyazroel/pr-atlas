@@ -332,15 +332,15 @@ function registerIpc(): void {
       return null;
     const progress = input.progress as {
       runId?: unknown;
-      stepId?: unknown;
+      changeGroupId?: unknown;
       status?: unknown;
       note?: unknown;
     };
     if (
       typeof progress.runId !== "string" ||
       !/^[A-Za-z0-9-]{1,80}$/.test(progress.runId) ||
-      typeof progress.stepId !== "string" ||
-      !/^[A-Za-z0-9._:-]{1,200}$/.test(progress.stepId) ||
+      typeof progress.changeGroupId !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,200}$/.test(progress.changeGroupId) ||
       !["pending", "reviewed", "follow-up", "skipped"].includes(
         progress.status as string,
       ) ||
@@ -350,7 +350,7 @@ function registerIpc(): void {
       return null;
     return analysis.setReviewProgress(input.repository, input.pullNumber, {
       runId: progress.runId,
-      stepId: progress.stepId,
+      changeGroupId: progress.changeGroupId,
       status: progress.status as
         "pending" | "reviewed" | "follow-up" | "skipped",
       note: progress.note,

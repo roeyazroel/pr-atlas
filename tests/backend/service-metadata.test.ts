@@ -1,10 +1,17 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { AnalysisService } from '../../electron/backend/service'
-import { SKILL_CONTRACT_VERSION } from '../../electron/backend/agent'
 
 const capabilities = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: true, authenticationState: false }
+
+async function managedWorktreeCommand(file: string, args: string[], options?: { cwd?: string }) {
+  if (file !== 'git') return null
+  if (args[0] === 'worktree' && args[1] === 'add') { await mkdir(args[3], { recursive: true }); return { stdout: '', stderr: '' } }
+  if (args[0] === 'rev-parse') return { stdout: args[1] === '--show-toplevel' ? options?.cwd ?? '' : options?.cwd?.split(/[\\/]/).at(-1) ?? '', stderr: '' }
+  if (args[0] === 'status') return { stdout: '', stderr: '' }
+  return null
+}
 
 function providerDocument() {
   const graph = (id: string) => ({
@@ -41,39 +48,37 @@ function providerDocument() {
     }],
   })
   return {
-    schemaVersion: '1.1.0',
+    schemaVersion: '2.0.0',
     run: { id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented', model: 'provider-document-model', skillVersion: 'provider-skill-version' },
     pullRequest: { host: 'github.com', repository: 'example/backend', number: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40) },
     summary: { intent: 'intent', behavioralChanges: [], architecturalImpact: [], limitations: [] },
     changeGroups: [{ id: 'group-1', title: 'Trace evidence', summary: 'Connects behavior to code.', motivation: 'Reviewers need exact evidence.', previousBehavior: 'Evidence was implicit.', newBehavior: 'Evidence is linked.', attention: 'medium', evidenceIds: ['evidence-1'] }],
-    walkthrough: [{ id: 'step-1', title: 'Inspect evidence', reason: 'It anchors the review in source evidence.', summary: 'Inspect the changed input.', limitations: [], dependsOnStepIds: [], changeGroupId: 'group-1', flowNodeIds: ['data-flow-node'], evidenceIds: ['evidence-1'], testIds: [], reviewInsightIds: [] }],
+    stories: [{ id: 'story-1', title: 'Trace evidence', summary: 'Connects changed behavior to evidence.', relationshipToPrimary: 'primary', relationshipRationale: 'It is the review\'s main change.', reviewReason: 'Review the evidence boundary first.', changeGroupIds: ['group-1'], dependsOnStoryIds: [] }],
+    primaryStoryId: 'story-1',
+    reviewPlan: ['story-1'],
     graphs: { systemOverview: graph('system-overview'), dataFlow: graph('data-flow'), codeDependency: graph('code-dependency'), userAction: graph('user-action') },
-    tests: [], reviewThreads: [], reviewInsights: [], evidence: [{ id: 'evidence-1', kind: 'file', title: 'Input diff', path: 'diff.patch', line: null, url: null }],
+    tests: [], reviewThreads: [], reviewInsights: [], risks: [], dependencies: [], unchangedInteractions: [], evidence: [{ id: 'evidence-1', kind: 'file', title: 'Input diff', path: 'diff.patch', line: null, url: null }],
   }
 }
 
-function legacyProviderDocument() {
+function rejectedProviderDocument() {
   const document = providerDocument() as Record<string, unknown>
-  document.schemaVersion = '1.0.0'
-  for (const step of document.walkthrough as Array<Record<string, unknown>>) {
-    delete step.reason
-    delete step.summary
-    delete step.limitations
-    delete step.dependsOnStepIds
-    delete step.flowNodeIds
-    delete step.testIds
-    delete step.reviewInsightIds
-  }
+  document.schemaVersion = '1.1.0'
+  delete document.stories
+  delete document.primaryStoryId
+  delete document.reviewPlan
+  document.walkthrough = [{ id: 'step-1', changeGroupId: 'group-1' }]
   return document
 }
 
 describe('analysis service reproducibility metadata', () => {
-  it('rejects a provider-returned 1.0 walkthrough for a fresh run', async () => {
+  it('rejects a provider-returned 1.1 document for a fresh run', async () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-schema-version-`)
     try {
-      const legacy = legacyProviderDocument()
+      const legacy = rejectedProviderDocument()
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -89,9 +94,9 @@ describe('analysis service reproducibility metadata', () => {
 
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude' })
 
-      expect(result).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+      expect(result).toMatchObject({ status: 'invalid', error: { code: 'INVALID_REVIEW_DOCUMENT' } })
       expect(result.document).toBeUndefined()
-      expect(JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))).toMatchObject({ status: 'invalid', error: { code: 'INVALID_WALKTHROUGH' } })
+      expect(JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))).toMatchObject({ status: 'invalid', error: { code: 'INVALID_REVIEW_DOCUMENT' } })
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -103,7 +108,8 @@ describe('analysis service reproducibility metadata', () => {
     process.env.OPENAI_API_KEY = 'service-secret-value'
     try {
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -144,7 +150,8 @@ describe('analysis service reproducibility metadata', () => {
     try {
       const selectedModel = 'selected-model'
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -162,20 +169,23 @@ describe('analysis service reproducibility metadata', () => {
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude', model: selectedModel })
 
       expect(result.status).toBe('ready')
+      expect(result.diagnosticEvents?.some((event) => event.event === 'analysis.completed')).toBe(true)
       expect(result.document?.run).toMatchObject({
         id: result.runId,
         createdAt: result.manifest.createdAt,
         provider: 'claude',
         model: selectedModel,
-        skillVersion: SKILL_CONTRACT_VERSION,
+        skillVersion: 'provider-skill-version',
       })
-      expect(result.document?.run).not.toMatchObject({ id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented', skillVersion: 'provider-skill-version' })
-      expect(result.manifest).toMatchObject({ runId: result.runId, provider: 'claude', model: selectedModel, skillContractVersion: SKILL_CONTRACT_VERSION })
+      expect(result.document?.run).not.toMatchObject({ id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented' })
+      expect(result.manifest).toMatchObject({ runId: result.runId, provider: 'claude', model: selectedModel })
+      expect(result.manifest).not.toHaveProperty('skillContractVersion')
 
-      const persistedDocument = JSON.parse(await readFile(`${result.artifactDirectory}/walkthrough.json`, 'utf8'))
+      const persistedDocument = JSON.parse(await readFile(`${result.artifactDirectory}/review.json`, 'utf8'))
       const persistedManifest = JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))
       expect(persistedDocument.run).toEqual(result.document?.run)
-      expect(persistedManifest).toMatchObject({ runId: result.runId, createdAt: result.manifest.createdAt, provider: 'claude', model: selectedModel, skillContractVersion: SKILL_CONTRACT_VERSION })
+      expect(persistedManifest).toMatchObject({ runId: result.runId, createdAt: result.manifest.createdAt, provider: 'claude', model: selectedModel })
+      expect(persistedManifest).not.toHaveProperty('skillContractVersion')
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -185,7 +195,8 @@ describe('analysis service reproducibility metadata', () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-service-metadata-fallback-`)
     try {
       const noThreads = [{ data: { repository: { pullRequest: { reviewThreads: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } } } }]
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        const managed = await managedWorktreeCommand(file, args, options); if (managed) return managed
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(noThreads), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }

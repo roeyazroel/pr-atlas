@@ -1,6 +1,7 @@
 import { ExternalLink, LoaderCircle, MessageSquare, RefreshCw, Send } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { PullRequestComment } from '../../shared/contracts'
+import { hasPrimaryModifier } from '../keyboard-shortcuts'
 
 export type CommentResourceStatus = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -153,7 +154,7 @@ function CommentComposer({ pullNumber, viewer, posting, postError, successMessag
       value={draft}
       onChange={(event) => setDraft(event.target.value)}
       onKeyDown={(event) => {
-        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        if (event.key === 'Enter' && hasPrimaryModifier(event)) {
           event.preventDefault()
           void submit()
         }

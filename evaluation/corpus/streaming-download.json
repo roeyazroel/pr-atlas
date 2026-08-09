@@ -18,6 +18,7 @@
     "threadStates": { "thread-memory": "resolved" }
   },
   "actual": {
+    "schemaVersion": "2.0.0",
     "summary": {
       "intent": "Stream archive downloads without retaining the complete payload in memory.",
       "behavioralChanges": ["Responses now respect downstream backpressure."],
@@ -28,14 +29,17 @@
       { "id": "stream-response", "title": "Stream response", "summary": "Replaces the eager buffer with a backpressure-aware stream.", "evidenceIds": ["ev-stream"] },
       { "id": "cancel-cleanup", "title": "Cancel cleanup", "summary": "Abort closes the file handle and response stream.", "evidenceIds": ["ev-test"] }
     ],
-    "walkthrough": [
-      { "id": "step-1", "changeGroupId": "stream-response", "evidenceIds": ["ev-stream"] },
-      { "id": "step-2", "changeGroupId": "cancel-cleanup", "evidenceIds": ["ev-test"] }
+    "stories": [
+      { "id": "story-stream", "title": "Stream response", "summary": "Review backpressure behavior.", "relationshipToPrimary": "primary", "relationshipRationale": "It is the main behavioral change.", "reviewReason": "Review stream ownership first.", "changeGroupIds": ["stream-response"], "dependsOnStoryIds": [] },
+      { "id": "story-cancel", "title": "Cancel cleanup", "summary": "Review cleanup after stream setup.", "relationshipToPrimary": "supporting", "relationshipRationale": "It supports stream safety.", "reviewReason": "Review cancellation after the stream path.", "changeGroupIds": ["cancel-cleanup"], "dependsOnStoryIds": ["story-stream"] }
     ],
+    "primaryStoryId": "story-stream",
+    "reviewPlan": ["story-stream", "story-cancel"],
     "graphs": { "dataFlow": { "id": "data-flow", "edges": [{ "source": "archive", "target": "response", "label": "pipes chunks" }] } },
     "tests": [{ "id": "test-cancel", "title": "Cancel download", "behavior": "Abort closes the file handle.", "status": "covered", "changeGroupIds": ["cancel-cleanup"], "evidenceIds": ["ev-test"] }],
     "reviewThreads": [{ "id": "thread-memory", "status": "resolved", "evidenceIds": ["ev-stream"] }],
     "reviewInsights": [{ "id": "insight-memory", "status": "resolved", "reviewThreadIds": ["thread-memory"], "evidenceIds": ["ev-stream"] }],
+    "risks": [], "dependencies": [], "unchangedInteractions": [],
     "evidence": [
       { "id": "ev-stream", "path": "server/archive/stream.ts" },
       { "id": "ev-test", "path": "server/archive/stream.test.ts" }

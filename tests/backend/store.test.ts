@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AnalysisStore } from "../../electron/backend/store";
-import type { Graph, WalkthroughDocument } from "../../shared/contracts";
+import type { Graph, ReviewDocument } from "../../shared/contracts";
 
 const run = (id: string, headSha = "b".repeat(40)) => ({
   runId: id,
@@ -28,8 +28,8 @@ const walkthrough = (
   pullNumber = 481,
   baseSha = "a".repeat(40),
   headSha = "b".repeat(40),
-): WalkthroughDocument => ({
-  schemaVersion: "1.1.0" as const,
+): ReviewDocument => ({
+  schemaVersion: "2.0.0" as const,
   run: {
     id: "run-ready",
     createdAt: "2026-08-04T19:00:00.000Z",
@@ -62,21 +62,20 @@ const walkthrough = (
       evidenceIds: ["e-session"],
     },
   ],
-  walkthrough: [
+  stories: [
     {
-      id: "step-session",
-      title: "Trace session ownership",
-      reason: "The ownership boundary must be traced first.",
-      summary: "Follow session ownership into the service.",
-      limitations: [],
-      dependsOnStepIds: [],
-      changeGroupId: "group-session",
-      flowNodeIds: ["data-flow-node"],
-      evidenceIds: ["e-session"],
-      testIds: ["test-session"],
-      reviewInsightIds: [],
+      id: "story-session",
+      title: "Session ownership",
+      summary: "The service becomes the session owner.",
+      relationshipToPrimary: "primary",
+      relationshipRationale: "It owns the main behavioral change.",
+      reviewReason: "Review the ownership boundary first.",
+      changeGroupIds: ["group-session"],
+      dependsOnStoryIds: [],
     },
   ],
+  primaryStoryId: "story-session",
+  reviewPlan: ["story-session"],
   graphs: {
     systemOverview: graph("system-overview"),
     dataFlow: graph("data-flow"),
@@ -95,6 +94,9 @@ const walkthrough = (
   ],
   reviewThreads: [],
   reviewInsights: [],
+  risks: [],
+  dependencies: [],
+  unchangedInteractions: [],
   evidence: [
     {
       id: "e-session",
@@ -235,6 +237,19 @@ describe("analysis store", () => {
     await expect(store.listRuns("example/backend", 481)).resolves.toEqual([]);
   });
 
+  it("normalizes corrupted persisted scan modes to the coordinator default", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-corrupt-config");
+    await store.writeManifest(directory, {
+      ...run("run-corrupt-config"),
+      config: { depth: "standard", scanMode: { injected: true }, includeReviewComments: true, maxGraphNodes: 80, timeoutMinutes: 20 } as never,
+    });
+    await expect(store.listRuns("example/backend", 481)).resolves.toEqual([
+      expect.objectContaining({ config: expect.objectContaining({ scanMode: "coordinator" }) }),
+    ]);
+  });
+
   it("loads a ready run only when its manifest and validated walkthrough match the requested identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);
@@ -249,7 +264,7 @@ describe("analysis store", () => {
       ...run("run-ready", headSha),
       model: "selected-model",
     });
-    await store.writeWalkthrough(
+    await store.writeReview(
       directory,
       walkthrough("example/backend", 481, "a".repeat(40), headSha),
     );
@@ -261,13 +276,13 @@ describe("analysis store", () => {
       status: "ready",
       manifest: { model: "selected-model" },
       document: {
-        schemaVersion: "1.1.0",
+        schemaVersion: "2.0.0",
         pullRequest: { repository: "example/backend", number: 481, headSha },
       },
     });
   });
 
-  it("refuses persisted 1.0 walkthroughs when loading historical runs", async () => {
+  it("refuses persisted 1.1 documents when loading runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);
     const headSha = "b".repeat(40);
@@ -279,16 +294,34 @@ describe("analysis store", () => {
     );
     await store.writeManifest(directory, {
       ...run("run-legacy-doc", headSha),
-      schemaVersion: "1.0.0",
+      schemaVersion: "1.1.0",
     });
     await writeFile(
-      join(directory, "walkthrough.json"),
-      JSON.stringify({ ...walkthrough("example/backend", 481, "a".repeat(40), headSha), schemaVersion: "1.0.0" }),
+      join(directory, "review.json"),
+      JSON.stringify({ ...walkthrough("example/backend", 481, "a".repeat(40), headSha), schemaVersion: "1.1.0" }),
     );
 
     await expect(
       store.loadRun("example/backend", 481, "run-legacy-doc"),
     ).resolves.toBeNull();
+  });
+
+  it("loads only review.json and ignores a retired walkthrough.json artifact", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
+    const store = new AnalysisStore(root);
+    const headSha = "b".repeat(40);
+    const directory = store.runDirectory("example/backend", 481, headSha, "run-retired-filename");
+    await store.writeManifest(directory, run("run-retired-filename", headSha));
+    await writeFile(
+      join(directory, "walkthrough.json"),
+      JSON.stringify({ ...walkthrough("example/backend", 481, "a".repeat(40), headSha), schemaVersion: "1.1.0" }),
+    );
+
+    await expect(store.loadRun("example/backend", 481, "run-retired-filename")).resolves.toBeNull();
+    await store.writeReview(directory, walkthrough("example/backend", 481, "a".repeat(40), headSha));
+    await expect(store.loadRun("example/backend", 481, "run-retired-filename")).resolves.toMatchObject({
+      document: { schemaVersion: "2.0.0" },
+    });
   });
 
   it("returns null for mismatched, missing, invalid, or unsafe saved runs", async () => {
@@ -364,7 +397,7 @@ describe("analysis store", () => {
       "diagnostic only",
     );
     await writeFile(
-      join(invalidDirectory, "walkthrough.json"),
+      join(invalidDirectory, "review.json"),
       JSON.stringify({ schemaVersion: "1.0.0" }),
     );
     const wrongIdentityDirectory = store.runDirectory(
@@ -377,7 +410,7 @@ describe("analysis store", () => {
       wrongIdentityDirectory,
       run("run-wrong-doc", headSha),
     );
-    await store.writeWalkthrough(
+    await store.writeReview(
       wrongIdentityDirectory,
       walkthrough("example/backend", 482, "a".repeat(40), headSha),
     );
@@ -393,7 +426,7 @@ describe("analysis store", () => {
     ).resolves.toBeNull();
   });
 
-  it("persists only bounded progress for steps in the validated run and marks a preferred run", async () => {
+  it("persists only bounded change-group progress for the validated run and marks a preferred run", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);
     const headSha = "b".repeat(40);
@@ -404,7 +437,7 @@ describe("analysis store", () => {
       "run-progress",
     );
     await store.writeManifest(directory, run("run-progress", headSha));
-    await store.writeWalkthrough(
+    await store.writeReview(
       directory,
       walkthrough("example/backend", 481, "a".repeat(40), headSha),
     );
@@ -412,19 +445,16 @@ describe("analysis store", () => {
     await expect(
       store.setReviewProgress("example/backend", 481, {
         runId: "run-progress",
-        stepId: "step-session",
+        changeGroupId: "group-session",
         status: "follow-up",
         note: "Check token rotation.",
         updatedAt: "untrusted",
       }),
-    ).resolves.toMatchObject({
-      status: "follow-up",
-      note: "Check token rotation.",
-    });
+    ).resolves.toMatchObject({ changeGroupId: "group-session", status: "follow-up", note: "Check token rotation." });
     await expect(
       store.setReviewProgress("example/backend", 481, {
         runId: "run-progress",
-        stepId: "not-a-step",
+        changeGroupId: "not-a-group",
         status: "reviewed",
         note: "",
         updatedAt: "",
@@ -433,7 +463,7 @@ describe("analysis store", () => {
     await expect(
       store.getReviewProgress("example/backend", 481, "run-progress"),
     ).resolves.toEqual([
-      expect.objectContaining({ stepId: "step-session", status: "follow-up" }),
+      expect.objectContaining({ changeGroupId: "group-session", status: "follow-up" }),
     ]);
     await expect(
       store.setPreferredRun("example/backend", 481, "run-progress"),
@@ -443,7 +473,7 @@ describe("analysis store", () => {
     ]);
   });
 
-  it("serializes concurrent progress writes so each step is retained", async () => {
+  it("serializes concurrent progress writes so each change group is retained", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);
     const headSha = "b".repeat(40);
@@ -463,41 +493,42 @@ describe("analysis store", () => {
       "a".repeat(40),
       headSha,
     );
-    document.walkthrough.push({
-      id: "step-second",
-      title: "Inspect the second step",
-      reason: "The second behavior needs an independent review step.",
-      summary: "Verify the adjacent session behavior.",
-      limitations: [],
-      dependsOnStepIds: ["step-session"],
-      changeGroupId: "group-session",
-      flowNodeIds: ["data-flow-node"],
-      evidenceIds: ["e-session"],
-      testIds: ["test-session"],
-      reviewInsightIds: [],
+    document.changeGroups.push({
+      ...document.changeGroups[0],
+      id: "group-second",
+      title: "Second behavior",
     });
-    await store.writeWalkthrough(directory, document);
+    document.stories.push({
+      ...document.stories[0],
+      id: "story-second",
+      title: "Second behavior",
+      relationshipToPrimary: "supporting",
+      changeGroupIds: ["group-second"],
+      dependsOnStoryIds: ["story-session"],
+    });
+    document.reviewPlan.push("story-second");
+    await store.writeReview(directory, document);
 
     await expect(
       Promise.all([
         store.setReviewProgress("example/backend", 481, {
           runId: "run-concurrent-progress",
-          stepId: "step-session",
+          changeGroupId: "group-session",
           status: "reviewed",
           note: "Session verified.",
           updatedAt: "ignored",
         }),
         store.setReviewProgress("example/backend", 481, {
           runId: "run-concurrent-progress",
-          stepId: "step-second",
+          changeGroupId: "group-second",
           status: "follow-up",
           note: "Check the dependency.",
           updatedAt: "ignored",
         }),
       ]),
     ).resolves.toEqual([
-      expect.objectContaining({ stepId: "step-session" }),
-      expect.objectContaining({ stepId: "step-second" }),
+      expect.objectContaining({ changeGroupId: "group-session" }),
+      expect.objectContaining({ changeGroupId: "group-second" }),
     ]);
     await expect(
       store.getReviewProgress(
@@ -507,8 +538,8 @@ describe("analysis store", () => {
       ),
     ).resolves.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ stepId: "step-session", status: "reviewed" }),
-        expect.objectContaining({ stepId: "step-second", status: "follow-up" }),
+        expect.objectContaining({ changeGroupId: "group-session", status: "reviewed" }),
+        expect.objectContaining({ changeGroupId: "group-second", status: "follow-up" }),
       ]),
     );
   });
@@ -555,8 +586,15 @@ describe("analysis store", () => {
     await store.writeText(
       directory,
       "logs.jsonl",
-      `${JSON.stringify({ message: "first line" })}\n${JSON.stringify({ message: "second line" })}`,
+      `${JSON.stringify({ message: "first line" })}\n${JSON.stringify({ message: "second line" })}\n`,
     );
+    await store.appendDiagnosticEvent(directory, {
+      timestamp: "2026-08-04T19:02:00.000Z",
+      level: "error",
+      event: "provider.failed",
+      message: "Provider emitted a bounded diagnostic.",
+      metadata: { detail: "x".repeat(100_000) },
+    });
     await store.writeText(
       directory,
       "raw-output.txt",
@@ -575,9 +613,94 @@ describe("analysis store", () => {
         ],
       },
       error: { code: "CLAUDE_FAILED", details: ["exit code 1"] },
-      logExcerpt: ["first line", "second line"],
+      logExcerpt: ["first line", "second line", "Provider emitted a bounded diagnostic."],
       rawOutputExcerpt: "Cursor result envelope with a fenced provider response",
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          event: "provider.failed",
+          metadata: { truncated: true },
+        }),
+      ]),
     });
+  });
+
+  it("loads persisted diagnostics for a ready run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-ready-diagnostics-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-ready-logs");
+    await store.writeManifest(directory, run("run-ready-logs"));
+    await store.appendDiagnosticEvent(directory, {
+      timestamp: "2026-08-04T19:03:00.000Z",
+      level: "info",
+      event: "analysis.completed",
+      message: "Walkthrough is ready.",
+    });
+
+    await expect(store.loadDiagnostics("example/backend", 481, "run-ready-logs")).resolves.toMatchObject({
+      manifest: { status: "ready" },
+      events: [expect.objectContaining({ event: "analysis.completed" })],
+    });
+  });
+
+  it("surfaces coordinator progress and rejection details from bundle logs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-coordinator-logs-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-coordinator-logs");
+    await store.writeManifest(directory, {
+      ...run("run-coordinator-logs"),
+      status: "failed",
+      error: { code: "VALIDATION_FAILED", message: "Specialist rejected." },
+    });
+    await mkdir(join(directory, "coordinator"), { recursive: true });
+    await writeFile(
+      join(directory, "coordinator", "audit.jsonl"),
+      `${JSON.stringify({
+        at: "2026-08-04T19:04:00.000Z",
+        event: "submit_result_rejected",
+        payload: { taskId: "walkthrough", errors: ["missing changeGroups", "invalid evidence role"] },
+      })}\n${JSON.stringify({
+        at: "2026-08-04T19:04:10.000Z",
+        event: "report_progress",
+        payload: { taskId: "tests-risks", update: { state: "running", detail: "Inspecting risk coverage for auth paths." } },
+      })}\n`,
+      "utf8",
+    );
+    await writeFile(
+      join(directory, "coordinator", "progress.jsonl"),
+      `${JSON.stringify({
+        at: "2026-08-04T19:04:20.000Z",
+        tasks: {
+          walkthrough: { state: "failed", detail: "missing changeGroups; invalid evidence role", updatedAt: "2026-08-04T19:04:00.000Z" },
+          "tests-risks": { state: "running", detail: "Inspecting risk coverage for auth paths.", updatedAt: "2026-08-04T19:04:10.000Z" },
+          anchor: { state: "complete", updatedAt: "2026-08-04T19:03:50.000Z" },
+          flows: { state: "pending", updatedAt: "2026-08-04T19:03:50.000Z" },
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    const diagnostics = await store.loadDiagnostics("example/backend", 481, "run-coordinator-logs");
+    expect(diagnostics?.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "submit_result_rejected",
+        level: "error",
+        taskId: "walkthrough",
+        message: "missing changeGroups; invalid evidence role",
+      }),
+      expect.objectContaining({
+        event: "report_progress",
+        taskId: "tests-risks",
+        message: "Inspecting risk coverage for auth paths.",
+      }),
+      expect.objectContaining({
+        event: "coordinator.progress",
+        level: "error",
+        taskId: "walkthrough",
+        message: "missing changeGroups; invalid evidence role",
+      }),
+    ]));
+    expect(diagnostics?.logExcerpt.join("\n")).toMatch(/missing changeGroups/);
+    expect(diagnostics?.logExcerpt.join("\n")).toMatch(/Inspecting risk coverage/);
   });
 
   it("does not delete a managed worktree retained by an active analysis", async () => {

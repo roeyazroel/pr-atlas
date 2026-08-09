@@ -17,14 +17,14 @@ const diagnostics: AnalysisDiagnostics = {
     createdAt: "2026-08-06T06:27:44.110Z",
     completedAt: "2026-08-06T06:29:41.116Z",
     error: {
-      code: "INVALID_WALKTHROUGH",
-      message: "Generated walkthrough failed validation.",
+      code: "INVALID_REVIEW_DOCUMENT",
+      message: "Generated review document failed validation.",
       details: ["Map output must be a closed object."],
     },
   },
   error: {
-    code: "INVALID_WALKTHROUGH",
-    message: "Generated walkthrough failed validation.",
+    code: "INVALID_REVIEW_DOCUMENT",
+    message: "Generated review document failed validation.",
     details: ["Map output must be a closed object."],
   },
   logExcerpt: ["provider stderr excerpt"],
@@ -47,7 +47,7 @@ describe("analysis diagnostic reports", () => {
       generatedAt: "2026-08-06T07:00:00.000Z",
       app: { version: "0.5.0", platform: "darwin", arch: "arm64" },
       analysis: {
-        error: { code: "INVALID_WALKTHROUGH" },
+        error: { code: "INVALID_REVIEW_DOCUMENT" },
         rawOutputExcerpt: "redacted provider result envelope",
       },
     });

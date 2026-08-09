@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { AnalysisService } from '../../electron/backend/service'
@@ -170,7 +170,10 @@ describe('review coverage gate', () => {
     const root = await mkdtemp(`${tmpdir()}/pr-atlas-review-coverage-`)
     try {
       const raw = rawReviewThreads()
-      const run = vi.fn(async (file: string, args: string[]) => {
+      const run = vi.fn(async (file: string, args: string[], options?: { cwd?: string }) => {
+        if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') { await mkdir(args[3], { recursive: true }); return { stdout: '', stderr: '' } }
+        if (file === 'git' && args[0] === 'rev-parse') return { stdout: args[1] === '--show-toplevel' ? options?.cwd ?? '' : options?.cwd?.split(/[\\/]/).at(-1) ?? '', stderr: '' }
+        if (file === 'git' && args[0] === 'status') return { stdout: '', stderr: '' }
         if (file === 'gh' && args[0] === 'api' && args[1] === 'graphql') return { stdout: JSON.stringify(raw), stderr: '' }
         if (file === 'gh' && args[0] === 'api') return { stdout: '[]', stderr: '' }
         return { stdout: '', stderr: '' }
@@ -187,7 +190,7 @@ describe('review coverage gate', () => {
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude' })
 
       expect(result.status).toBe('invalid')
-      expect(result.error).toMatchObject({ code: 'INVALID_WALKTHROUGH', message: expect.stringMatching(/walkthrough|review/i) })
+      expect(result.error).toMatchObject({ code: 'INVALID_REVIEW_DOCUMENT', message: expect.stringMatching(/review/i) })
       expect(JSON.stringify(result)).not.toContain('PRIVATE REVIEW COMMENT SHOULD NOT LEAK')
       expect(analyze).toHaveBeenCalledOnce()
       const manifest = JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))
