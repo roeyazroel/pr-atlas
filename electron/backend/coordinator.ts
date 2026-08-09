@@ -21,7 +21,7 @@ type TaskRecord = { kind: AnchoredTaskKind; id: string; token: string };
 type EvidenceValidation = (reference: { path: string; line: number; role: "changed" | "unchanged-context" }) => Promise<{ valid: boolean; errors: string[] }>;
 type Submission = { digest: string; response?: CoordinatorSubmitResponse; errors?: string[] };
 type CandidateValidation = { valid: true; output: AnchoredTaskOutput } | { valid: false; errors: string[] };
-export type CoordinatorSubmitResponse = { accepted: true; taskId: string; snapshotVersion: number; idempotent?: true };
+type CoordinatorSubmitResponse = { accepted: true; taskId: string; snapshotVersion: number; idempotent?: true };
 type PrContext = { pullRequest: unknown; reviewThreads: unknown[]; reviews: unknown[]; issueComments: unknown[]; reviewComments: unknown[] };
 
 function clone<T>(value: T): T { return structuredClone(value); }

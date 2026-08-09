@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-export interface ReviewCoverageValidation {
+interface ReviewCoverageValidation {
   valid: boolean;
   errors: string[];
 }

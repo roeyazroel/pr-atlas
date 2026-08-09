@@ -447,8 +447,6 @@ export interface AnalysisManifest {
   lastProgress?: AnalysisProgressEvent;
   activity?: AnalysisProgressEvent[];
   effort?: AnalysisEffort;
-  skillContractVersion?: string;
-  skillReferenceUrl?: string;
   config?: AnalysisRunConfig;
   preferred?: boolean;
   error?: SafeDiagnostic;

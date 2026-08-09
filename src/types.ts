@@ -193,7 +193,6 @@ export interface RunHistory {
   provider?: AgentProvider | 'demo';
   model: string;
   schemaVersion?: string;
-  skillVersion?: string;
   statusLabel?: string;
 }
 

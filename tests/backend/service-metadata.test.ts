@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { AnalysisService } from '../../electron/backend/service'
-import { SKILL_CONTRACT_VERSION } from '../../electron/backend/agent'
 
 const capabilities = { structuredOutput: true, streaming: false, sessionContinuation: false, readOnly: true, toolAllowlist: false, modelSelection: true, authenticationState: false }
 
@@ -178,15 +177,17 @@ describe('analysis service reproducibility metadata', () => {
         createdAt: result.manifest.createdAt,
         provider: 'claude',
         model: selectedModel,
-        skillVersion: SKILL_CONTRACT_VERSION,
+        skillVersion: 'provider-skill-version',
       })
-      expect(result.document?.run).not.toMatchObject({ id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented', skillVersion: 'provider-skill-version' })
-      expect(result.manifest).toMatchObject({ runId: result.runId, provider: 'claude', model: selectedModel, skillContractVersion: SKILL_CONTRACT_VERSION })
+      expect(result.document?.run).not.toMatchObject({ id: 'provider-run-id', createdAt: 'provider-created-at', provider: 'provider-invented' })
+      expect(result.manifest).toMatchObject({ runId: result.runId, provider: 'claude', model: selectedModel })
+      expect(result.manifest).not.toHaveProperty('skillContractVersion')
 
       const persistedDocument = JSON.parse(await readFile(`${result.artifactDirectory}/walkthrough.json`, 'utf8'))
       const persistedManifest = JSON.parse(await readFile(`${result.artifactDirectory}/manifest.json`, 'utf8'))
       expect(persistedDocument.run).toEqual(result.document?.run)
-      expect(persistedManifest).toMatchObject({ runId: result.runId, createdAt: result.manifest.createdAt, provider: 'claude', model: selectedModel, skillContractVersion: SKILL_CONTRACT_VERSION })
+      expect(persistedManifest).toMatchObject({ runId: result.runId, createdAt: result.manifest.createdAt, provider: 'claude', model: selectedModel })
+      expect(persistedManifest).not.toHaveProperty('skillContractVersion')
     } finally {
       await rm(root, { recursive: true, force: true })
     }

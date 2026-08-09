@@ -40,7 +40,7 @@ export function safeError(
 ): SafeDiagnostic {
   return { code, message, ...(details?.length ? { details } : {}) };
 }
-export function validateAnalysisRunConfig(
+function validateAnalysisRunConfig(
   value: unknown,
 ): AnalysisRunConfig | null {
   if (value === undefined) return { ...DEFAULT_ANALYSIS_RUN_CONFIG };

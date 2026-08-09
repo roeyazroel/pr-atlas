@@ -27,8 +27,6 @@ import { CURSOR_COORDINATOR_ISOLATION_FAILED, CursorAdapter } from "./cursor.js"
 import {
   redactProviderOutput,
   redactProviderValue,
-  SKILL_CONTRACT_VERSION,
-  SKILL_REFERENCE_URL,
 } from "./agent.js";
 import {
   safeError,
@@ -256,8 +254,6 @@ export class AnalysisService {
         ? { runtimeVersion: installation.version }
         : {}),
       config: request.config,
-      skillContractVersion: SKILL_CONTRACT_VERSION,
-      skillReferenceUrl: SKILL_REFERENCE_URL,
     };
     const progress = (
       stage: AnalysisProgressEvent["stage"],
@@ -362,7 +358,6 @@ export class AnalysisService {
             createdAt: manifest.createdAt,
             provider: request.provider,
             ...(model ? { model } : {}),
-            skillVersion: SKILL_CONTRACT_VERSION,
           },
         };
         if (model) manifest.model = model;

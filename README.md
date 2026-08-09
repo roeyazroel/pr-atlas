@@ -13,6 +13,9 @@ logical changes, evidence, tests, review signals, and guided system flows. It
 keeps the review surface deterministic while using a coding-agent runtime to
 collect and explain repository evidence.
 
+This project is based on the Warp
+[PR Walkthrough skill](https://raw.githubusercontent.com/warpdotdev/common-skills/main/.agents/skills/pr-walkthrough/SKILL.md).
+
 ## Why PR Atlas exists
 
 Coding agents can produce changes faster and at a larger aggregate volume than
@@ -36,7 +39,7 @@ can see what changed and decide what to trust.
 - A review surface that connects code, tests, graphs, commits, specifications,
   and complete human or automated review threads.
 - A local history of validated walkthroughs, including the provider, tool-
-  reported model, schema/skill versions, and the analyzed commit SHA.
+  reported model, schema version, and the analyzed commit SHA.
 - A fixed application UI that renders validated JSON instead of executing
   provider-generated HTML or JavaScript.
 

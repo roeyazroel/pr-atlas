@@ -3,8 +3,7 @@ import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstall
 import { buildAnalysisPrompt, detectProvider, discoverCodexModels, discoverProviderModels, runProviderProcess, schemaForProvider, withTemporarySchema, READ_ONLY_CAPABILITIES, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
-export type CodexSpawn = ProviderSpawn;
-export type CodexResponse = AgentAnalysisResult;
+type CodexSpawn = ProviderSpawn;
 
 const CODEX_CAPABILITIES: AgentCapabilities = { ...READ_ONLY_CAPABILITIES, streaming: true };
 
@@ -19,10 +18,7 @@ export class CodexAdapter implements AgentAdapter {
     const generic = await discoverProviderModels(this.runner, 'codex', this.id);
     return generic.length ? generic : discoverCodexModels(this.spawn, 'codex');
   }
-  getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
-  discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
-
-  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CodexResponse> {
+  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<AgentAnalysisResult> {
     if (task?.coordinator) {
       const selectedModel = model?.trim() || request.model?.trim();
       const config = [

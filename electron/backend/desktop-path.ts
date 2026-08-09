@@ -9,7 +9,7 @@ interface SemanticVersion {
   prerelease: string[]
 }
 
-export interface DesktopPathOptions {
+interface DesktopPathOptions {
   /** Home directory to use for user-installed CLI locations. */
   homePath?: string
   /** Full NVM version bin paths, or version names when homePath is supplied. */
@@ -18,7 +18,7 @@ export interface DesktopPathOptions {
   nvmVersionNames?: readonly string[]
 }
 
-export type ReadDirectory = (directory: string) => readonly string[]
+type ReadDirectory = (directory: string) => readonly string[]
 
 function parseVersion(value: string): SemanticVersion | null {
   const match = value.trim().match(NVM_VERSION_PATTERN)
@@ -61,7 +61,7 @@ function versionNameFromPath(value: string): string {
 }
 
 /** Sorts valid NVM bin paths newest semantic version first and drops malformed paths. */
-export function sortNvmVersionBinPaths(paths: readonly string[]): string[] {
+function sortNvmVersionBinPaths(paths: readonly string[]): string[] {
   return paths
     .map((path) => ({ path, version: parseVersion(versionNameFromPath(path)) }))
     .filter((candidate): candidate is { path: string; version: SemanticVersion } => candidate.version !== null)

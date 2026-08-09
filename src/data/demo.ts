@@ -778,7 +778,6 @@ export const pullRequests: PullRequest[] = [
         provider: "demo",
         model: "Codex local fixture",
         schemaVersion: "1.1.0",
-        skillVersion: "1.1.0",
       },
       {
         id: "run2",

@@ -1,11 +1,9 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstallationStatus, AgentModelOption, AnalysisRequest, AnalysisStage, ProviderAnalysisTask } from '../../shared/contracts.js';
-import { detectProvider, buildAnalysisPrompt, discoverClaudeModels, parseProviderOutput, runProviderProcess, schemaForProvider, withTemporaryMcpConfig, READ_ONLY_CAPABILITIES, SKILL_CONTRACT_VERSION, SKILL_REFERENCE_URL, type ProviderSpawn } from './agent.js';
+import { detectProvider, buildAnalysisPrompt, discoverClaudeModels, runProviderProcess, schemaForProvider, withTemporaryMcpConfig, READ_ONLY_CAPABILITIES, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
-export { SKILL_CONTRACT_VERSION, SKILL_REFERENCE_URL } from './agent.js';
-export type ClaudeSpawn = ProviderSpawn;
-export type ClaudeResponse = AgentAnalysisResult;
+type ClaudeSpawn = ProviderSpawn;
 
 const CLAUDE_CAPABILITIES: AgentCapabilities = { ...READ_ONLY_CAPABILITIES, toolAllowlist: true };
 
@@ -17,10 +15,8 @@ export class ClaudeAdapter implements AgentAdapter {
   getCapabilities(): AgentCapabilities { return { ...CLAUDE_CAPABILITIES }; }
   detect(): Promise<AgentInstallationStatus> { return detectProvider(this.runner, this.id, this.displayName, 'claude', this.getCapabilities()); }
   listModels(): Promise<AgentModelOption[]> { return discoverClaudeModels(this.runner, 'claude'); }
-  getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
-  discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
-  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<ClaudeResponse> {
+  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<AgentAnalysisResult> {
     if (task?.coordinator) return withTemporaryMcpConfig(async (mcpConfig) => {
       const selectedModel = model?.trim() || request.model?.trim();
       const args = ["-p", buildAnalysisPrompt(request, undefined, task), ...(selectedModel ? ["--model", selectedModel] : []), ...(request.effort ? ["--effort", request.effort] : []), "--safe-mode", "--setting-sources", "", "--permission-mode", "plan", "--strict-mcp-config", "--mcp-config", mcpConfig, "--settings", mcpConfig, "--allowedTools", "Read,Grep,Glob,Bash,mcp__atlas__get_task,mcp__atlas__get_anchor,mcp__atlas__get_pr_context,mcp__atlas__validate_evidence,mcp__atlas__preflight_result,mcp__atlas__report_progress,mcp__atlas__submit_result", "--no-session-persistence", "--output-format", "stream-json", "--verbose"];
@@ -43,6 +39,3 @@ export class ClaudeAdapter implements AgentAdapter {
     return runProviderProcess(this, this.runner, this.spawn, 'claude', args, request, worktree, signal, progress, task);
   }
 }
-
-/** Compatibility helper retained for callers that previously parsed Claude envelopes directly. */
-export function parseEnvelope(raw: string): unknown { return parseProviderOutput(raw); }

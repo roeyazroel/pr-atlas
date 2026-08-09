@@ -730,12 +730,6 @@ export class AnalysisStore {
         ...(lastProgress ? { lastProgress } : {}),
         ...(activity.length ? { activity } : {}),
         ...(config ? { config } : {}),
-        ...(typeof manifest.skillContractVersion === "string"
-          ? { skillContractVersion: manifest.skillContractVersion }
-          : {}),
-        ...(typeof manifest.skillReferenceUrl === "string"
-          ? { skillReferenceUrl: manifest.skillReferenceUrl }
-          : {}),
         ...(error ? { error } : {}),
       };
     } catch {

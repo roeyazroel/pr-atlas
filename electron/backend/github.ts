@@ -4,7 +4,7 @@ import type { BootstrapResult, GithubAccountDTO, PullRequestComment, PullRequest
 import { safeExternalUrl, validateCommentBody, validatePullNumber, validateRepository } from './validation.js';
 
 const execFileAsync = promisify(execFile);
-export interface CommandResult { stdout: string; stderr?: string; }
+interface CommandResult { stdout: string; stderr?: string; }
 export interface CommandRunner { run(file: string, args: string[], options?: { cwd?: string; timeout?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }): Promise<CommandResult>; }
 export const commandRunner: CommandRunner = { run: async (file, args, options) => {
   const { stdout, stderr } = await execFileAsync(file, args, { cwd: options?.cwd, timeout: options?.timeout ?? 30_000, signal: options?.signal, env: options?.env, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
@@ -50,7 +50,7 @@ const REVIEW_COMMENT_FIELDS = `
  * response, including resolved/outdated state, author provenance, replies, and
  * disagreement text.
  */
-export const GITHUB_REVIEW_THREADS_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$endCursor:String) {
+const GITHUB_REVIEW_THREADS_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$endCursor:String) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
       reviewThreads(first:${REVIEW_THREAD_PAGE_SIZE}, after:$endCursor) {
@@ -80,7 +80,7 @@ ${REVIEW_COMMENT_FIELDS}
   }
 }`;
 
-export const GITHUB_REVIEW_THREAD_COMMENTS_QUERY = `query($threadId:ID!,$endCursor:String) {
+const GITHUB_REVIEW_THREAD_COMMENTS_QUERY = `query($threadId:ID!,$endCursor:String) {
   node(id:$threadId) {
     ... on PullRequestReviewThread {
       comments(first:${REVIEW_COMMENT_PAGE_SIZE}, after:$endCursor) {

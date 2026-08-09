@@ -1,17 +1,17 @@
 /** Provider-neutral, deterministic planning for large PR map/reduce runs. */
 export const BATCHING_THRESHOLDS = { files: 20, changes: 1_000 } as const;
 export const MAX_BATCH_CONCURRENCY = 4;
-export const DEFAULT_BATCH_BYTES = 160 * 1024;
+const DEFAULT_BATCH_BYTES = 160 * 1024;
 
-export type ChangedDiff = { path: string; diff: string; additions?: number; deletions?: number };
-export type BatchFile = { path: string; diff: string; bytes: number; segment: number };
-export type BatchTask = { id: string; files: BatchFile[]; bytes: number; subsystems: string[] };
-export type BatchPlan = {
+type ChangedDiff = { path: string; diff: string; additions?: number; deletions?: number };
+type BatchFile = { path: string; diff: string; bytes: number; segment: number };
+type BatchTask = { id: string; files: BatchFile[]; bytes: number; subsystems: string[] };
+type BatchPlan = {
   chunks: BatchTask[];
   coverage: { complete: boolean; missing: string[]; duplicated: string[] };
   sourceFiles: string[];
 };
-export type BatchMapOutput = { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
+type BatchMapOutput = { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: Array<{ path: string; line: number | null }>; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
 
 /** A dependency-free validator written into each read-only map-task scope. */
 export function buildBatchMapValidatorScript(task: Pick<BatchTask, "id" | "files">): string {

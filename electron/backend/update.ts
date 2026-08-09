@@ -1,6 +1,6 @@
 import type { UpdateCheckResult } from '../../shared/contracts.js'
 
-export const DEFAULT_UPDATE_FEED_URL = 'https://api.github.com/repos/roeyazroel/pr-atlas/releases/latest'
+const DEFAULT_UPDATE_FEED_URL = 'https://api.github.com/repos/roeyazroel/pr-atlas/releases/latest'
 const RELEASE_PATH_PREFIX = '/roeyazroel/pr-atlas/releases/tag/'
 
 type ParsedVersion = { core: [number, number, number]; prerelease: string[] }
@@ -64,7 +64,7 @@ function allowedFeedUrl(value: string): boolean {
   } catch { return false }
 }
 
-export interface UpdateCheckOptions {
+interface UpdateCheckOptions {
   fetcher?: typeof fetch
   feedUrl?: string
   timeoutMs?: number

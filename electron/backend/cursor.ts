@@ -6,8 +6,7 @@ import type { AgentAdapter, AgentAnalysisResult, AgentCapabilities, AgentInstall
 import { buildAnalysisPrompt, detectProvider, discoverCursorModels, runProviderProcess, READ_ONLY_CAPABILITIES, schemaForProvider, type ProviderSpawn } from './agent.js';
 import type { CommandRunner } from './github.js';
 
-export type CursorSpawn = ProviderSpawn;
-export type CursorResponse = AgentAnalysisResult;
+type CursorSpawn = ProviderSpawn;
 
 const CURSOR_CAPABILITIES: AgentCapabilities = { ...READ_ONLY_CAPABILITIES };
 export const CURSOR_COORDINATOR_ISOLATION_FAILED = "Cursor coordinator instruction isolation was unavailable.";
@@ -37,10 +36,8 @@ export class CursorAdapter implements AgentAdapter {
   getCapabilities(): AgentCapabilities { return { ...CURSOR_CAPABILITIES }; }
   detect(): Promise<AgentInstallationStatus> { return detectProvider(this.runner, this.id, this.displayName, 'cursor-agent', this.getCapabilities()); }
   listModels(): Promise<AgentModelOption[]> { return discoverCursorModels(this.runner, 'cursor-agent'); }
-  getModels(): Promise<AgentModelOption[]> { return this.listModels(); }
-  discoverModels(): Promise<AgentModelOption[]> { return this.listModels(); }
 
-  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<CursorResponse> {
+  async analyze(request: AnalysisRequest, worktree: string, inputDirectory: string, signal: AbortSignal | undefined, progress: (stage: AnalysisStage, message: string) => void, model?: string, task?: ProviderAnalysisTask): Promise<AgentAnalysisResult> {
     if (task?.coordinator) {
       const root = await mkdtemp(join(tmpdir(), "pr-atlas-cursor-")); const shadow = join(root, "exact-head");
       try {

@@ -7,26 +7,14 @@ import type {
 } from "../../shared/contracts.js";
 import { validateWalkthroughDocument } from "../../shared/schema.js";
 
-export const LARGE_ANALYSIS_THRESHOLDS = { files: 20, changes: 1_000 } as const;
-export const ANCHOR_DOMAIN_IDS = [
+const LARGE_ANALYSIS_THRESHOLDS = { files: 20, changes: 1_000 } as const;
+const ANCHOR_DOMAIN_IDS = [
   "production-path", "experimental-pocs", "migration-rollback", "updater-installer",
   "runtime-packaging", "reviewer-workflow",
 ] as const satisfies readonly AnchorDomainId[];
 
 export function shouldUseAnchoredAnalysis(input: { files: number; changes: number }): boolean {
   return input.files >= LARGE_ANALYSIS_THRESHOLDS.files || input.changes >= LARGE_ANALYSIS_THRESHOLDS.changes;
-}
-
-export function parseGitDiffSections(diff: string): Map<string, string> {
-  const starts = [...diff.matchAll(/^diff --git (.+)$/gm)].map((match) => match.index ?? 0);
-  const result = new Map<string, string>();
-  for (let index = 0; index < starts.length; index += 1) {
-    const section = diff.slice(starts[index], starts[index + 1]);
-    const value = section.match(/^\+\+\+ b\/(.+)$/m)?.[1] ?? section.match(/^--- a\/(.+)$/m)?.[1];
-    if (!value || value.split(/[\\/]/).includes("..")) throw new Error("Diff section has no safe file path or evidence.");
-    result.set(value, section);
-  }
-  return result;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);

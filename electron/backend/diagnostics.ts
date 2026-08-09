@@ -1,6 +1,6 @@
 import type { AnalysisDiagnostics } from "../../shared/contracts.js";
 
-export interface DiagnosticReportMetadata {
+interface DiagnosticReportMetadata {
   appVersion: string;
   platform: NodeJS.Platform;
   arch: string;
