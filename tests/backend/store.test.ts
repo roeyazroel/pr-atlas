@@ -568,8 +568,15 @@ describe("analysis store", () => {
     await store.writeText(
       directory,
       "logs.jsonl",
-      `${JSON.stringify({ message: "first line" })}\n${JSON.stringify({ message: "second line" })}`,
+      `${JSON.stringify({ message: "first line" })}\n${JSON.stringify({ message: "second line" })}\n`,
     );
+    await store.appendDiagnosticEvent(directory, {
+      timestamp: "2026-08-04T19:02:00.000Z",
+      level: "error",
+      event: "provider.failed",
+      message: "Provider emitted a bounded diagnostic.",
+      metadata: { detail: "x".repeat(100_000) },
+    });
     await store.writeText(
       directory,
       "raw-output.txt",
@@ -588,9 +595,94 @@ describe("analysis store", () => {
         ],
       },
       error: { code: "CLAUDE_FAILED", details: ["exit code 1"] },
-      logExcerpt: ["first line", "second line"],
+      logExcerpt: ["first line", "second line", "Provider emitted a bounded diagnostic."],
       rawOutputExcerpt: "Cursor result envelope with a fenced provider response",
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          event: "provider.failed",
+          metadata: { truncated: true },
+        }),
+      ]),
     });
+  });
+
+  it("loads persisted diagnostics for a ready run", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-ready-diagnostics-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-ready-logs");
+    await store.writeManifest(directory, run("run-ready-logs"));
+    await store.appendDiagnosticEvent(directory, {
+      timestamp: "2026-08-04T19:03:00.000Z",
+      level: "info",
+      event: "analysis.completed",
+      message: "Walkthrough is ready.",
+    });
+
+    await expect(store.loadDiagnostics("example/backend", 481, "run-ready-logs")).resolves.toMatchObject({
+      manifest: { status: "ready" },
+      events: [expect.objectContaining({ event: "analysis.completed" })],
+    });
+  });
+
+  it("surfaces coordinator progress and rejection details from bundle logs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-coordinator-logs-"));
+    const store = new AnalysisStore(root);
+    const directory = store.runDirectory("example/backend", 481, "b".repeat(40), "run-coordinator-logs");
+    await store.writeManifest(directory, {
+      ...run("run-coordinator-logs"),
+      status: "failed",
+      error: { code: "VALIDATION_FAILED", message: "Specialist rejected." },
+    });
+    await mkdir(join(directory, "coordinator"), { recursive: true });
+    await writeFile(
+      join(directory, "coordinator", "audit.jsonl"),
+      `${JSON.stringify({
+        at: "2026-08-04T19:04:00.000Z",
+        event: "submit_result_rejected",
+        payload: { taskId: "walkthrough", errors: ["missing changeGroups", "invalid evidence role"] },
+      })}\n${JSON.stringify({
+        at: "2026-08-04T19:04:10.000Z",
+        event: "report_progress",
+        payload: { taskId: "tests-risks", update: { state: "running", detail: "Inspecting risk coverage for auth paths." } },
+      })}\n`,
+      "utf8",
+    );
+    await writeFile(
+      join(directory, "coordinator", "progress.jsonl"),
+      `${JSON.stringify({
+        at: "2026-08-04T19:04:20.000Z",
+        tasks: {
+          walkthrough: { state: "failed", detail: "missing changeGroups; invalid evidence role", updatedAt: "2026-08-04T19:04:00.000Z" },
+          "tests-risks": { state: "running", detail: "Inspecting risk coverage for auth paths.", updatedAt: "2026-08-04T19:04:10.000Z" },
+          anchor: { state: "complete", updatedAt: "2026-08-04T19:03:50.000Z" },
+          flows: { state: "pending", updatedAt: "2026-08-04T19:03:50.000Z" },
+        },
+      })}\n`,
+      "utf8",
+    );
+
+    const diagnostics = await store.loadDiagnostics("example/backend", 481, "run-coordinator-logs");
+    expect(diagnostics?.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: "submit_result_rejected",
+        level: "error",
+        taskId: "walkthrough",
+        message: "missing changeGroups; invalid evidence role",
+      }),
+      expect.objectContaining({
+        event: "report_progress",
+        taskId: "tests-risks",
+        message: "Inspecting risk coverage for auth paths.",
+      }),
+      expect.objectContaining({
+        event: "coordinator.progress",
+        level: "error",
+        taskId: "walkthrough",
+        message: "missing changeGroups; invalid evidence role",
+      }),
+    ]));
+    expect(diagnostics?.logExcerpt.join("\n")).toMatch(/missing changeGroups/);
+    expect(diagnostics?.logExcerpt.join("\n")).toMatch(/Inspecting risk coverage/);
   });
 
   it("does not delete a managed worktree retained by an active analysis", async () => {

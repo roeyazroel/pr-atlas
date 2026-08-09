@@ -341,28 +341,82 @@ describe("PR Atlas desktop workflow", () => {
     );
   });
 
-  it("opens the settings page from the sidebar and returns to pull requests", async () => {
+  it("opens settings and returns to the PR view without changing the sidebar", async () => {
     const user = userEvent.setup();
     render(<App />);
 
+    const list = screen.getByRole("list", { name: /pull request list/i });
+    const initialRows = within(list).getAllByRole("listitem");
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+
     await user.click(screen.getByRole("button", { name: /open settings/i }));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+    expect(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
     await user.click(screen.getByText("Theme"));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
     await user.click(document.body);
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
+
     await user.click(
-      screen.getByRole("button", { name: /back to pull requests/i }),
+      screen.getByRole("button", { name: /return to pull requests/i }),
     );
     expect(
-      screen.queryByRole("heading", { name: /workspace settings/i }),
+      screen.queryByRole("heading", { name: /^settings$/i }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /^pull requests$/i }),
+    ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+  });
+
+  it("opens the activity log and returns to the PR view without changing the sidebar", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const list = screen.getByRole("list", { name: /pull request list/i });
+    const initialRows = within(list).getAllByRole("listitem");
+    await user.click(screen.getByRole("button", { name: /open activity log/i }));
+    expect(screen.getByRole("heading", { name: /analysis log/i })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: /analysis log events/i })).toBeInTheDocument();
+    expect(document.querySelector(".logging-page")).toHaveClass("logging-page");
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
+    expect(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
+
+    await user.click(
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    );
+    expect(
+      screen.queryByRole("heading", { name: /analysis log/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /^pull requests$/i }),
+    ).toBeInTheDocument();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(initialRows.length);
+    expect(within(list).getByRole("listitem", { name: /#482/i })).toHaveClass(
+      "selected",
+    );
   });
 
   it("shares one in-flight provider discovery during Strict Mode startup", async () => {
@@ -421,11 +475,11 @@ describe("PR Atlas desktop workflow", () => {
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     await user.click(screen.getByRole("button", { name: /open settings/i }));
     expect(
-      screen.getByRole("heading", { name: /workspace settings/i }),
+      screen.getByRole("heading", { name: /^settings$/i }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /back to pull requests/i }),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: /return to pull requests/i }),
+    ).toHaveTextContent("Pull requests");
     expect(
       screen.queryByLabelText(/next analysis profile/i),
     ).not.toBeInTheDocument();
@@ -1084,15 +1138,15 @@ describe("PR Atlas desktop workflow", () => {
       ).toHaveTextContent("Reducer started");
       expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Anchor");
       expect(screen.getByRole("list", { name: /coordinator tasks/i })).toHaveTextContent("Validation");
-      expect(screen.getByRole("listitem", { name: /anchor: complete/i })).toBeInTheDocument();
-      expect(screen.getByRole("listitem", { name: /walkthrough: running/i })).toBeInTheDocument();
-      expect(screen.getByRole("listitem", { name: /tests & risks: failed/i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /anchor: complete\. Anchor accepted\./i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /walkthrough: running\. Walkthrough specialist started\./i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /tests & risks: failed\. Tests specialist rejected\./i })).toBeInTheDocument();
       act(() => {
         progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "running", message: "Anchor restarted.", timestamp: "2026-08-06T06:30:01.000Z" });
         progressListener?.({ runId: "run-live", stage: "anchoring", taskState: "failed", message: "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", timestamp: "2026-08-06T06:30:02.000Z" });
         progressListener?.({ runId: "run-live", stage: "generating", message: "Cursor coordinator instruction isolation was unavailable; using legacy analysis.", timestamp: "2026-08-06T06:30:03.000Z" });
       });
-      expect(screen.getByRole("listitem", { name: /anchor: failed/i })).toBeInTheDocument();
+      expect(screen.getByRole("listitem", { name: /anchor: failed\. Cursor coordinator instruction isolation was unavailable/i })).toBeInTheDocument();
       expect(screen.queryByRole("listitem", { name: /anchor: running/i })).not.toBeInTheDocument();
       expect(
         screen.getByText(

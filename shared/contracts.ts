@@ -174,6 +174,8 @@ export interface AgentAnalysisResult {
   document?: WalkthroughDocument;
   rawOutput: string;
   logs: string[];
+  /** Redacted provider lifecycle telemetry; never includes model reasoning. */
+  diagnosticEvents?: AnalysisDiagnosticEvent[];
   model?: string;
   errors?: string[];
   /** Validated, provider-neutral intermediate result for anchored large-PR work. */
@@ -461,6 +463,8 @@ export interface SafeDiagnostic {
 export interface AnalysisRunResult {
   runId: string;
   status: AnalysisRunStatus;
+  /** Redacted lifecycle events from this run for immediate UI inspection. */
+  diagnosticEvents?: AnalysisDiagnosticEvent[];
   document?: WalkthroughDocument;
   error?: SafeDiagnostic;
   manifest: AnalysisManifest;
@@ -476,6 +480,21 @@ export interface AnalysisDiagnostics {
   error?: SafeDiagnostic;
   logExcerpt: string[];
   rawOutputExcerpt: string;
+  /** Structured operational events, bounded and redacted before crossing IPC. */
+  events?: AnalysisDiagnosticEvent[];
+}
+export type AnalysisDiagnosticLevel = "debug" | "info" | "warn" | "error";
+export interface AnalysisDiagnosticEvent {
+  timestamp: string;
+  level: AnalysisDiagnosticLevel;
+  event: string;
+  message: string;
+  runId?: string;
+  provider?: AgentProvider;
+  stage?: AnalysisStage;
+  taskId?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
 }
 export interface DiagnosticExportResult {
   saved: boolean;

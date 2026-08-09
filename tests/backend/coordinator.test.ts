@@ -93,6 +93,43 @@ describe("Atlas API coordinator", () => {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
+  it("reports repository-relative locators for invalid candidate evidence and deduplicates them in order", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(
+      directory,
+      { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) },
+      new Set(),
+      async (reference) => reference.path === "src/b.ts"
+        ? { valid: false, errors: ["changed evidence is not an added line in the captured diff"] }
+        : reference.path === "src/c.ts"
+          ? { valid: false, errors: ["evidence line is outside exact-head file"] }
+          : { valid: true, errors: [] },
+    );
+    try {
+      const task = coordinator.task("anchor");
+      const invalid = {
+        ...anchor,
+        changeGroups: [{
+          ...anchor.changeGroups[0],
+          evidence: [
+            { path: "src/b.ts", line: 2, role: "changed" as const },
+            { path: "src/b.ts", line: 2, role: "changed" as const },
+            { path: "src/c.ts", line: 3, role: "unchanged-context" as const },
+          ],
+        }],
+      };
+      await expect(coordinator.validateEvidence(task.token, { path: "src/b.ts", line: 2, role: "changed" })).resolves.toEqual({ valid: false, errors: ["changed evidence is not an added line in the captured diff"] });
+      const expected = [
+        "src/b.ts:2 (changed): changed evidence is not an added line in the captured diff",
+        "src/c.ts:3 (unchanged-context): evidence line is outside exact-head file",
+      ];
+      await expect(coordinator.preflight(task.token, invalid)).resolves.toEqual({ valid: false, errors: expected });
+      await expect(coordinator.submit(task.token, "invalid-locators", invalid)).rejects.toThrow(expected.join("; "));
+      const audit = (await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      expect(audit.at(-1)?.payload.errors).toEqual(expected);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("keeps a durably accepted result accepted when post-settlement telemetry fails", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
@@ -205,6 +242,8 @@ describe("Atlas API coordinator", () => {
     const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
     const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) }, new Set(), undefined, (value) => JSON.parse(JSON.stringify(value).replaceAll("secret-token", "[REDACTED]")));
     try {
+      const live: Array<{ taskId: string; state: string; detail?: string }> = [];
+      coordinator.onProgress((update) => live.push(update));
       const token = coordinator.task("anchor").token;
       await coordinator.reportProgress(token, { state: "running", detail: `secret-token /private/worktree ${"x".repeat(2_000)}` });
       for (let index = 1; index < 20; index += 1) await coordinator.reportProgress(token, { state: "running", detail: `update-${index}` });
@@ -212,6 +251,10 @@ describe("Atlas API coordinator", () => {
       const progress = JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8"));
       expect(progress.tasks.anchor.detail).toBe("update-19");
       expect(progress.preflightChecks.anchor).toEqual({ checks: 0, remainingChecks: 3 });
+      expect(live).toHaveLength(20);
+      expect(live[0]).toMatchObject({ taskId: "anchor", state: "running" });
+      expect(live[0].detail).toContain("[REDACTED] [PATH]");
+      expect(live.at(-1)).toMatchObject({ taskId: "anchor", state: "running", detail: "update-19" });
       const audit = await readFile(join(directory, "coordinator", "audit.jsonl"), "utf8");
       expect(audit).not.toContain("secret-token");
       expect(audit).not.toContain("/private/worktree");
@@ -219,6 +262,22 @@ describe("Atlas API coordinator", () => {
       expect(events).toHaveLength(20);
       expect(events[0].payload.update.detail).toContain("[REDACTED] [PATH]");
       expect(events[0].payload.update.detail.length).toBeLessThanOrEqual(1_000);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("streams rejected submission details into failed task progress for live UI and bundle logs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pr-atlas-coordinator-"));
+    const coordinator = new AtlasApiCoordinator(directory, { repository: "acme/atlas", pullNumber: 9, baseSha: "a".repeat(40), headSha: "b".repeat(40) });
+    try {
+      const live: Array<{ taskId: string; state: string; detail?: string }> = [];
+      coordinator.onProgress((update) => live.push(update));
+      const token = coordinator.task("anchor").token;
+      await expect(coordinator.submit(token, "bad", { taskId: "anchor" })).rejects.toThrow();
+      expect(live.at(-1)).toMatchObject({ taskId: "anchor", state: "failed" });
+      expect(live.at(-1)?.detail).toMatch(/required|schema|invalid|domains/i);
+      const progress = JSON.parse(await readFile(join(directory, "coordinator", "progress.json"), "utf8"));
+      expect(progress.tasks.anchor.state).toBe("failed");
+      expect(progress.tasks.anchor.detail).toMatch(/required|schema|invalid|domains/i);
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 

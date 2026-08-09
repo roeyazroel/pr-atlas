@@ -50,6 +50,7 @@ import {
 } from "./types";
 import RichThreadsView from "./components/ThreadsView";
 import SelectMenu from "./components/SelectMenu";
+import LoggingView from "./components/LoggingView";
 import {
   AGENT_PROVIDER_PRIORITY,
   DEFAULT_ANALYSIS_RUN_CONFIG,
@@ -59,6 +60,7 @@ import {
   type AnalysisEffort,
   type AnalysisProgressEvent,
   type AnalysisDiagnostics,
+  type AnalysisDiagnosticEvent,
   type AnalysisRunConfig,
   type AnalysisRunResult,
   type AnalysisRunSummary,
@@ -1292,6 +1294,7 @@ function App() {
     provider?: AgentProvider;
     scanMode?: AnalysisRunConfig["scanMode"];
     activity: AnalysisProgressEvent[];
+    diagnosticEvents?: AnalysisDiagnosticEvent[];
   } | null>(null);
   const [analysisDone, setAnalysisDone] = useState<Record<string, boolean>>({});
   const [account, setAccount] = useState<AccountState>({
@@ -1320,6 +1323,7 @@ function App() {
   const [liveError, setLiveError] = useState<string | null>(null);
   const [confirmLiveAnalysis, setConfirmLiveAnalysis] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [loggingOpen, setLoggingOpen] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState("");
   const [analysisStatus, setAnalysisStatus] = useState<PRStatus | null>(null);
   const [themeMode, setThemeMode] = useState<ThemeMode>(readThemeMode);
@@ -1361,6 +1365,8 @@ function App() {
   );
   const evidenceDrawerRef = useRef<HTMLElement>(null);
   const [analysisDiagnostics, setAnalysisDiagnostics] =
+    useState<AnalysisDiagnostics | null>(null);
+  const [analysisLogDiagnostics, setAnalysisLogDiagnostics] =
     useState<AnalysisDiagnostics | null>(null);
   const [diagnosticExportMessage, setDiagnosticExportMessage] = useState("");
   const selectedProviderStatus = providers.find(
@@ -1424,6 +1430,7 @@ function App() {
       if (confirmLiveAnalysis) setConfirmLiveAnalysis(false);
       setEvidenceDetail(null);
       setSettingsOpen(false);
+      setLoggingOpen(false);
     };
     document.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
@@ -1431,7 +1438,7 @@ function App() {
       document.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [confirmLiveAnalysis, evidenceDetail, settingsOpen]);
+  }, [confirmLiveAnalysis, evidenceDetail, settingsOpen, loggingOpen]);
   useEffect(() => {
     if (!api?.getRetentionSettings) return;
     void api
@@ -1896,6 +1903,17 @@ function App() {
   const selectedCommentReload = selectedPR
     ? (commentReloads[selectedPR.id] ?? 0)
     : 0;
+  const loggingEvents = useMemo<AnalysisDiagnosticEvent[]>(() => {
+    const persisted = analysisLogDiagnostics?.events ?? [];
+    const current = analysis?.id === selectedPR?.id ? (analysis?.diagnosticEvents ?? []) : [];
+    const unique = new Map<string, AnalysisDiagnosticEvent>();
+    for (const event of [...persisted, ...current])
+      unique.set(
+        `${event.timestamp}:${event.level}:${event.event}:${event.runId ?? ""}:${event.provider ?? ""}:${event.taskId ?? ""}:${event.message}`,
+        event,
+      );
+    return [...unique.values()].sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+  }, [analysis, analysisLogDiagnostics?.events, selectedPR?.id]);
 
   useEffect(() => {
     if (
@@ -2123,6 +2141,47 @@ function App() {
   ]);
 
   useEffect(() => {
+    const currentRun = analysis?.id === selectedPR?.id && !analysis?.running
+      ? analysis?.runId
+      : undefined;
+    const latestRun = selectedPR ? liveRuns[selectedPR.id]?.[0]?.runId : undefined;
+    const runId = currentRun ?? latestRun;
+    if (
+      !api?.loadAnalysisDiagnostics ||
+      !selectedPR ||
+      selectedPR.source !== "github" ||
+      !selectedPR.repositoryFullName ||
+      !runId ||
+      analysis?.running
+    ) {
+      setAnalysisLogDiagnostics(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .loadAnalysisDiagnostics(selectedPR.repositoryFullName, selectedPR.number, runId)
+      .then((diagnostics) => {
+        if (!cancelled) setAnalysisLogDiagnostics(diagnostics);
+      })
+      .catch(() => {
+        if (!cancelled) setAnalysisLogDiagnostics(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    analysis?.id,
+    analysis?.runId,
+    analysis?.running,
+    liveRuns,
+    selectedPR?.id,
+    selectedPR?.number,
+    selectedPR?.repositoryFullName,
+    selectedPR?.source,
+  ]);
+
+  useEffect(() => {
     if (selectedPR && selectedPR.repositoryId !== selectedRepo)
       setSelectedId(repoPRs[0]?.id ?? pullRequests[0].id);
   }, [selectedRepo]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2199,6 +2258,7 @@ function App() {
             running: false,
             stage: analysisStages.length - 1,
             provider,
+            diagnosticEvents: result.diagnosticEvents,
           }
         : current,
     );
@@ -3005,26 +3065,38 @@ function App() {
                 <CircleHelp size={14} /> Keyboard shortcuts
               </button>
               <button
+                className={`sidebar-utility-button ${loggingOpen ? "active" : ""}`}
+                aria-label="Open activity log"
+                onClick={() => {
+                  setLoggingOpen((open) => !open);
+                  setSettingsOpen(false);
+                }}
+              >
+                <Activity size={14} /> Activity log
+                {(loggingEvents.length + (analysis?.id === selectedPR?.id ? (analysis?.activity.length ?? 0) : 0)) > 0 && <span className="utility-count">{loggingEvents.length + (analysis?.id === selectedPR?.id ? (analysis?.activity.length ?? 0) : 0)}</span>}
+              </button>
+              <button
                 className={`sidebar-utility-button workspace-settings-link ${settingsOpen ? "active" : ""}`}
                 aria-label="Open settings"
-                onClick={() => setSettingsOpen((open) => !open)}
+                onClick={() => {
+                  setSettingsOpen((open) => !open);
+                  setLoggingOpen(false);
+                }}
               >
-                <Settings size={14} /> Workspace settings
+                <Settings size={14} /> Settings
               </button>
             </div>
           </div>
         </aside>
 
-        {settingsOpen ? <main className="settings-page" aria-labelledby="workspace-settings-title">
+        {loggingOpen ? <LoggingView events={loggingEvents} liveActivity={analysis?.id === selectedPR?.id ? (analysis?.activity ?? []) : []} running={Boolean(analysis?.running)} providerLabel={activeAnalysisProviderName} onClose={() => setLoggingOpen(false)} /> : settingsOpen ? <main className="settings-page" aria-labelledby="settings-title">
           <header className="settings-page-header">
             <div className="settings-page-intro">
               <div className="eyebrow">Workspace</div>
-              <h1 id="workspace-settings-title">Workspace settings</h1>
+              <h1 id="settings-title">Settings</h1>
               <p>Choose the provider and model for every analysis run. Codex and Claude also support a separate thinking budget. Changes save locally and apply to the next scan.</p>
             </div>
-            <div className="settings-page-actions">
-              <button className="secondary-button" aria-label="Back to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={14} /> Back to pull requests</button>
-            </div>
+            <button className="secondary-button" type="button" aria-label="Return to pull requests" onClick={() => setSettingsOpen(false)}><ArrowLeft size={13} aria-hidden="true" /> Pull requests</button>
           </header>
           <div className="settings-workbench">
             <nav className="settings-rail" aria-label="Settings sections">
@@ -4160,10 +4232,15 @@ function AnalysisProgress({
     ["assembling", "Assembly"],
     ["validating", "Validation"],
   ] as const;
+  /** Latest coordinator receipt for a stage, including the agent's detail message. */
   const coordinatorState = (stage: AnalysisProgressEvent["stage"]) => {
     const events = analysis.activity.filter((event) => event.stage === stage);
     const latest = events.at(-1);
-    return latest?.taskState ?? (latest ? "running" : "pending");
+    const state = latest?.taskState ?? (latest ? "running" : "pending");
+    return {
+      state,
+      detail: latest?.message?.trim() || undefined,
+    };
   };
   const hasCoordinatorActivity = analysis.activity.some((event) =>
     COORDINATOR_EXCLUSIVE_PROGRESS_STAGES.has(event.stage),
@@ -4238,8 +4315,14 @@ function AnalysisProgress({
           <div className="agent-activity-head"><div><strong>Coordinator task state</strong><span>Independent task receipts remain visible while parallel work continues.</span></div><Workflow size={14} /></div>
           <div role="list" aria-label="Coordinator tasks">
             {coordinatorRows.map(([stage, label]) => {
-              const state = coordinatorState(stage);
-              return <div className="agent-activity-row" role="listitem" aria-label={`${label}: ${state}`} key={stage}><strong>{label}</strong><span>{state}</span></div>;
+              const { state, detail } = coordinatorState(stage);
+              return <div className={`agent-activity-row coordinator-task-row ${state}`} role="listitem" aria-label={detail ? `${label}: ${state}. ${detail}` : `${label}: ${state}`} key={stage}>
+                <div className="coordinator-task-main">
+                  <strong>{label}</strong>
+                  <span className={`state-tag ${state === "complete" ? "resolved" : state === "failed" ? "active" : state === "running" ? "disputed" : "outdated"}`}>{state}</span>
+                </div>
+                {detail && <p className="coordinator-task-detail">{detail}</p>}
+              </div>;
             })}
           </div>
         </section>
@@ -5661,6 +5744,25 @@ function DetailsView({
             <details>
               <summary>Bounded log excerpt</summary>
               <pre>{diagnostics.logExcerpt.join("\n")}</pre>
+            </details>
+          ) : null}
+          {diagnostics.events?.length ? (
+            <details>
+              <summary>Verbose execution trace ({diagnostics.events.length} events)</summary>
+              <ol className="diagnostics-activity">
+                {diagnostics.events.map((event, index) => (
+                  <li key={`${event.timestamp}:${event.event}:${index}`}>
+                    <code>{event.timestamp}</code> [{event.level}] {event.event}: {event.message}
+                    {event.durationMs !== undefined ? ` (${event.durationMs}ms)` : ""}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          ) : null}
+          {diagnostics.rawOutputExcerpt ? (
+            <details>
+              <summary>Provider output excerpt</summary>
+              <pre>{diagnostics.rawOutputExcerpt}</pre>
             </details>
           ) : null}
           <div className="diagnostics-actions">

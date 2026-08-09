@@ -23,6 +23,10 @@ type Submission = { digest: string; response?: CoordinatorSubmitResponse; errors
 type CandidateValidation = { valid: true; output: AnchoredTaskOutput } | { valid: false; errors: string[] };
 type CoordinatorSubmitResponse = { accepted: true; taskId: string; snapshotVersion: number; idempotent?: true };
 type PrContext = { pullRequest: unknown; reviewThreads: unknown[]; reviews: unknown[]; issueComments: unknown[]; reviewComments: unknown[] };
+type TaskProgressState = "pending" | "running" | "complete" | "failed";
+type TaskProgressUpdate = { state: TaskProgressState; detail?: string; updatedAt: string };
+/** Live callback used by AnalysisService to stream task-local progress into the UI. */
+export type CoordinatorProgressListener = (update: { taskId: AnchoredTaskKind; state: TaskProgressState; detail?: string; updatedAt: string }) => void;
 
 function clone<T>(value: T): T { return structuredClone(value); }
 function digest(value: unknown): string { return JSON.stringify(value); }
@@ -76,11 +80,12 @@ export class AtlasApiCoordinator {
   private readonly progressUpdates = new Map<string, number>();
   private readonly submissions = new Map<string, Submission>();
   private readonly inflight = new Map<string, Promise<CoordinatorSubmitResponse>>();
-  private readonly progress = new Map<string, { state: "pending" | "running" | "complete" | "failed"; detail?: string; updatedAt: string }>();
+  private readonly progress = new Map<string, TaskProgressUpdate>();
   private readonly validationFailures = new Map<string, { result: unknown; errors: string[] }>();
   private readonly lastDiagnostics = new Map<string, { code: string; message: string }>();
   private readonly redactionSecrets = new Set<string>();
   private readonly prContext: PrContext;
+  private progressListener: CoordinatorProgressListener | undefined;
   private transaction: Promise<void> = Promise.resolve();
   private snapshotVersion = 0;
 
@@ -98,6 +103,8 @@ export class AtlasApiCoordinator {
     const task = this.tasks.get(id); if (!task) throw new Error("unknown coordinator task");
     return { id: task.id, token: task.token };
   }
+  /** Register a listener that receives redacted task progress for live UI streaming. */
+  onProgress(listener: CoordinatorProgressListener): void { this.progressListener = listener; }
   addRedactionSecret(value: string): void { if (value) this.redactionSecrets.add(value); }
   result(id: AnchoredTaskKind): AnchoredTaskOutput | null { return clone(this.results.get(id) ?? null); }
   submissionStats(id: AnchoredTaskKind) {
@@ -135,9 +142,9 @@ export class AtlasApiCoordinator {
     const detail = isRecord(redacted) && safeText(redacted.detail) ? redactProgressDetail(redacted.detail).slice(0, MAX_PROGRESS_DETAIL_CHARS) : undefined;
     const safeUpdate = { state: update.state, ...(detail ? { detail } : {}) };
     this.progressUpdates.set(task.id, count + 1);
-    this.progress.set(task.id, { ...safeUpdate, updatedAt: new Date().toISOString() });
+    const recorded = this.recordProgress(task.id, safeUpdate);
     await this.persistProgress(); await this.audit("report_progress", { taskId: task.id, update: safeUpdate });
-    return clone(this.progress.get(task.id)!);
+    return clone(recorded);
   }
   async validateEvidence(token: string, reference: { path: string; line: number; role: "changed" | "unchanged-context" }) {
     this.requireTask(token);
@@ -192,14 +199,16 @@ export class AtlasApiCoordinator {
       if (!checked.valid) {
         this.submissions.set(key, { digest: payload, errors: checked.errors });
         this.validationFailures.set(task.id, { result: clone(sanitized), errors: checked.errors.slice(0, 20) });
-        await this.audit("submit_result_rejected", { taskId: task.id, errors: checked.errors });
+        const detail = checked.errors.slice(0, 3).join("; ").slice(0, MAX_PROGRESS_DETAIL_CHARS);
+        this.recordProgress(task.id, { state: "failed", ...(detail ? { detail } : {}) });
+        await Promise.allSettled([this.persistProgress(), this.audit("submit_result_rejected", { taskId: task.id, errors: checked.errors })]);
         throw new Error(checked.errors.join("; "));
       }
       await this.persistResult(task.id, checked.output);
       this.results.set(task.id, clone(checked.output));
       this.validationFailures.delete(task.id);
       if (task.kind === "anchor") this.snapshotVersion += 1;
-      this.progress.set(task.id, { state: "complete", updatedAt: new Date().toISOString() });
+      this.recordProgress(task.id, { state: "complete", detail: `${task.id} result accepted.` });
       const response = { accepted: true as const, taskId: task.id, snapshotVersion: this.snapshotVersion };
       this.submissions.set(key, { digest: payload, response });
       const telemetry = await Promise.allSettled([
@@ -219,7 +228,7 @@ export class AtlasApiCoordinator {
         ? { kind: "anchor", id: "anchor", total: 1 }
         : { kind: task.kind, id: task.id, total: 3, anchor: this.results.get("anchor") as SemanticAnchor };
       const checked = validateAnchoredTaskOutput(value, protocol);
-      if (!checked.valid || !checked.output) return { valid: false, errors: checked.errors };
+      if (!checked.valid || !checked.output) return { valid: false, errors: [...new Set(checked.errors)] };
       const errors: string[] = [];
       if (task.kind === "anchor" && (this.evidencePaths.size > 0 || this.evidenceHunks.size > 0)) {
         const covered = changedEvidenceLines((checked.output as SemanticAnchor).changeGroups);
@@ -237,11 +246,33 @@ export class AtlasApiCoordinator {
           errors.push(`Anchor is missing changed evidence for captured changed hunks: ${shown.join(", ")}${missingHunks.length > shown.length ? `, and ${missingHunks.length - shown.length} more` : ""}.`);
         }
       }
-      const collect = async (candidate: unknown): Promise<void> => { if (Array.isArray(candidate)) await Promise.all(candidate.map(collect)); else if (candidate && typeof candidate === "object") for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) { if ((key === "evidence" || key === "evidenceRefs") && Array.isArray(item)) for (const ref of item) { const checkedEvidence = await this.validateEvidence(task.token, ref as { path: string; line: number; role: "changed" | "unchanged-context" }); if (!checkedEvidence.valid) errors.push(...checkedEvidence.errors); } else await collect(item); } };
+      const collect = async (candidate: unknown): Promise<void> => {
+        if (Array.isArray(candidate)) {
+          for (const item of candidate) await collect(item);
+        } else if (candidate && typeof candidate === "object") {
+          for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) {
+            if ((key === "evidence" || key === "evidenceRefs") && Array.isArray(item)) {
+              for (const ref of item) {
+                const typedRef = ref as { path: string; line: number; role: "changed" | "unchanged-context" };
+                const checkedEvidence = await this.validateEvidence(task.token, typedRef);
+                if (!checkedEvidence.valid) errors.push(...checkedEvidence.errors.map((error) => `${typedRef.path}:${typedRef.line} (${typedRef.role}): ${error}`));
+              }
+            } else await collect(item);
+          }
+        }
+      };
       await collect(checked.output);
-      return errors.length > 0 ? { valid: false, errors } : { valid: true, output: checked.output };
+      const uniqueErrors = [...new Set(errors)];
+      return uniqueErrors.length > 0 ? { valid: false, errors: uniqueErrors } : { valid: true, output: checked.output };
   }
   private sanitizeProvider(value: unknown): unknown { return redactSecrets(this.sanitize(value), this.redactionSecrets); }
+  /** Persist the latest task progress and notify any live UI listener. */
+  private recordProgress(taskId: string, update: { state: TaskProgressState; detail?: string }): TaskProgressUpdate {
+    const recorded: TaskProgressUpdate = { ...update, updatedAt: new Date().toISOString() };
+    this.progress.set(taskId, recorded);
+    this.progressListener?.({ taskId: taskId as AnchoredTaskKind, state: recorded.state, ...(recorded.detail ? { detail: recorded.detail } : {}), updatedAt: recorded.updatedAt });
+    return recorded;
+  }
   private requireTask(token: string): TaskRecord { const task = this.byToken.get(token); if (!task) throw new Error("invalid task bearer token"); return task; }
   private async serial<T>(work: () => Promise<T>): Promise<T> { const current = this.transaction.then(work); this.transaction = current.then(() => undefined, () => undefined); return current; }
   private async audit(event: string, payload: unknown) { const root = join(this.directory, "coordinator"); await mkdir(root, { recursive: true }); await appendFile(join(root, "audit.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), event, payload: this.sanitizeProvider(payload) })}\n`); }

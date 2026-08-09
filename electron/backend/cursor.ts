@@ -67,7 +67,7 @@ export class CursorAdapter implements AgentAdapter {
         await writeFile(join(root, "mcp.json"), mcp, "utf8");
         const baseline = (await this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: shadow, timeout: 30_000, signal })).stdout;
         const selectedModel = model?.trim() || request.model?.trim();
-        const args = ["-p", buildAnalysisPrompt(request, undefined, task), ...(selectedModel ? ["--model", selectedModel] : []), "--output-format", "stream-json", "--mode", "ask", "--sandbox", "enabled", "--workspace", shadow, "--trust", "--approve-mcps"];
+        const args = ["-p", buildAnalysisPrompt(request, undefined, task), ...(selectedModel ? ["--model", selectedModel] : []), "--output-format", "stream-json", "--sandbox", "enabled", "--workspace", shadow, "--trust", "--approve-mcps", "--force"];
         const response = await runProviderProcess(this, this.runner, this.spawn, "cursor-agent", args, request, shadow, signal, progress, task, { CURSOR_CONFIG_DIR: root, ELECTRON_RUN_AS_NODE: "1" });
         const after = (await this.runner.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: shadow, timeout: 30_000, signal })).stdout;
         return after === baseline ? response : { ...response, status: "invalid", errors: ["Cursor modified the disposable exact-head worktree; output was rejected."], document: undefined, taskOutput: undefined, mapOutput: undefined };

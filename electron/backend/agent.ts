@@ -7,6 +7,7 @@ import { stripVTControlCharacters } from "node:util";
 import type {
   AgentAdapter,
   AgentAnalysisResult,
+  AnalysisDiagnosticEvent,
   AgentCapabilities,
   AgentInstallationStatus,
   AgentModelOption,
@@ -996,6 +997,22 @@ export async function runProviderProcess(
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const providerStartedAt = Date.now();
+    const providerEvents: AnalysisDiagnosticEvent[] = [];
+    const trace = (level: AnalysisDiagnosticEvent["level"], event: string, message: string, metadata?: Record<string, unknown>) => {
+      providerEvents.push({
+        timestamp: new Date().toISOString(),
+        level,
+        event,
+        message,
+        provider: adapter.id,
+        ...(task?.id ? { taskId: task.id } : {}),
+        ...(metadata ? { metadata } : {}),
+      });
+      if (providerEvents.length > 100) providerEvents.shift();
+    };
     const environmentSource = { ...process.env };
     const providerEnvironment = buildProviderEnvironment(
       adapter.id,
@@ -1026,9 +1043,15 @@ export async function runProviderProcess(
         finished = true;
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener("abort", cancel);
+        response.diagnosticEvents = [...providerEvents];
         resolve(response);
       }
     };
+    trace("info", "provider.process.start", `Starting ${adapter.displayName} provider process.`, {
+      executable,
+      argumentCount: args.length,
+      task: task?.kind ?? "single",
+    });
     let child: ChildProcess;
     try {
       child = spawn(executable, args, {
@@ -1038,6 +1061,7 @@ export async function runProviderProcess(
         env: providerEnvironment,
       });
     } catch {
+      trace("error", "provider.process.spawn_error", `${adapter.displayName} could not be started.`, { durationMs: Date.now() - providerStartedAt });
       finish({
         status: "failed",
         rawOutput: "",
@@ -1054,6 +1078,7 @@ export async function runProviderProcess(
       /* process may have closed stdin */
     }
     cancel = () => {
+      trace("warn", "provider.process.cancelled", "Provider process cancelled by the analysis controller.", { durationMs: Date.now() - providerStartedAt, stdoutBytes, stderrBytes });
       try {
         child.kill();
       } catch {
@@ -1070,6 +1095,7 @@ export async function runProviderProcess(
     const timeoutMinutes = request.config?.timeoutMinutes;
     if (timeoutMinutes && !task)
       timeout = setTimeout(() => {
+        trace("error", "provider.process.timeout", "Provider process exceeded the configured analysis deadline.", { durationMs: Date.now() - providerStartedAt, timeoutMinutes, stdoutBytes, stderrBytes });
         try {
           child.kill();
         } catch {
@@ -1085,21 +1111,27 @@ export async function runProviderProcess(
         });
       }, timeoutMinutes * 60_000);
     child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout = (stdout + chunk.toString()).slice(0, MAX_PROVIDER_OUTPUT);
+      const text = chunk.toString();
+      stdoutBytes += Buffer.byteLength(text, "utf8");
+      stdout = (stdout + text).slice(0, MAX_PROVIDER_OUTPUT);
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr = (stderr + chunk.toString()).slice(0, MAX_PROVIDER_OUTPUT);
+      const text = chunk.toString();
+      stderrBytes += Buffer.byteLength(text, "utf8");
+      stderr = (stderr + text).slice(0, MAX_PROVIDER_OUTPUT);
     });
-    child.on("error", () =>
+    child.on("error", (error) => {
+      trace("error", "provider.process.error", `${adapter.displayName} emitted a process error.`, { durationMs: Date.now() - providerStartedAt, error: error instanceof Error ? error.message : String(error), stdoutBytes, stderrBytes });
       finish({
         status: signal?.aborted ? "cancelled" : "failed",
         rawOutput: providerOutput(),
         logs: providerLogs(),
         errors: [`${adapter.displayName} could not be started.`],
-      }),
-    );
-    child.on("close", (code) => {
+      });
+    });
+    child.on("close", (code, signalName) => {
       signal?.removeEventListener("abort", cancel);
+      trace(code === 0 ? "info" : "error", "provider.process.close", `Provider process closed with ${code === 0 ? "success" : "failure"}.`, { code, signal: signalName, durationMs: Date.now() - providerStartedAt, stdoutBytes, stderrBytes });
       if (signal?.aborted)
         return finish({
           status: "cancelled",

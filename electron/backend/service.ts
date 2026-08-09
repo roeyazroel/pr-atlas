@@ -9,6 +9,7 @@ import {
   type AgentProvider,
   type AnalysisManifest,
   type AnalysisProgressEvent,
+  type AnalysisDiagnosticEvent,
   type AnalysisRequest,
   type AnalysisRunResult,
   type AnalysisRunSummary,
@@ -255,6 +256,41 @@ export class AnalysisService {
         : {}),
       config: request.config,
     };
+    let diagnosticWrite: Promise<void> = Promise.resolve();
+    const diagnosticEvents: AnalysisDiagnosticEvent[] = [];
+    const log = (
+      level: AnalysisDiagnosticEvent["level"],
+      event: string,
+      message: string,
+      extra: Partial<Pick<AnalysisDiagnosticEvent, "stage" | "taskId" | "durationMs" | "metadata">> = {},
+    ) => {
+      const safe = redactProviderValue({
+        timestamp: new Date().toISOString(),
+        level,
+        event: event.slice(0, 120),
+        message: String(message).slice(0, 32_000),
+        runId,
+        provider: request.provider,
+        ...extra,
+      }) as AnalysisDiagnosticEvent;
+      diagnosticEvents.push(safe);
+      if (diagnosticEvents.length > 500) diagnosticEvents.splice(0, diagnosticEvents.length - 500);
+      diagnosticWrite = diagnosticWrite
+        .then(() => this.store.appendDiagnosticEvent(directory, safe))
+        .catch(() => undefined);
+    };
+    const startedAt = Date.now();
+    log("info", "analysis.started", "Analysis run started.", {
+      metadata: {
+        repository: request.repository,
+        pullNumber: request.pullNumber,
+        baseSha: request.baseSha,
+        headSha: request.headSha,
+        model: request.model,
+        effort: request.effort,
+        config: request.config,
+      },
+    });
     const progress = (
       stage: AnalysisProgressEvent["stage"],
       message: string,
@@ -269,6 +305,7 @@ export class AnalysisService {
       };
       manifest.lastProgress = event;
       manifest.activity = [...(manifest.activity ?? []), event].slice(-100);
+      log(taskState === "failed" ? "error" : "info", "analysis.progress", message, { stage, metadata: taskState ? { taskState } : undefined });
       this.emit(event);
     };
     try {
@@ -277,11 +314,13 @@ export class AnalysisService {
         "Preparing an application-managed repository worktree.",
       );
       const worktree = await this.prepareWorktree(request, controller.signal);
+      log("info", "worktree.ready", "Managed exact-head worktree is ready.", { stage: "preparing", metadata: { path: worktree } });
       progress(
         "collecting",
         "Collecting deterministic pull request artifacts.",
       );
       await this.collectInputs(request, directory, worktree, controller.signal);
+      log("info", "inputs.collected", "Deterministic pull request artifacts were collected.", { stage: "collecting" });
       const inputDirectory = resolve(directory, "input");
       if (!inside(this.dataRoot, inputDirectory))
         throw new Error("Unsafe input artifact path.");
@@ -290,6 +329,20 @@ export class AnalysisService {
         "Inspecting collected source context and deterministic evidence.",
       );
       const response = await this.runProviderAnalysis(adapter, request, worktree, inputDirectory, directory, controller.signal, progress);
+      log(response.status === "ready" ? "info" : "warn", "provider.completed", `Provider analysis completed with status ${response.status}.`, {
+        stage: "generating",
+        durationMs: Date.now() - startedAt,
+        metadata: { status: response.status, rawOutputBytes: Buffer.byteLength(response.rawOutput ?? "", "utf8"), logCount: response.logs.length, errorCount: response.errors?.length ?? 0 },
+      });
+      for (const line of response.logs) log("warn", "provider.stderr", line, { stage: "generating" });
+      for (const error of response.errors ?? []) log("error", "provider.error", error, { stage: "validating" });
+      for (const event of response.diagnosticEvents ?? []) {
+        log(event.level, event.event, event.message, {
+          taskId: event.taskId,
+          durationMs: event.durationMs,
+          metadata: event.metadata,
+        });
+      }
       if (response.document) {
         try {
           response.document = await normalizeDocumentEvidencePaths(
@@ -371,18 +424,6 @@ export class AnalysisService {
         "raw-output.txt",
         redactProviderOutput(response.rawOutput),
       );
-      await this.store.writeText(
-        directory,
-        "logs.jsonl",
-        response.logs
-          .map((line) =>
-            JSON.stringify({
-              timestamp: new Date().toISOString(),
-              message: redactProviderOutput(line).slice(0, 32_000),
-            }),
-          )
-          .join("\n"),
-      );
       manifest.status = response.status;
       manifest.completedAt = new Date().toISOString();
       manifest.schemaVersion = response.document?.schemaVersion;
@@ -400,18 +441,28 @@ export class AnalysisService {
         );
       if (response.status === "ready")
         progress("complete", "Walkthrough is ready.");
+      log("info", "analysis.completed", `Analysis run completed with status ${manifest.status}.`, {
+        durationMs: Date.now() - startedAt,
+        metadata: { status: manifest.status, schemaVersion: manifest.schemaVersion },
+      });
+      await diagnosticWrite;
       await this.store.writeManifest(directory, manifest);
       if (response.document)
         await this.store.writeWalkthrough(directory, response.document);
       return {
         runId,
         status: response.status,
+        diagnosticEvents,
         ...(response.document ? { document: response.document } : {}),
         ...(manifest.error ? { error: manifest.error } : {}),
         manifest,
         artifactDirectory: directory,
       };
     } catch (error) {
+      log("error", "analysis.failed", error instanceof Error ? error.message : "Analysis failed.", {
+        durationMs: Date.now() - startedAt,
+        metadata: { aborted: controller.signal.aborted },
+      });
       manifest.status = controller.signal.aborted ? "cancelled" : "failed";
       manifest.completedAt = new Date().toISOString();
       manifest.error = safeError(
@@ -421,14 +472,17 @@ export class AnalysisService {
           : "Could not prepare this analysis.",
       );
       await this.store.writeManifest(directory, manifest);
+      await diagnosticWrite;
       return {
         runId,
         status: manifest.status,
+        diagnosticEvents,
         error: manifest.error,
         manifest,
         artifactDirectory: directory,
       };
     } finally {
+      await diagnosticWrite;
       this.controllers.delete(runId);
       this.releaseWorktree(managedWorktree);
     }
@@ -641,6 +695,13 @@ export class AnalysisService {
         return { valid: true, errors: [] };
       } catch { return { valid: false, errors: ["evidence does not name a readable UTF-8 exact-head file"] }; }
     }, (value) => redactProviderValue(value), prContext, changedLineHunks(files));
+    const coordinatorStage = { anchor: "anchoring", walkthrough: "walkthrough", "tests-risks": "tests-risks", flows: "flows" } as const;
+    /** Forward agent report_progress / submit outcomes into the live activity stream. */
+    coordinator.onProgress((update) => {
+      const stage = coordinatorStage[update.taskId];
+      const message = update.detail?.trim() || `${update.taskId} is ${update.state}.`;
+      progress(stage, message, update.state);
+    });
     const coordinatorServer = await startAtlasCoordinator(coordinator);
     const execution = new AbortController(); let timedOut = false;
     const abort = () => execution.abort();
@@ -681,7 +742,12 @@ export class AnalysisService {
         output = checked?.valid ? checked.output as AnchoredSpecialistOutput : undefined;
       }
       if (output) await writeAnchoredJson(directory, `${kind}.output.json`, output);
-      progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation.`, output ? "complete" : "failed");
+      const failureDetail = !output && checked?.errors?.length
+        ? `: ${checked.errors.slice(0, 3).join("; ").slice(0, 800)}`
+        : !output && response.errors?.length
+          ? `: ${response.errors.slice(0, 3).join("; ").slice(0, 800)}`
+          : ".";
+      progress(stage[kind], output ? `${kind} specialist completed and validated.` : `${kind} specialist failed validation${failureDetail}`, output ? "complete" : "failed");
       return { kind, response, attempts, output, errors: checked?.errors };
     }));
     const cursorIsolationFailure = adapter.id === "cursor"
@@ -694,15 +760,15 @@ export class AnalysisService {
     }
     const failed = responses.find((item) => !item.output);
     const allResponses = [anchorResponse, ...responses.flatMap((item) => item.attempts)];
-    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
+    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
     progress("assembling", "Deterministically assembling anchored specialist output.", "running");
     const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"walkthrough" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
     const reportedModel = [request.model, ...allResponses.map((item) => item.model)].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim();
     const assembled = assembleAnchoredDocument(request, anchor, specialistMap, reportedModel);
-    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: reportedModel, errors: assembled.errors };
+    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel, errors: assembled.errors };
     progress("assembling", "Deterministic assembly completed.", "complete");
     progress("validating", "Validating deterministic anchored walkthrough assembly.", "running");
-    return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), model: reportedModel };
+    return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel };
     } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); await coordinatorServer.close(); }
   }
   private async runLegacyBatchedAnalysis(
@@ -772,12 +838,12 @@ export class AnalysisService {
     await Promise.all(Array.from({ length: Math.min(MAX_BATCH_CONCURRENCY, plan.chunks.length) }, worker));
     const failed = responses.find((response) => response.status !== "ready" || !response.mapOutput);
     if (signal.aborted || failed || outputs.length !== plan.chunks.length)
-      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
+      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
     const ordered = plan.chunks.map((task) => outputs.find((output) => output.taskId === task.id)!);
     const expectedUnits = plan.chunks.flatMap((task) => task.files.map((file) => `${file.path}:${file.segment}`)).sort();
     const actualUnits = ordered.flatMap((output) => output.observations.map((item) => `${item.path}:${item.segment}`)).sort();
     if (expectedUnits.length !== actualUnits.length || expectedUnits.some((unit, index) => unit !== actualUnits[index]))
-      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: ["Validated maps did not cover planned evidence units exactly once."] };
+      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: ["Validated maps did not cover planned evidence units exactly once."] };
     await writeBatchJson(directory, "map-results.json", ordered);
     const reduceScope = resolve(directory, "batches", "reduce");
     await mkdir(reduceScope, { recursive: true });
@@ -788,12 +854,12 @@ export class AnalysisService {
     if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
-    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
-    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
     progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final walkthrough." : `Reducer ${reduced.status}.`);
-    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs] };
+    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs], diagnosticEvents: [...responses.flatMap((response) => response.diagnosticEvents ?? []), ...(reduced.diagnosticEvents ?? [])] };
     return timedOut
       ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }
       : combined;

@@ -172,6 +172,7 @@ describe('analysis service reproducibility metadata', () => {
       const result = await service.startAnalysis({ repository: 'example/backend', pullNumber: 42, baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40), provider: 'claude', model: selectedModel })
 
       expect(result.status).toBe('ready')
+      expect(result.diagnosticEvents?.some((event) => event.event === 'analysis.completed')).toBe(true)
       expect(result.document?.run).toMatchObject({
         id: result.runId,
         createdAt: result.manifest.createdAt,
