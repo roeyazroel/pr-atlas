@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/roeyazroel/pr-atlas/compare/v0.8.0...v0.8.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* check for updates through authenticated gh api ([e60be43](https://github.com/roeyazroel/pr-atlas/commit/e60be433d589d8b3ff7ba0c1871c1819fd9942ce))
+* check for updates through authenticated gh api ([3bce4e0](https://github.com/roeyazroel/pr-atlas/commit/3bce4e01e11b147f326ee6ae3c762c30e11e1809))
+
 ## [0.8.0](https://github.com/roeyazroel/pr-atlas/compare/v0.7.0...v0.8.0) (2026-08-09)
 
 
