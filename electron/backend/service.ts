@@ -42,6 +42,7 @@ import { buildBatchPlan, buildBatchMapValidatorScript, buildBatchReducerValidato
 import { buildBundledValidatorCommand, buildWindowsValidatorLauncher, validatorLauncherName } from "./validator-command.js";
 import { AtlasApiCoordinator, startAtlasCoordinator } from "./coordinator.js";
 import type { AnchoredSpecialistOutput, AnchoredTaskOutput, SemanticAnchor } from "../../shared/contracts.js";
+import { aggregateProviderAccounting } from "./costs.js";
 
 function inside(root: string, target: string): boolean {
   const result = relative(root, target);
@@ -329,6 +330,7 @@ export class AnalysisService {
         "Inspecting collected source context and deterministic evidence.",
       );
       const response = await this.runProviderAnalysis(adapter, request, worktree, inputDirectory, directory, controller.signal, progress);
+      if (response.accounting) manifest.accounting = response.accounting;
       log(response.status === "ready" ? "info" : "warn", "provider.completed", `Provider analysis completed with status ${response.status}.`, {
         stage: "generating",
         durationMs: Date.now() - startedAt,
@@ -724,12 +726,13 @@ export class AnalysisService {
     if (adapter.id === "cursor" && !signal.aborted && !timedOut && !execution.signal.aborted && anchorResponse.errors?.includes(CURSOR_COORDINATOR_ISOLATION_FAILED)) {
       progress("anchoring", "Cursor coordinator instruction isolation was unavailable; Anchor stopped before legacy fallback.", "failed");
       progress("generating", "Cursor coordinator instruction isolation was unavailable; using legacy analysis.");
-      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+      const fallback = await this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+      return { ...fallback, accounting: aggregateProviderAccounting([anchorResponse.accounting, fallback.accounting]) };
     }
     const anchorValidation = anchorResponse.status === "ready" && taskOutputFrom(anchorResponse)
       ? validateAnchoredTaskOutput(redactProviderValue(taskOutputFrom(anchorResponse)), anchorTask) : undefined;
     const anchor = anchorValidation?.valid ? anchorValidation.output as SemanticAnchor : undefined;
-    if (!anchor) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (anchorResponse.status === "ready" ? "invalid" : anchorResponse.status), rawOutput: anchorResponse.rawOutput, logs: anchorResponse.logs, errors: timedOut ? ["Analysis timed out before semantic anchor completed."] : anchorResponse.errors ?? anchorValidation?.errors ?? ["Semantic anchor was missing."] };
+    if (!anchor) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (anchorResponse.status === "ready" ? "invalid" : anchorResponse.status), rawOutput: anchorResponse.rawOutput, logs: anchorResponse.logs, accounting: aggregateProviderAccounting([anchorResponse.accounting]), errors: timedOut ? ["Analysis timed out before semantic anchor completed."] : anchorResponse.errors ?? anchorValidation?.errors ?? ["Semantic anchor was missing."] };
     await writeAnchoredJson(directory, "anchor.output.json", anchor);
     progress("anchoring", "Semantic anchor completed and validated.", "complete");
     const tasks = ["review", "tests-risks", "flows"] as const;
@@ -776,19 +779,20 @@ export class AnalysisService {
     if (cursorIsolationFailure && !signal.aborted && !timedOut && !execution.signal.aborted) {
       progress(stage[cursorIsolationFailure.kind], `Cursor coordinator instruction isolation was unavailable; ${cursorIsolationFailure.kind} stopped before legacy fallback.`, "failed");
       progress("generating", `Cursor coordinator instruction isolation was unavailable during ${cursorIsolationFailure.kind}; using legacy analysis.`);
-      return this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+      const fallback = await this.runLegacyBatchedAnalysis(adapter, request, worktree, inputDirectory, directory, signal, progress);
+      return { ...fallback, accounting: aggregateProviderAccounting([anchorResponse.accounting, ...responses.flatMap((item) => item.attempts.map((attempt) => attempt.accounting)), fallback.accounting]) };
     }
     const failed = responses.find((item) => !item.output);
     const allResponses = [anchorResponse, ...responses.flatMap((item) => item.attempts)];
-    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
+    if (signal.aborted || timedOut || failed) return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.response.status === "ready" ? "invalid" : failed?.response.status ?? "failed"), rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(allResponses.map((item) => item.accounting)), model: allResponses.map((item) => item.model).find((value): value is string => typeof value === "string" && value.trim().length > 0), errors: timedOut ? ["Analysis timed out before all anchored specialists completed."] : failed?.response.errors ?? failed?.errors ?? ["An anchored specialist did not complete."] };
     progress("assembling", "Deterministically assembling anchored specialist output.", "running");
     const specialistMap = Object.fromEntries(responses.map((item) => [item.kind, item.output])) as Record<"review" | "tests-risks" | "flows", AnchoredSpecialistOutput>;
     const reportedModel = [request.model, ...allResponses.map((item) => item.model)].find((value): value is string => typeof value === "string" && value.trim().length > 0)?.trim();
     const assembled = assembleAnchoredDocument(request, anchor, specialistMap, reportedModel);
-    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel, errors: assembled.errors };
+    if (!assembled.valid || !assembled.document) return { status: "invalid", rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(allResponses.map((item) => item.accounting)), model: reportedModel, errors: assembled.errors };
     progress("assembling", "Deterministic assembly completed.", "complete");
     progress("validating", "Validating deterministic anchored review assembly.", "running");
-    return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), model: reportedModel };
+    return { status: "ready", document: assembled.document, rawOutput: allResponses.map((item) => item.rawOutput).join("\n"), logs: allResponses.flatMap((item) => item.logs), diagnosticEvents: allResponses.flatMap((item) => item.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(allResponses.map((item) => item.accounting)), model: reportedModel };
     } finally { if (timeout) clearTimeout(timeout); signal.removeEventListener("abort", abort); await coordinatorServer.close(); }
   }
   private async runLegacyBatchedAnalysis(
@@ -858,12 +862,12 @@ export class AnalysisService {
     await Promise.all(Array.from({ length: Math.min(MAX_BATCH_CONCURRENCY, plan.chunks.length) }, worker));
     const failed = responses.find((response) => response.status !== "ready" || !response.mapOutput);
     if (signal.aborted || failed || outputs.length !== plan.chunks.length)
-      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
+      return { status: signal.aborted ? "cancelled" : timedOut ? "failed" : (failed?.status ?? "failed"), rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(responses.map((response) => response.accounting)), errors: timedOut ? ["Analysis timed out before all batches completed."] : failed?.errors ?? ["A map batch did not complete."] };
     const ordered = plan.chunks.map((task) => outputs.find((output) => output.taskId === task.id)!);
     const expectedUnits = plan.chunks.flatMap((task) => task.files.map((file) => `${file.path}:${file.segment}`)).sort();
     const actualUnits = ordered.flatMap((output) => output.observations.map((item) => `${item.path}:${item.segment}`)).sort();
     if (expectedUnits.length !== actualUnits.length || expectedUnits.some((unit, index) => unit !== actualUnits[index]))
-      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: ["Validated maps did not cover planned evidence units exactly once."] };
+      return { status: "invalid", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(responses.map((response) => response.accounting)), errors: ["Validated maps did not cover planned evidence units exactly once."] };
     await writeBatchJson(directory, "map-results.json", ordered);
     const reduceScope = resolve(directory, "batches", "reduce");
     await mkdir(reduceScope, { recursive: true });
@@ -874,12 +878,12 @@ export class AnalysisService {
     if (process.platform === "win32") await writeFile(resolve(reduceScope, reduceLauncherFile), buildWindowsValidatorLauncher(reduceValidatorFile), "utf8");
     await writeFile(resolve(reduceScope, "request.json"), JSON.stringify({ repository: request.repository, pullNumber: request.pullNumber, baseSha: request.baseSha, headSha: request.headSha }), "utf8");
     await Promise.all(["pull-request.json", "review-threads.json", "reviews.json", "issue-comments.json", "review-comments.json"].map(async (name) => writeFile(resolve(reduceScope, name), await readFile(resolve(inputDirectory, name), "utf8"), "utf8")));
-    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(responses.map((response) => response.accounting)), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     progress("validating", `Reducer started · combining ${ordered.length} validated map batches.`);
-    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
+    if (execution.signal.aborted) return { status: signal.aborted ? "cancelled" : "failed", rawOutput: responses.map((response) => response.rawOutput).join("\n"), logs: responses.flatMap((response) => response.logs), diagnosticEvents: responses.flatMap((response) => response.diagnosticEvents ?? []), accounting: aggregateProviderAccounting(responses.map((response) => response.accounting)), errors: timedOut ? ["Analysis timed out before the reducer started."] : ["Analysis was cancelled before the reducer started."] };
     const reduced = await adapter.analyze(request, reduceScope, reduceScope, execution.signal, () => undefined, request.model, { kind: "reduce", id: "reduce", total: plan.chunks.length, validatorRuntime: process.execPath, validatorCommand: buildBundledValidatorCommand(reduceValidatorFile, process.platform, reduceLauncherFile) });
     progress("validating", reduced.status === "ready" ? "Reducer completed · validating the final review document." : `Reducer ${reduced.status}.`);
-    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs], diagnosticEvents: [...responses.flatMap((response) => response.diagnosticEvents ?? []), ...(reduced.diagnosticEvents ?? [])] };
+    const combined = { ...reduced, rawOutput: [...responses.map((response) => response.rawOutput), reduced.rawOutput].join("\n"), logs: [...responses.flatMap((response) => response.logs), ...reduced.logs], diagnosticEvents: [...responses.flatMap((response) => response.diagnosticEvents ?? []), ...(reduced.diagnosticEvents ?? [])], accounting: aggregateProviderAccounting([...responses.map((response) => response.accounting), reduced.accounting]) };
     return timedOut
       ? { ...combined, status: "failed", document: undefined, errors: ["Analysis timed out before the reducer completed."] }
       : combined;

@@ -157,6 +157,27 @@ function graph(id: Graph["id"]): Graph {
 }
 
 describe("analysis store", () => {
+  it("round-trips safe optional accounting while retaining manifests created before accounting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
+    const store = new AnalysisStore(root);
+    const headSha = "b".repeat(40);
+    const priced = store.runDirectory("example/backend", 481, headSha, "run-priced");
+    const legacy = store.runDirectory("example/backend", 481, headSha, "run-legacy");
+    await store.writeManifest(priced, {
+      ...run("run-priced", headSha),
+      accounting: {
+        usage: { inputTokens: 120, cachedInputTokens: 20, outputTokens: 10 },
+        cost: { kind: "estimated", amountUsd: 0.01, maxAmountUsd: 0.02, model: "gpt-5.4", pricingSource: "OpenAI API pricing", pricingVersion: "2026-08-10", pricingAsOf: "2026-08-10" },
+      },
+    });
+    await store.writeManifest(legacy, run("run-legacy", headSha));
+
+    await expect(store.listRuns("example/backend", 481, headSha)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId: "run-priced", accounting: expect.objectContaining({ usage: { inputTokens: 120, cachedInputTokens: 20, outputTokens: 10 }, cost: expect.objectContaining({ maxAmountUsd: 0.02 }) }) }),
+      expect.objectContaining({ runId: "run-legacy" }),
+    ]));
+  });
+
   it("persists and lists runs scoped to one repository, PR, and head SHA", async () => {
     const root = await mkdtemp(join(tmpdir(), "pr-atlas-store-"));
     const store = new AnalysisStore(root);

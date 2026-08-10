@@ -178,10 +178,28 @@ export interface AgentAnalysisResult {
   diagnosticEvents?: AnalysisDiagnosticEvent[];
   model?: string;
   errors?: string[];
+  /** Sanitized provider usage/cost metadata; raw provider output never crosses IPC. */
+  accounting?: ProviderAccounting;
   /** Validated, provider-neutral intermediate result for anchored large-PR work. */
   taskOutput?: AnchoredTaskOutput;
   /** Legacy map-stage result. Kept so the selectable compatibility engine remains executable. */
   mapOutput?: { taskId: string; observations: Array<{ path: string; segment: number; summary: string; evidence: ProviderEvidenceReference[]; changeGroups: string[]; tests: string[]; flows: string[]; limitations: string[] }> };
+}
+
+export interface ProviderUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+}
+export type ProviderCost =
+  | { kind: "reported"; amountUsd: number; model?: string; incomplete?: boolean }
+  | { kind: "estimated"; amountUsd: number; /** Upper bound when request-level pricing boundaries are unavailable. */ maxAmountUsd?: number; model: string; pricingSource: string; pricingVersion: string; pricingAsOf: string; incomplete?: boolean }
+  | { kind: "unavailable"; reason: string };
+export interface ProviderAccounting {
+  usage?: ProviderUsage;
+  cost?: ProviderCost;
 }
 
 export type AnchoredTaskKind = "anchor" | "review" | "tests-risks" | "flows";
@@ -489,6 +507,8 @@ export interface AnalysisManifest {
   completedAt?: string;
   schemaVersion?: string;
   model?: string;
+  /** Optional accounting metadata; absent in historical manifests. */
+  accounting?: ProviderAccounting;
   runtimeVersion?: string;
   lastProgress?: AnalysisProgressEvent;
   activity?: AnalysisProgressEvent[];

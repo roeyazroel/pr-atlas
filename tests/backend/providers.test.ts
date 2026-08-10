@@ -523,6 +523,20 @@ describe("coordinator provider bootstrap", () => {
     expect(malformed.document).toBeUndefined();
   });
 
+  it("parses a terminal document and usage line from the bounded tail after raw-output cap", async () => {
+    const adapter: AgentAdapter = { id: "codex", displayName: "Test", detect: async () => ({ provider: "codex", displayName: "Test", executable: "test", installed: true, capabilities: adapterCapabilities }), getCapabilities: () => adapterCapabilities, analyze: vi.fn() };
+    const document = minimalWalkthrough();
+    document.summary = { ...(document.summary as Record<string, unknown>), intent: "t".repeat(1_100_000) };
+    const walkthrough = JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(document) } });
+    const terminal = JSON.stringify({ type: "turn.completed", model: "gpt-5.6", usage: { input_tokens: 123, output_tokens: 4, reasoning_output_tokens: 3 } });
+    const raw = `${JSON.stringify({ type: "thread.started", padding: "🙂".repeat(Math.ceil((MAX_PROVIDER_OUTPUT + 4096) / 4)) })}\n${walkthrough}\n${terminal}`;
+    const response = await runProviderProcess(adapter, { run: vi.fn() }, fakeSpawn(raw, []), "test", [], requestFor("codex"), "/worktree", undefined, progress, { kind: "reduce", id: "reduce-001", total: 1 });
+    expect(validateReviewDocument(response.document).valid).toBe(true);
+    expect(response.document?.summary.intent).toHaveLength(1_100_000);
+    expect(Buffer.byteLength(response.rawOutput, "utf8")).toBeLessThanOrEqual(MAX_PROVIDER_OUTPUT);
+    expect(response.accounting).toMatchObject({ usage: { inputTokens: 123, outputTokens: 4, reasoningTokens: 3 }, cost: { kind: "estimated", model: "gpt-5.6" } });
+  });
+
   it("boots Codex and Claude with only the task-scoped Atlas MCP and strict discovery", async () => {
     const codexCalls: SpawnCall[] = [];
     const codex = new CodexAdapter({ run: vi.fn(async () => ({ stdout: "codex 1.2.3" })) }, fakeSpawn("{}", codexCalls));
@@ -1286,7 +1300,8 @@ describe("provider-neutral agent adapters", () => {
       "/input",
       "--no-session-persistence",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
       "--json-schema",
       expect.any(String),
     ]);

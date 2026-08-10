@@ -1,4 +1,4 @@
-import type { AgentProvider, AnalysisRunSummary, Graph as ContractGraph, GraphNode as ContractGraphNode, GraphEdge as ContractGraphEdge, ReviewDocument } from '../shared/contracts';
+import type { AgentProvider, AnalysisRunSummary, Graph as ContractGraph, GraphNode as ContractGraphNode, GraphEdge as ContractGraphEdge, ProviderAccounting, ReviewDocument } from '../shared/contracts';
 
 export type ReviewRelationship = 'primary' | 'supporting' | 'adjacent' | 'independent';
 export interface ReviewStory {
@@ -209,6 +209,7 @@ export interface RunHistory {
   model: string;
   schemaVersion?: string;
   statusLabel?: string;
+  accounting?: ProviderAccounting;
 }
 
 export interface AnalysisStage {

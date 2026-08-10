@@ -585,6 +585,53 @@ describe('live Electron renderer contract', () => {
     expect(api.openEvidence).toHaveBeenLastCalledWith(repository.fullName, historicalSummary.headSha, 'electron/backend/store.ts', undefined)
   })
 
+  it('renders secondary, accessible run usage for reported, estimated, unavailable, and legacy manifests', async () => {
+    const user = userEvent.setup()
+    const api = installLiveApi()
+    const reported: AnalysisRunSummary = {
+      ...runSummary,
+      accounting: { usage: { inputTokens: 120 }, cost: { kind: 'reported', amountUsd: 1.84 } },
+    }
+    const estimated: AnalysisRunSummary = {
+      ...runSummary,
+      runId: 'run-estimated',
+      provider: 'codex',
+      model: 'gpt-5.6',
+      accounting: { usage: { inputTokens: 300 }, cost: { kind: 'estimated', amountUsd: 1.84, model: 'gpt-5.6', pricingSource: 'OpenAI API pricing', pricingVersion: '2026-08-10', pricingAsOf: '2026-08-10' } },
+    }
+    const unavailable: AnalysisRunSummary = {
+      ...runSummary,
+      runId: 'run-unavailable',
+      provider: 'cursor',
+      model: 'cursor-grok-4.5-high-fast',
+      accounting: { usage: { inputTokens: 12 }, cost: { kind: 'unavailable', reason: 'Cursor Agent does not expose model-specific pricing.' } },
+    }
+    const legacy: AnalysisRunSummary = {
+      ...runSummary,
+      runId: 'run-legacy',
+      model: 'legacy-model',
+    }
+    const usageOnly: AnalysisRunSummary = {
+      ...runSummary,
+      runId: 'run-usage-only',
+      model: 'usage-only-model',
+      accounting: { usage: { inputTokens: 9 } },
+    }
+    vi.mocked(api.listAnalysisRuns).mockResolvedValue([reported, estimated, unavailable, legacy, usageOnly])
+
+    render(<App />)
+
+    await user.click(await screen.findByRole('button', { name: /analysis details/i }))
+    expect(screen.getByText('Usage')).toBeInTheDocument()
+    expect(screen.getByLabelText('Provider-reported cost estimate; billing may differ.')).toHaveTextContent('$1.84 provider estimate')
+    expect(screen.getByLabelText(/API-equivalent estimate from OpenAI API pricing/i)).toHaveTextContent('~$1.84 API estimate')
+    expect(screen.getByLabelText('Cursor Agent does not expose model-specific pricing.')).toHaveTextContent('12 input tokens · Cost unavailable')
+    expect(screen.getByLabelText('Provider reported usage without cost metadata.')).toHaveTextContent('9 input tokens · Cost unavailable')
+    const legacyRow = screen.getByText('legacy-model').closest('.history-row')
+    expect(legacyRow?.querySelector('.run-cost')).toHaveTextContent('')
+    expect(legacyRow?.querySelector('.run-cost')).not.toHaveAttribute('aria-label')
+  })
+
   it('opens exact evidence in the managed worktree without checkout mapping controls', async () => {
     const user = userEvent.setup()
     const api = installLiveApi()

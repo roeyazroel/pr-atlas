@@ -15,6 +15,7 @@ import {
   type AgentProvider,
   type AnalysisProgressEvent,
   type AnalysisManifest,
+  type ProviderAccounting,
   type AnalysisRunConfig,
   type AnalysisRunResult,
   type AnalysisRunSummary,
@@ -79,6 +80,32 @@ function boundedTextExcerpt(value: string, maximum = 128 * 1024): string {
   if (value.length <= maximum) return value;
   const half = Math.floor((maximum - 64) / 2);
   return `${value.slice(0, half)}\n\n[... provider output truncated ...]\n\n${value.slice(-half)}`;
+}
+function safeAccounting(value: unknown): ProviderAccounting | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const safeNumber = (candidate: unknown): number | undefined =>
+    typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0
+      ? candidate
+      : undefined;
+  const rawUsage = raw.usage && typeof raw.usage === "object"
+    ? raw.usage as Record<string, unknown>
+    : undefined;
+  const usage = rawUsage
+    ? Object.fromEntries(Object.entries(rawUsage)
+        .filter(([key, candidate]) => ["inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens", "reasoningTokens"].includes(key) && safeNumber(candidate) !== undefined)
+        .map(([key, candidate]) => [key, Math.floor(safeNumber(candidate)!)])
+      )
+    : {};
+  const rawCost = raw.cost && typeof raw.cost === "object" ? raw.cost as Record<string, unknown> : undefined;
+  let cost: ProviderAccounting["cost"];
+  if (rawCost?.kind === "reported" && safeNumber(rawCost.amountUsd) !== undefined)
+    cost = { kind: "reported", amountUsd: safeNumber(rawCost.amountUsd)!, ...(typeof rawCost.model === "string" ? { model: rawCost.model.slice(0, 200) } : {}), ...(rawCost.incomplete === true ? { incomplete: true } : {}) };
+  else if (rawCost?.kind === "estimated" && safeNumber(rawCost.amountUsd) !== undefined && typeof rawCost.model === "string" && typeof rawCost.pricingSource === "string" && typeof rawCost.pricingVersion === "string" && typeof rawCost.pricingAsOf === "string")
+    cost = { kind: "estimated", amountUsd: safeNumber(rawCost.amountUsd)!, model: rawCost.model.slice(0, 200), pricingSource: rawCost.pricingSource.slice(0, 200), pricingVersion: rawCost.pricingVersion.slice(0, 100), pricingAsOf: rawCost.pricingAsOf.slice(0, 100), ...(safeNumber(rawCost.maxAmountUsd) !== undefined && safeNumber(rawCost.maxAmountUsd)! >= safeNumber(rawCost.amountUsd)! ? { maxAmountUsd: safeNumber(rawCost.maxAmountUsd)! } : {}), ...(rawCost.incomplete === true ? { incomplete: true } : {}) };
+  else if (rawCost?.kind === "unavailable" && typeof rawCost.reason === "string")
+    cost = { kind: "unavailable", reason: rawCost.reason.slice(0, 500) };
+  return Object.keys(usage).length || cost ? { ...(Object.keys(usage).length ? { usage } : {}), ...(cost ? { cost } : {}) } as ProviderAccounting : undefined;
 }
 export class AnalysisStore {
   readonly root: string;
@@ -871,6 +898,7 @@ export class AnalysisStore {
           ? (manifest.effort as AnalysisManifest["effort"])
           : undefined;
       const config = validConfig(manifest.config);
+      const accounting = safeAccounting(manifest.accounting);
       const lastProgress = safeProgressEvent(
         manifest.lastProgress,
         manifest.runId,
@@ -901,6 +929,7 @@ export class AnalysisStore {
         ...(typeof manifest.model === "string"
           ? { model: manifest.model }
           : {}),
+        ...(accounting ? { accounting } : {}),
         ...(effort ? { effort } : {}),
         ...(typeof manifest.runtimeVersion === "string"
           ? { runtimeVersion: manifest.runtimeVersion.slice(0, 200) }
