@@ -1491,6 +1491,7 @@ function normalizeProviderSchema(value: unknown): unknown {
     if (
       key === "$id" ||
       key === "additionalProperties" ||
+      key === "not" ||
       key === "required" ||
       key === "properties" ||
       key === "items"

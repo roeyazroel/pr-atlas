@@ -143,6 +143,19 @@ describe("provider structured-output schema", () => {
     }
   });
 
+  it("removes Ajv-only legacy rejection keywords from the Codex schema", () => {
+    const schema = schemaForProvider() as Record<string, unknown>;
+    const walk = (value: unknown): void => {
+      if (Array.isArray(value)) return value.forEach(walk);
+      if (!value || typeof value !== "object") return;
+      const node = value as Record<string, unknown>;
+      expect(node.not).toBeUndefined();
+      Object.values(node).forEach(walk);
+    };
+
+    walk(schema);
+  });
+
   it("requires canonical stories in schema 2 provider output", () => {
     const schema = schemaForProvider() as Record<string, unknown>;
     const propertiesAt = (path: string[]): Record<string, unknown> => {
