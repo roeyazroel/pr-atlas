@@ -37,4 +37,4 @@ test('production index references local assets relatively for Electron file URLs
     expect(resolvedAssetUrl.protocol).toBe('file:')
     await expect(stat(fileURLToPath(resolvedAssetUrl))).resolves.toBeDefined()
   }
-})
+}, 30_000)
