@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/roeyazroel/pr-atlas/compare/v0.9.0...v0.9.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* stabilize release validation ([2df0991](https://github.com/roeyazroel/pr-atlas/commit/2df0991d857fe8b67b747a1f39f23ea580530d02))
+
 ## [0.9.0](https://github.com/roeyazroel/pr-atlas/compare/v0.8.1...v0.9.0) (2026-08-23)
 
 
