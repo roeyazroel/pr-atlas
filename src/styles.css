@@ -4031,6 +4031,30 @@ button:disabled {
     Menlo,
     monospace;
 }
+.pierre-evidence-diff {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  margin: 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+.pierre-evidence-loading {
+  padding: 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.evidence-code-accessible {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .evidence-code-section + .evidence-code-section {
   border-top: 8px solid var(--paper);
 }

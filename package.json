@@ -23,6 +23,7 @@
     "typecheck:electron": "tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
+    "@pierre/diffs": "^1.3.5",
     "ajv": "^8.20.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

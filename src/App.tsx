@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -87,6 +87,10 @@ import {
   type UpdateDownloadProgress,
   type ReviewDocument,
 } from "../shared/contracts";
+
+const PierrePatchDiff = lazy(async () => ({
+  default: (await import("@pierre/diffs/react")).PatchDiff,
+}));
 
 type View =
   | "overview"
@@ -3875,7 +3879,10 @@ function App() {
                       </div>
                     );
                   })()}
-                  <EvidenceCodeView detail={evidenceDetail} />
+                  <EvidenceCodeView
+                    detail={evidenceDetail}
+                    theme={resolvedTheme}
+                  />
                   <button
                     className="secondary-button"
                     onClick={() => {
@@ -5955,80 +5962,132 @@ function EmptyAnalysis() {
   );
 }
 
-function EvidenceCodeView({ detail }: { detail: EvidenceDetail }) {
+const PIERRE_EVIDENCE_FILENAME = "pr-atlas-evidence.txt";
+
+function buildEvidencePatch(detail: EvidenceDetail): string {
+  const filename = PIERRE_EVIDENCE_FILENAME;
+  const hunks = detail.hunks.flatMap(({ header, content }) => [
+    header.trim(),
+    content.replace(/\r\n/g, "\n").replace(/\n$/, ""),
+  ]);
+  return [
+    `diff --git a/${filename} b/${filename}`,
+    `--- a/${filename}`,
+    `+++ b/${filename}`,
+    ...hunks,
+    "",
+  ].join("\n");
+}
+
+function EvidenceCodeView({
+  detail,
+  theme,
+}: {
+  detail: EvidenceDetail;
+  theme: ResolvedTheme;
+}) {
+  const showPierreDiff =
+    detail.source === "analysis-input" && detail.hunks.length > 0;
+  const pierrePatch = showPierreDiff ? buildEvidencePatch(detail) : null;
   const sections = detail.hunks.length
     ? detail.hunks
     : [{ header: "", content: detail.content }];
   return (
-    <div
-      className="evidence-code"
-      role="table"
-      aria-label="Unified evidence diff"
-    >
-      {sections.map((section, sectionIndex) => (
-        <section
-          className="evidence-code-section"
-          role="rowgroup"
-          key={`${section.header}-${sectionIndex}`}
-        >
-          {section.header && (
-            <div className="evidence-hunk-header" role="heading" aria-level={5}>
-              {section.header}
-            </div>
-          )}
-          <div className="evidence-code-lines">
-            {buildEvidenceCodeLines(
-              section.content,
-              detail.source,
-              section.header || undefined,
-            ).map((line, lineIndex) => (
-              <div
-                className={`evidence-code-line evidence-line-${line.kind} ${line.kind === "source" ? "evidence-line-context" : ""}`}
-                data-line-kind={line.kind}
-                role="row"
-                aria-label={`${line.kind === "addition" ? "Added" : line.kind === "deletion" ? "Removed" : line.kind === "source" ? "Source" : "Context"} line ${line.newLine ?? line.oldLine ?? ""}: ${line.text}`}
-                key={`${sectionIndex}-${lineIndex}`}
-              >
-                <span
-                  className="evidence-line-gutter"
-                  role="cell"
-                  aria-hidden="true"
-                >
-                  {line.oldLine ?? ""}
-                </span>
-                <span
-                  className="evidence-line-gutter"
-                  role="cell"
-                  aria-hidden="true"
-                >
-                  {line.newLine ?? ""}
-                </span>
-                <span
-                  className="evidence-line-marker"
-                  role="cell"
-                  aria-hidden={line.kind === "context" || line.kind === "source"}
-                >
-                  {line.kind === "addition"
-                    ? "+"
-                    : line.kind === "deletion"
-                      ? "−"
-                      : " "}
-                </span>
-                {line.kind === "addition" && (
-                  <span className="sr-only">Added line</span>
-                )}
-                {line.kind === "deletion" && (
-                  <span className="sr-only">Removed line</span>
-                )}
-                <span role="cell">
-                  <code>{line.text || " "}</code>
-                </span>
+    <>
+      {pierrePatch && (
+        <div className="pierre-evidence-diff" data-diff-renderer="diffs.com">
+          <Suspense
+            fallback={
+              <div className="pierre-evidence-loading">Rendering diff…</div>
+            }
+          >
+            <PierrePatchDiff
+              patch={pierrePatch}
+              disableWorkerPool
+              options={{
+                theme: { light: "pierre-light", dark: "pierre-dark" },
+                themeType: theme,
+                diffStyle: "unified",
+                diffIndicators: "classic",
+                lineDiffType: "word",
+                disableLineNumbers: false,
+                disableFileHeader: true,
+                overflow: "scroll",
+              }}
+            />
+          </Suspense>
+        </div>
+      )}
+      <div
+        className={`evidence-code${pierrePatch ? " evidence-code-accessible" : ""}`}
+        role="table"
+        aria-label="Unified evidence diff"
+      >
+        {sections.map((section, sectionIndex) => (
+          <section
+            className="evidence-code-section"
+            role="rowgroup"
+            key={`${section.header}-${sectionIndex}`}
+          >
+            {section.header && (
+              <div className="evidence-hunk-header" role="heading" aria-level={5}>
+                {section.header}
               </div>
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
+            )}
+            <div className="evidence-code-lines">
+              {buildEvidenceCodeLines(
+                section.content,
+                detail.source,
+                section.header || undefined,
+              ).map((line, lineIndex) => (
+                <div
+                  className={`evidence-code-line evidence-line-${line.kind} ${line.kind === "source" ? "evidence-line-context" : ""}`}
+                  data-line-kind={line.kind}
+                  role="row"
+                  aria-label={`${line.kind === "addition" ? "Added" : line.kind === "deletion" ? "Removed" : line.kind === "source" ? "Source" : "Context"} line ${line.newLine ?? line.oldLine ?? ""}: ${line.text}`}
+                  key={`${sectionIndex}-${lineIndex}`}
+                >
+                  <span
+                    className="evidence-line-gutter"
+                    role="cell"
+                    aria-hidden="true"
+                  >
+                    {line.oldLine ?? ""}
+                  </span>
+                  <span
+                    className="evidence-line-gutter"
+                    role="cell"
+                    aria-hidden="true"
+                  >
+                    {line.newLine ?? ""}
+                  </span>
+                  <span
+                    className="evidence-line-marker"
+                    role="cell"
+                    aria-hidden={line.kind === "context" || line.kind === "source"}
+                  >
+                    {line.kind === "addition"
+                      ? "+"
+                      : line.kind === "deletion"
+                        ? "−"
+                        : " "}
+                  </span>
+                  {line.kind === "addition" && (
+                    <span className="sr-only">Added line</span>
+                  )}
+                  {line.kind === "deletion" && (
+                    <span className="sr-only">Removed line</span>
+                  )}
+                  <span role="cell">
+                    <code>{line.text || " "}</code>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+    </>
   );
 }
 

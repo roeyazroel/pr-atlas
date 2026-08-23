@@ -788,6 +788,7 @@ describe('live Electron renderer contract', () => {
     await user.click(screen.getByRole('button', { name: /analysis details/i }))
     await user.click(screen.getByRole('button', { name: /electron\/backend\/store\.ts/i }))
     expect(await screen.findByRole('row', { name: /Removed line 3: old/i })).toBeInTheDocument()
+    await waitFor(() => expect(globalThis.document.querySelector('.pierre-evidence-diff > diffs-container')).toBeInTheDocument())
     expect(screen.getByRole('row', { name: /Added line 4: new/i })).toBeInTheDocument()
   })
 
